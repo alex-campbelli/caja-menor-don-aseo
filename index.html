@@ -110,7 +110,15 @@ html[data-theme="dark"] ::-webkit-scrollbar-thumb{background:#37454f}
 .sb-badge{margin-left:auto;background:rgba(255,255,255,.12);color:#cfdae2;font-size:10.5px;
   padding:1px 6px;border-radius:20px;font-weight:600;font-variant-numeric:tabular-nums}
 .sb-item.active .sb-badge{background:rgba(255,255,255,.22);color:#fff}
-.sb-foot{padding:10px 12px;border-top:1px solid rgba(255,255,255,.07);color:#5c6d79;font-size:10.5px}
+.sb-foot{padding:8px 10px 10px;border-top:1px solid rgba(255,255,255,.07)}
+.sb-user{display:flex;align-items:center;gap:8px;padding:6px 7px;border-radius:8px;background:rgba(255,255,255,.045)}
+.sb-user-ic{flex:0 0 auto;width:24px;height:24px;border-radius:6px;display:grid;place-items:center;background:rgba(62,207,142,.16);color:#3ecf8e}
+.sb-user-tx{min-width:0;flex:1}
+.sb-user-co{color:#c6d3dc;font-size:11.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sb-user-es{color:#5c6d79;font-size:10px;margin-top:1px}
+.sb-salir{flex:0 0 auto;width:26px;height:26px;border:0;border-radius:6px;background:transparent;color:#7b8b97;cursor:pointer;display:grid;place-items:center}
+.sb-salir:hover{background:rgba(220,76,76,.18);color:#ff8a8a}
+.sb-ver{color:#4a5a66;font-size:10px;margin-top:7px;text-align:center}
 .main{flex:1;min-width:0;margin-left:var(--sidebar-w);display:flex;flex-direction:column}
 .topbar{height:var(--topbar-h);background:var(--surface);border-bottom:1px solid var(--border);
   display:flex;align-items:center;gap:14px;padding:0 20px;position:sticky;top:0;z-index:40}
@@ -1200,7 +1208,9 @@ const Icon = (() => {
     table: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/>',
     user: '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
     calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>',
-    layers: '<path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/>'
+    layers: '<path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/>',
+    salir: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/>',
+    nube: '<path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>'
   };
   return function (name, cls, size) {
     const p = P[name] || P.info;
@@ -1991,13 +2001,12 @@ const Validar = {
  * NUNCA poner aquí la clave `service_role`: esa sí salta todas las protecciones.
  *
  * `activa` decide con qué trabaja el sistema al abrir:
- *   false → base local de este equipo (IndexedDB)
+ *   No hay modo local: el sistema trabaja siempre contra el servidor.
  *   true  → Supabase; pide correo y contraseña al arrancar
  */
 const SUPABASE_POR_DEFECTO = {
   url: 'https://shjvygwwlhpdxdrzxapy.supabase.co',
-  anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNoanZ5Z3d3bGhwZHhkcnp4YXB5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyODcyNDQsImV4cCI6MjEwMzg2MzI0NH0.Zm4wROT3Gdi41wJtwlFm3LSOt5HB08GLbKnCMGnwi_c',
-  activa: true
+  anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNoanZ5Z3d3bGhwZHhkcnp4YXB5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyODcyNDQsImV4cCI6MjEwMzg2MzI0NH0.Zm4wROT3Gdi41wJtwlFm3LSOt5HB08GLbKnCMGnwi_c'
 };
 
 const Nube = {
@@ -2009,9 +2018,7 @@ const Nube = {
     try { guardado = JSON.parse(localStorage.getItem(this.CLAVE_PREFS) || '{}'); } catch {}
     return {
       url: (guardado.url || SUPABASE_POR_DEFECTO.url || '').replace(/\/+$/, ''),
-      anonKey: guardado.anonKey || SUPABASE_POR_DEFECTO.anonKey || '',
-      // manda lo guardado en este navegador; si no hay nada, la constante
-      activa: guardado.activa === undefined ? Boolean(SUPABASE_POR_DEFECTO.activa) : Boolean(guardado.activa)
+      anonKey: guardado.anonKey || SUPABASE_POR_DEFECTO.anonKey || ''
     };
   },
   guardarConfig(c) {
@@ -2115,7 +2122,11 @@ const Nube = {
       const j = await r.json().catch(() => ({}));
       if (/relation .* does not exist/i.test(j.message || '')) return { listo: false, motivo: 'Faltan tablas.' };
       return { listo: true, aviso: j.message };
-    } catch (e) { return { listo: false, motivo: e.message }; }
+    } catch (e) {
+      /* fetch sólo lanza cuando NO hubo respuesta: red caída, DNS, CORS.
+         Confundirlo con «faltan las tablas» manda a arreglar lo que no falla. */
+      return { listo: false, red: true, motivo: e.message };
+    }
   }
 };
 
@@ -2187,9 +2198,12 @@ class SupabaseAdapter extends StorageAdapter {
     const token = await Nube.token();
     if (!token) throw new ErrorDominio('Sesión no iniciada.', 'SIN_SESION');
     const est = await Nube.esquemaListo();
-    if (!est.listo)
-      throw new ErrorDominio('La base de datos en la nube aún no tiene las tablas. ' +
-        'Ejecute el script SQL desde Copias de seguridad › Migración. (' + (est.motivo || '') + ')', 'SIN_ESQUEMA');
+    if (!est.listo) {
+      if (est.red) throw new ErrorDominio(
+        'El servidor no respondió. Revise la conexión a internet y vuelva a intentarlo.', 'SIN_RED');
+      throw new ErrorDominio('La base de datos del servidor todavía no tiene las tablas del sistema. ' +
+        (est.motivo || ''), 'SIN_ESQUEMA');
+    }
     this.listo = true;
     return this;
   }
@@ -4648,7 +4662,7 @@ const Shell = {
         '</div>' +
         '<div class="sb-ctr" id="sbctr"></div>' +
         '<nav class="sb-nav" id="sbnav"></nav>' +
-        '<div class="sb-foot">' + esc(APP.nombre) + ' v' + APP.version + '</div>' +
+        this.pieSesion() +
       '</aside>' +
       '<div class="main">' +
         '<header class="topbar">' +
@@ -4671,6 +4685,29 @@ const Shell = {
     this.pintarNav();
     this.pintarSelectorContrato();
     this.montarBuscador();
+  },
+
+  /**
+   * Pie de la barra lateral: quién tiene la sesión abierta, y cómo cerrarla.
+   * La base es compartida, así que el correo del que está escribiendo es un
+   * dato de operación, no un adorno: va siempre visible, no dentro de un menú.
+   */
+  pieSesion() {
+    const s = Nube.sesion();
+    const version = '<div class="sb-ver">' + esc(APP.nombre) + ' v' + APP.version + '</div>';
+    if (!s) return '<div class="sb-foot">' + version + '</div>';
+    return '<div class="sb-foot">' +
+      '<div class="sb-user">' +
+        '<div class="sb-user-ic">' + Icon('nube', '', 13) + '</div>' +
+        '<div class="sb-user-tx">' +
+          '<div class="sb-user-co" title="' + attr(s.correo || '') + '">' +
+            esc(s.correo || 'Sesión iniciada') + '</div>' +
+          '<div class="sb-user-es">Sesión activa</div>' +
+        '</div>' +
+        '<button class="sb-salir" data-gact="salir" title="Cerrar sesión" aria-label="Cerrar sesión">' +
+          Icon('salir', '', 14) + '</button>' +
+      '</div>' + version +
+      '</div>';
   },
 
   /** selector de contrato: define el ámbito de TODO lo que se ve */
@@ -4769,6 +4806,19 @@ const AccionesGlobales = {
     catch (e) { manejarError(e); }
   },
   menu() { $('#sidebar').classList.toggle('open'); $('#scrim').classList.toggle('on'); },
+  async salir() {
+    const s = Nube.sesion() || {};
+    const ok = await Modal.confirmar({
+      titulo: 'Cerrar sesión',
+      html: 'Se cerrará la sesión de <b>' + esc(s.correo || '') + '</b> en este navegador.' +
+            '<br><br>La información queda guardada en el servidor: no se pierde nada al salir. ' +
+            'Para volver a entrar necesitará el correo y la contraseña.',
+      textoOk: 'Cerrar sesión'
+    });
+    if (!ok) return;
+    try { await Nube.salir(); } catch (e) { console.warn(e); }
+    location.reload();
+  },
   tema() {
     const nuevo = Prefs.get('tema') === 'dark' ? 'light' : 'dark';
     Prefs.set('tema', nuevo);
@@ -4838,6 +4888,18 @@ document.addEventListener('click', e => {
 
 function manejarError(err) {
   console.error(err);
+  /* Sin sesión no se puede leer ni escribir nada: seguir mostrando la pantalla
+     sólo produce errores en cascada. Se vuelve al acceso una única vez. */
+  if (err instanceof ErrorDominio && (err.codigo === 'SESION_EXPIRADA' || err.codigo === 'SIN_SESION')) {
+    if (!manejarError._saliendo) {
+      manejarError._saliendo = true;
+      Modal.alerta('La sesión expiró',
+        'Por seguridad la sesión se cerró. Se le pedirá el correo y la contraseña de nuevo.<br><br>' +
+        'Nada de lo que ya guardó se pierde.', 'warn');
+      setTimeout(() => location.reload(), 2600);
+    }
+    return;
+  }
   if (err instanceof ErrorValidacion) {
     Modal.alerta('No se pudo guardar',
       '<ul style="margin:0;padding-left:18px">' + err.errores.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul>', 'err');
@@ -7616,7 +7678,7 @@ const VistaExpediente = {
     cont.innerHTML =
       '<div class="page-head"><div><h1>Expediente documental</h1>' +
       '<div class="ph-sub">' + todos.length + ' documento(s) · ' + Txt.bytes(U.sumBy(todos, d => d.tamano)) +
-      ' almacenados localmente</div></div></div>' +
+      ' en el expediente</div></div></div>' +
       '<div class="flex g6 wrap mb16">' +
       Object.keys(TIPO_DOC_META).map(t => {
         const n = (porTipo.get(t) || []).length;
@@ -9801,25 +9863,27 @@ const VistaRespaldos = {
 
     cont.innerHTML =
       '<div class="page-head"><div><h1>Copias de seguridad</h1>' +
-      '<div class="ph-sub">Los datos viven en este equipo. El respaldo es su única red de seguridad.</div></div>' +
+      '<div class="ph-sub">Los datos viven en el servidor. El respaldo es su copia propia, fuera de él.</div></div>' +
       '<div class="ph-actions">' +
       '<button class="btn btn-primary btn-lg" data-act="crear">' + Icon('download', '', 15) + 'Crear respaldo completo</button>' +
       '</div></div>' +
 
-      '<div class="alert a-warn mb16">' + Icon('warn') +
-      '<div><b>Haga un respaldo con frecuencia.</b> La información se almacena en la base de datos local del ' +
-      'navegador de este equipo. Si limpia los datos del navegador, cambia de equipo o reinstala el sistema operativo, ' +
-      'la información se pierde. El archivo de respaldo (.dacm) contiene <b>todo</b>, incluidos los soportes.</div></div>' +
+      '<div class="alert a-info mb16">' + Icon('nube') +
+      '<div><b>La información está en el servidor</b>, no en este equipo: entre con su cuenta desde cualquier ' +
+      'computador y verá lo mismo. Aun así conviene un respaldo propio cada tanto — protege de un borrado por ' +
+      'equivocación, que el servidor no puede deshacer. El archivo .dacm contiene <b>todo</b>, incluidos los ' +
+      'soportes.</div></div>' +
 
       '<div class="grid g4 mb16">' +
       Comp.kpi({ label: 'Cajas menores', valor: (stats.colecciones.cajas || 0).toLocaleString('es-CO'), color: 'var(--brand-500)', icono: 'caja' }) +
       Comp.kpi({ label: 'Detalles de gasto', valor: (stats.colecciones.detalles || 0).toLocaleString('es-CO'), color: 'var(--info-500)', icono: 'list' }) +
       Comp.kpi({ label: 'Documentos', valor: (stats.colecciones.documentos || 0).toLocaleString('es-CO'), color: '#8a6d3b', icono: 'folder',
         meta: '<span>' + Txt.bytes(bytesDocs) + '</span>' }) +
-      Comp.kpi({ label: 'Espacio usado', color: '#6d4aca', icono: 'db',
-        valor: cuota ? Txt.bytes(cuota.usage) : 'n/d',
+      Comp.kpi({ label: 'Almacenamiento', color: '#6d4aca', icono: stats.nube ? 'nube' : 'db',
+        valor: cuota ? Txt.bytes(cuota.usage) : 'En el servidor',
         meta: cuota ? Comp.progreso(cuota.usage / cuota.quota * 100,
-          'de ' + Txt.bytes(cuota.quota) + ' disponibles') : '<span>Sin información</span>' }) +
+          'de ' + Txt.bytes(cuota.quota) + ' disponibles')
+          : '<span>' + esc(String(stats.url || '').replace('https://', '')) + '</span>' }) +
       '</div>' +
 
       '<div class="grid g2 mb16">' +
@@ -9848,10 +9912,10 @@ const VistaRespaldos = {
       '<p class="fs12 txt-2">Comprueba que no existan detalles huérfanos, referencias rotas, números duplicados, ' +
       'totales inconsistentes ni cajas sobre-repuestas.</p></div></div>' +
 
-      '<div class="card"><div class="card-h"><h3>Migración a infraestructura centralizada</h3></div><div class="card-b">' +
-      '<p class="fs12 txt-2 mb12">El modelo de datos está preparado para PostgreSQL/Supabase desde el primer día: ' +
-      'los identificadores son ULID en texto y ya funcionan como claves primarias y foráneas. ' +
-      'Descargue el esquema y los datos cuando decida centralizar.</p>' +
+      '<div class="card"><div class="card-h"><h3>Servidor y esquema</h3></div><div class="card-b">' +
+      '<p class="fs12 txt-2 mb12">Los datos están en PostgreSQL. Cada fila lleva un identificador ULID en texto ' +
+      'que hace de clave primaria y foránea, así que el esquema de abajo describe exactamente lo que hay ' +
+      'en el servidor. Útil para auditoría o para levantar un entorno de pruebas.</p>' +
       '<div class="flex g8 wrap">' +
       '<button class="btn" data-act="ddl">' + Icon('db', '', 14) + 'Descargar esquema SQL</button>' +
       '<button class="btn" data-act="verDdl">' + Icon('eye', '', 14) + 'Ver esquema</button>' +
@@ -10759,13 +10823,38 @@ const Pruebas = {
           } },
         { nombre: 'Los parámetros de conexión se normalizan al guardarse', fn: () => {
             const previa = localStorage.getItem(Nube.CLAVE_PREFS);
-            Nube.guardarConfig({ url: 'https://ejemplo.supabase.co/', anonKey: 'x'.repeat(60), activa: false });
+            Nube.guardarConfig({ url: 'https://ejemplo.supabase.co/', anonKey: 'x'.repeat(60) });
             const c = Nube.config();
             Pruebas.igual(c.url, 'https://ejemplo.supabase.co', 'Se normaliza la barra final');
+            Pruebas.igual(c.anonKey.length, 60, 'La clave se guarda tal cual');
             Pruebas.ok(Nube.configurada(), 'Queda configurada');
-            Pruebas.igual(c.activa, false, 'Pero no activa mientras no se elija el modo nube');
             if (previa === null) localStorage.removeItem(Nube.CLAVE_PREFS);
             else localStorage.setItem(Nube.CLAVE_PREFS, previa);
+          } },
+        { nombre: 'CRÍTICO · el arranque no tiene ninguna salida a una base local', fn: () => {
+            /* Una base local paralela produciría dos verdades: una caja escrita
+               en el equipo equivocado no existiría para el resto. Esta prueba
+               existe para que esa puerta no se reabra por descuido. */
+            const src = arrancar.toString();
+            Pruebas.ok(!/IndexedDBAdapter/.test(src), 'El arranque nunca abre la base local');
+            Pruebas.ok(/SupabaseAdapter/.test(src), 'El arranque abre la base del servidor');
+            Pruebas.ok(/pedirCredenciales/.test(src), 'Exige sesión antes de tocar los datos');
+            const acceso = Sesion.pedirCredenciales.toString();
+            Pruebas.ok(!/sesLocal/.test(acceso), 'La pantalla de acceso no tiene el enlace de trabajo local');
+            Pruebas.ok(!/sin conexión/i.test(acceso), 'Ni ofrece trabajar sin conexión');
+            Pruebas.ok(!/modo:/.test(acceso), 'Ya no devuelve un modo de trabajo: sólo hay uno');
+          } },
+        { nombre: 'La barra lateral identifica la sesión y permite cerrarla', fn: () => {
+            const previa = localStorage.getItem(Nube.CLAVE_SESION);
+            Nube.guardarSesion({ access_token: 'x', refresh_token: 'y',
+                                 expira: Date.now() + 3600000, correo: 'prueba@donaseo.co' });
+            const html = Shell.pieSesion();
+            Pruebas.ok(html.includes('prueba@donaseo.co'), 'Se ve el correo de quien está conectado');
+            Pruebas.ok(html.includes('data-gact="salir"'), 'Hay un control para cerrar sesión');
+            Pruebas.ok(typeof AccionesGlobales.salir === 'function', 'La acción de salir está registrada');
+            Nube.guardarSesion(null);
+            Pruebas.ok(!Shell.pieSesion().includes('data-gact="salir"'), 'Sin sesión no se ofrece salir');
+            if (previa) localStorage.setItem(Nube.CLAVE_SESION, previa);
           } },
         { nombre: 'Se rechazan URL y claves mal formadas', fn: async () => {
             await Pruebas.lanza(() => Nube.probar('http://algo.com', 'x'.repeat(60)), 'Debe exigir https y dominio supabase.co');
@@ -11356,8 +11445,8 @@ const VistaPruebas = {
 /* ==========================================================================
    §14b  PANTALLA DE INICIO DE SESIÓN (modo nube)
    --------------------------------------------------------------------------
-   Sólo aparece cuando el sistema trabaja contra Supabase. En modo local no
-   hay sesión: los datos viven en el equipo y no se exponen a la red.
+   El sistema trabaja únicamente contra el servidor, así que esta pantalla es
+   la puerta de entrada: sin sesión válida no se lee ni se escribe nada.
    ========================================================================== */
 const Sesion = {
   /** pide credenciales y no devuelve hasta que haya una sesión válida */
@@ -11386,8 +11475,9 @@ const Sesion = {
             '<div class="fs11 txt-3 mt12" style="text-align:center;line-height:1.5">' +
             'Conectado a <b>' + esc((cfg.url || '').replace('https://', '')) + '</b></div>' +
           '</div></div>' +
-          '<div style="text-align:center;margin-top:14px">' +
-            '<span class="link fs12" id="sesLocal">Trabajar sin conexión, con los datos de este equipo</span>' +
+          '<div class="fs11 txt-3" style="text-align:center;margin-top:14px;line-height:1.6">' +
+            'La información vive en el servidor y es la misma desde cualquier equipo. ' +
+            'Se necesita conexión a internet y una cuenta autorizada.' +
           '</div>' +
         '</div></div>';
 
@@ -11404,7 +11494,7 @@ const Sesion = {
         try {
           await Nube.entrar(correo, clave);
           localStorage.setItem('dacm.ultimoCorreo', correo);
-          resolve({ modo: 'nube' });
+          resolve();
         } catch (e) {
           err(e.message || 'No se pudo iniciar sesión.');
           btn.disabled = false; btn.innerHTML = Icon('shield', '', 15) + 'Entrar';
@@ -11414,7 +11504,6 @@ const Sesion = {
       $('#sesEntrar').onclick = entrar;
       $('#sesClave').addEventListener('keydown', e => { if (e.key === 'Enter') entrar(); });
       $('#sesCorreo').addEventListener('keydown', e => { if (e.key === 'Enter') $('#sesClave').focus(); });
-      $('#sesLocal').onclick = () => resolve({ modo: 'local' });
     });
   }
 };
@@ -11618,7 +11707,7 @@ async function arrancar() {
     '<img src="' + MARCA_DON_ASEO + '" alt="Don Aseo Ltda." ' +
     'style="width:58px;height:58px;border-radius:13px;margin:0 auto 16px;display:block;object-fit:cover">' +
     '<div style="font-weight:600;font-size:15px">Control de Caja Menor</div>' +
-    '<div style="color:var(--text-3);font-size:12.5px;margin-top:4px">Don Aseo Ltda. · Contrato COMFENALCO</div>' +
+    '<div style="color:var(--text-3);font-size:12.5px;margin-top:4px">Don Aseo Ltda.</div>' +
     '<div style="margin-top:18px"><span class="spin"></span></div>' +
     '<div id="bootMsg" style="color:var(--text-3);font-size:11.5px;margin-top:10px">Abriendo la base de datos…</div>' +
     '</div></div>';
@@ -11628,34 +11717,22 @@ async function arrancar() {
     Prefs.cargar();
     document.documentElement.setAttribute('data-theme', Prefs.get('tema') === 'dark' ? 'dark' : 'light');
 
-    /* Modo de trabajo: nube (Supabase) o local (IndexedDB).
-       En nube se exige sesión antes de tocar nada; el usuario siempre puede
-       optar por trabajar localmente desde la propia pantalla de acceso. */
-    const cfgNube = Nube.config();
-    let enNube = false;
-    if (cfgNube.activa && Nube.configurada()) {
-      msg('Conectando con la nube…');
-      let sesion = await Nube.token();
-      if (!sesion) {
-        const eleccion = await Sesion.pedirCredenciales();
-        enNube = eleccion.modo === 'nube';
-      } else enNube = true;
-    }
-    if (enNube) {
-      try {
-        db = new SupabaseAdapter();
-        await db.init();
-      } catch (e) {
-        console.warn('[nube]', e);
-        Toast.err('No se pudo abrir la base en la nube: ' + e.message + ' Se abrirá en modo local.', 10000);
-        db = new IndexedDBAdapter();
-        await db.init();
-        enNube = false;
-      }
-    } else {
-      db = new IndexedDBAdapter();
-      await db.init();
-    }
+    /* El sistema trabaja SIEMPRE contra el servidor: una sola base para todos.
+       Deliberadamente no hay copia local de trabajo ni respaldo a IndexedDB si
+       la nube falla: dos bases separadas son dos verdades distintas, y una caja
+       registrada en el equipo equivocado no existe para nadie más. Si no se
+       puede conectar se avisa y se detiene; es preferible no entrar a entrar y
+       perder lo escrito. (IndexedDB sigue en el código sólo como banco de
+       pruebas aislado del corredor de tests.) */
+    if (!Nube.configurada()) throw new ErrorDominio(
+      'Este archivo no tiene servidor configurado. Use la dirección publicada del sistema.', 'SIN_NUBE');
+
+    msg('Conectando con el servidor…');
+    if (!await Nube.token()) await Sesion.pedirCredenciales();
+
+    msg('Abriendo la base de datos…');
+    db = new SupabaseAdapter();
+    await db.init();
     msg('Preparando catálogos…');
     await Semillas.aplicar(false);
     await Cache.cargar();
@@ -11675,13 +11752,6 @@ async function arrancar() {
     Bus.on('contrato:cambio', () => { Shell.render(); Shell.refrescarConteos(); Router.resolver(); });
     Bus.on('contratos:cambio', () => Shell.pintarSelectorContrato());
 
-    /* aviso: abierto como archivo local — funciona, pero conviene advertirlo */
-    if (location.protocol === 'file:') {
-      setTimeout(() => Toast.warn(
-        'La aplicación se abrió como archivo local. Funciona, pero los datos quedan ligados a esta ruta exacta. ' +
-        'Haga respaldos con frecuencia.', 9000), 1200);
-    }
-
     /* aviso de primera vez */
     const nCajas = await db.count('cajas');
     if (nCajas === 0 && !localStorage.getItem('dacm.bienvenida')) {
@@ -11698,44 +11768,42 @@ async function arrancar() {
 
 /**
  * Pantalla de diagnóstico cuando no se puede abrir la base de datos.
- * El caso más frecuente es abrir el archivo con doble clic (protocolo file://)
- * en un navegador que restringe el almacenamiento para archivos locales.
+ * Nunca cae a una base local: da a elegir entre reintentar o cambiar de
+ * cuenta, para que jamás se escriba en un sitio distinto del servidor.
  */
 function pantallaDeFallo(app, e) {
-  const esArchivoLocal = location.protocol === 'file:';
   const mensaje = e && e.message ? e.message : String(e);
+  const sinRed = !navigator.onLine || (e && e.codigo === 'SIN_RED') ||
+                 /failed to fetch|networkerror|load failed/i.test(mensaje);
   app.innerHTML =
-    '<div style="max-width:720px;margin:60px auto;padding:24px;font-family:system-ui,sans-serif">' +
+    '<div style="max-width:640px;margin:60px auto;padding:24px;font-family:system-ui,sans-serif">' +
     '<div class="alert a-err" style="margin-bottom:18px">' + Icon('warn') +
-    '<div><b>No se pudo abrir la base de datos local.</b><br>' + esc(mensaje) + '</div></div>' +
-    (esArchivoLocal
-      ? '<div class="card"><div class="card-h"><h3>Cómo solucionarlo</h3></div><div class="card-b">' +
-        '<p style="margin-bottom:12px">El archivo se abrió con <b>doble clic</b> (dirección <code>file://</code>). ' +
-        'Algunos navegadores no permiten guardar datos a las páginas abiertas así. Tiene dos opciones:</p>' +
-        '<p style="margin-bottom:8px"><b>Opción 1 (recomendada):</b> servir la carpeta desde un servidor local. ' +
-        'Abra una ventana de comandos en la carpeta donde está <code>index.html</code> y ejecute:</p>' +
-        '<pre style="background:var(--surface-3);padding:10px;border-radius:6px;font-size:12px">' +
-        'python -m http.server 8080</pre>' +
-        '<p style="margin-bottom:12px">Luego abra <code>http://localhost:8080/index.html</code> en el navegador. ' +
-        'Los datos quedarán guardados de forma permanente en ese equipo.</p>' +
-        '<p><b>Opción 2:</b> abrir el archivo en <b>Firefox</b>, que sí permite almacenamiento a archivos locales.</p>' +
-        '<p style="margin-top:12px;color:var(--text-3);font-size:12px">Nota: la dirección desde la que abra la ' +
-        'aplicación determina dónde se guardan los datos. Use siempre la misma para no “perder” la información.</p>' +
-        '</div></div>'
-      : '<div class="card"><div class="card-b">' +
-        '<p>Verifique que el navegador permita el almacenamiento local (IndexedDB) y que no esté en modo incógnito ' +
-        'ni con los datos de sitio bloqueados.</p></div></div>') +
-    '</div>';
+    '<div><b>No se pudo conectar con el servidor.</b><br>' + esc(mensaje) + '</div></div>' +
+    '<div class="card"><div class="card-h"><h3>Qué hacer</h3></div><div class="card-b">' +
+    (sinRed
+      ? '<p class="mb12">Parece un problema de conexión. Revise que el equipo tenga internet y vuelva a ' +
+        'intentarlo. La información está a salvo en el servidor: no se pierde nada por no poder entrar ahora.</p>'
+      : '<p class="mb12">El servidor respondió con un error. Si vuelve a ocurrir, cierre la sesión y entre de ' +
+        'nuevo: puede que las credenciales hayan caducado.</p>') +
+    '<div class="flex g8 wrap">' +
+    '<button class="btn btn-primary" id="fallReintentar">' + Icon('refresh', '', 14) + 'Reintentar</button>' +
+    '<button class="btn" id="fallSalir">' + Icon('salir', '', 14) + 'Cerrar sesión</button>' +
+    '</div></div></div></div>';
+  const r = document.getElementById('fallReintentar');
+  if (r) r.onclick = () => location.reload();
+  const b = document.getElementById('fallSalir');
+  if (b) b.onclick = async () => { try { await Nube.salir(); } catch (x) {} location.reload(); };
 }
 
 function bienvenida() {
   Modal.abrir({
     titulo: 'Bienvenido al Control de Caja Menor',
-    subtitulo: 'Don Aseo Ltda. · Contrato COMFENALCO',
+    subtitulo: esc(APP.empresa) + (ContratoRepo.activo() ? ' · Contrato ' + esc(ContratoRepo.activo().nombre) : ''),
     ancho: 'wide',
     cuerpo:
       '<p class="fs13 txt-2 mb16">El sistema está listo con la configuración inicial: municipios, categorías ' +
-      '(incluidas gasolina y aceite como conceptos medibles) y las personas que adelantan el dinero.</p>' +
+      '(incluidas gasolina y aceite como conceptos medibles) y las personas que adelantan el dinero. ' +
+      'Trabaja en línea: cada cambio se guarda en el servidor en el momento.</p>' +
       '<div class="grid g2">' +
       '<div class="card"><div class="card-b">' +
       '<div class="flex aic g8 mb8">' + Icon('cog', 'txt-3', 16) + '<b>1. Complete la configuración</b></div>' +
@@ -11752,9 +11820,9 @@ function bienvenida() {
       'congelados en el documento.</p>' +
       '<button class="btn btn-sm mt8" data-ir="personas" data-cerrar>Ir a Personas</button></div></div>' +
       '<div class="card"><div class="card-b">' +
-      '<div class="flex aic g8 mb8">' + Icon('db', 'txt-3', 16) + '<b>4. Haga respaldos</b></div>' +
-      '<p class="fs12 txt-2">La información vive en este equipo. Descargue un respaldo .dacm con frecuencia: ' +
-      'incluye los datos y todos los soportes.</p>' +
+      '<div class="flex aic g8 mb8">' + Icon('nube', 'txt-3', 16) + '<b>4. Todo queda en el servidor</b></div>' +
+      '<p class="fs12 txt-2">Se guarda al instante y se ve igual desde cualquier equipo entrando con su cuenta. ' +
+      'Aun así descargue un respaldo .dacm cada tanto: es su copia propia.</p>' +
       '<button class="btn btn-sm mt8" data-ir="respaldos" data-cerrar>Ir a Copias de seguridad</button></div></div>' +
       '</div>' +
       '<div class="alert a-info mt16">' + Icon('info') +
