@@ -2130,6 +2130,12 @@ const Nombres = {
   BOOLEANOS: new Set(['logoPropio', 'esNoAplica', 'esFinanciador', 'esSolicitante',
                       'estadistica', 'sistema', 'requiereRevision', 'reposicionManual',
                       'esGasolina', 'esAceite', 'snapshotHtml']),
+  /**
+   * Columnas `date` o `timestamptz`. En el modelo local una fecha ausente se
+   * guarda como cadena vacía; PostgreSQL exige NULL y rechaza "" con
+   * «invalid input syntax for type date». Se traduce al salir.
+   */
+  FECHAS: new Set(['fecha', 'fechaInicio', 'fechaFin', 'anuladaEn', 'creadoEn', 'actualizadoEn', 'ts']),
   _aSnake: new Map(),
   _aCamel: new Map(),
   snake(k) {
@@ -2150,6 +2156,7 @@ const Nombres = {
     for (const [k, v] of Object.entries(obj)) {
       let val = v === undefined ? null : v;
       if (this.BOOLEANOS.has(k) && val !== null) val = Boolean(val);   // 1/0 → true/false
+      if (this.FECHAS.has(k) && val === '') val = null;                // "" → NULL
       out[this.snake(k)] = val;
     }
     return out;
@@ -10682,6 +10689,66 @@ const Pruebas = {
             // los números que NO son booleanos no se tocan
             Pruebas.igual(Nombres.filaSalida({ total: 1 }).total, 1, 'Un importe de 1 centavo sigue siendo 1');
             Pruebas.igual(Nombres.filaSalida({ orden: 0 }).orden, 0, 'Un orden 0 sigue siendo 0');
+          } },
+        { nombre: 'CRÍTICO · cada campo encaja con el tipo declarado en PostgreSQL', fn: () => {
+            /* Lee los tipos del propio SQL y valida contra ellos lo que
+               produciría cada modelo. Aquí se cazan los desajustes que de otro
+               modo sólo aparecen al escribir de verdad en la nube, por ejemplo
+               una fecha vacía "" contra una columna `date`. */
+            const ddl = Migracion.generarDDL();
+            const tipos = {};   // tabla -> { columna: tipo }
+            let tabla = null;
+            const RESERVADAS = new Set(['constraint', 'primary', 'unique', 'create', 'references',
+                                        'not', 'default', 'check', 'key', 'on', 'delete', 'set']);
+            for (const linea of ddl.split('\n')) {
+              const abre = linea.match(/^create table if not exists (\w+) \(/);
+              if (abre) { tabla = abre[1]; tipos[tabla] = {}; continue; }
+              if (!tabla) continue;
+              if (linea.startsWith(');')) { tabla = null; continue; }
+              if (linea.trim().startsWith('--')) continue;
+              // el esquema declara VARIAS columnas por línea: hay que recorrerlas todas
+              for (const m of linea.matchAll(/(\w+)\s+(bigint|int|numeric|boolean|date|timestamptz|jsonb|text)\b/g)) {
+                if (!RESERVADAS.has(m[1])) tipos[tabla][m[1]] = m[2];
+              }
+            }
+            Pruebas.ok(Object.keys(tipos).length >= 12, 'Se leyeron los tipos del esquema');
+            Pruebas.ok(Object.keys(tipos.cajas || {}).length >= 25,
+              'Se leyeron las columnas de cajas (' + Object.keys(tipos.cajas || {}).length + ')');
+
+            const muestras = {
+              configuracion: Modelo.configuracion(),
+              contratos: Modelo.contrato({ nombre: 'C' }),
+              municipios: Modelo.municipio({ nombre: 'M' }),
+              personas: Modelo.persona({ nombre: 'P' }),
+              categorias: Modelo.categoria({ nombre: 'K' }),
+              cajas: Modelo.caja({}),
+              detalles: Modelo.detalle({ cajaId: 'cm_x' }),
+              consignaciones: Modelo.consignacion({}),
+              aplicaciones: Modelo.aplicacion({ consignacionId: 'con_x', cajaId: 'cm_x' }),
+              documentos: Modelo.documento({}),
+              auditoria: Modelo.auditoria('caja', 'cm_x', 'CREAR', null),
+              secuencias: { id: 'caja:x:2026', valor: 1, actualizadoEn: Modelo.ahora() }
+            };
+            const fallos = [];
+            for (const [tbl, obj] of Object.entries(muestras)) {
+              const cols = tipos[tbl];
+              if (!cols) { fallos.push(tbl + ': la tabla no está en el esquema'); continue; }
+              const fila = Nombres.filaSalida(obj);
+              for (const [col, val] of Object.entries(fila)) {
+                const tipo = cols[col];
+                if (!tipo) { fallos.push(tbl + '.' + col + ': la columna no existe en el esquema'); continue; }
+                if (val === null) continue;                       // NULL vale en cualquier columna
+                const t = typeof val;
+                if (tipo === 'boolean' && t !== 'boolean') fallos.push(tbl + '.' + col + ': boolean recibe ' + t);
+                else if ((tipo === 'bigint' || tipo === 'int' || tipo === 'numeric') && t !== 'number')
+                  fallos.push(tbl + '.' + col + ': ' + tipo + ' recibe ' + t + ' (' + JSON.stringify(val) + ')');
+                else if ((tipo === 'date' || tipo === 'timestamptz') && (t !== 'string' || val === ''))
+                  fallos.push(tbl + '.' + col + ': ' + tipo + ' recibe ' + JSON.stringify(val));
+                else if (tipo === 'text' && t !== 'string')
+                  fallos.push(tbl + '.' + col + ': text recibe ' + t);
+              }
+            }
+            Pruebas.igual(fallos.length, 0, 'Desajustes de tipo: ' + fallos.join(' | '));
           } },
         { nombre: 'Los identificadores ULID sirven como clave primaria de texto', fn: () => {
             const ids = [ID.contrato(), ID.caja(), ID.detalle(), ID.consignacion(), ID.documento()];
