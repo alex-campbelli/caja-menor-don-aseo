@@ -152,7 +152,15 @@ html[data-theme="dark"] ::-webkit-scrollbar-thumb{background:#37454f}
 .gsearch .gi{position:absolute;left:9px;top:8.5px;color:var(--text-3);pointer-events:none}
 .gsearch kbd{position:absolute;right:8px;top:8px;font-size:10px;font-family:var(--mono);
   color:var(--text-3);border:1px solid var(--border);border-radius:4px;padding:1px 4px;background:var(--surface)}
-.content{padding:20px 24px 60px;flex:1;min-width:0}
+.content{padding:20px 24px 60px;flex:1;min-width:0;transition:opacity .18s}
+.content.ocupado{opacity:.55;pointer-events:none}
+body.ocupado{cursor:progress}
+.cargabar{position:fixed;top:0;left:0;right:0;height:3px;z-index:9999;opacity:0;
+  transition:opacity .15s;pointer-events:none}
+.cargabar.on{opacity:1}
+.cargabar i{display:block;height:100%;width:0;background:var(--accent);
+  box-shadow:0 0 8px var(--accent);border-radius:0 2px 2px 0;transition:width .2s ease-out}
+@media (prefers-reduced-motion:reduce){.content{transition:none}.cargabar i{transition:none}}
 .page-head{display:flex;align-items:flex-start;gap:16px;margin-bottom:18px;flex-wrap:wrap}
 .page-head h1{font-size:20px;letter-spacing:-.02em}
 .page-head .ph-sub{color:var(--text-3);font-size:12.5px;margin-top:2px}
@@ -1241,6 +1249,70 @@ const Icon = (() => {
 })();
 
 /* --- Notificaciones ------------------------------------------------------- */
+/* --- Aviso de espera ------------------------------------------------------
+   Mientras una vista carga, la pantalla anterior sigue puesta y parece que el
+   clic no ha entrado: de ahí los dobles clics. Esto da tres señales a la vez —
+   barra de avance arriba, cursor de reloj y contenido atenuado — y de paso
+   bloquea los clics sobre la vista vieja, que ya no llevan a ninguna parte.
+
+   El aviso NO aparece antes de UMBRAL ms: para una vista instantánea un
+   destello molesta más de lo que informa.                                  */
+const Cargando = {
+  UMBRAL: 180,
+  _activos: 0, _retardo: null, _barra: null, _avance: null,
+
+  _elemento() {
+    if (this._barra && document.body.contains(this._barra)) return this._barra;
+    const el = document.createElement('div');
+    el.className = 'cargabar';
+    el.innerHTML = '<i></i>';
+    document.body.appendChild(el);
+    return (this._barra = el);
+  },
+
+  iniciar() {
+    if (++this._activos > 1) return;
+    clearTimeout(this._retardo);
+    this._retardo = setTimeout(() => this._mostrar(), this.UMBRAL);
+  },
+
+  _mostrar() {
+    const el = this._elemento(), i = el.firstElementChild;
+    document.body.classList.add('ocupado');
+    const v = document.getElementById('vista');
+    if (v) v.classList.add('ocupado');
+    el.classList.add('on');
+    /* Avance asintótico: no se sabe cuánto falta, así que la barra se acerca al
+       92 % sin llegar nunca. El 100 % lo pone únicamente el final real. */
+    let pct = 8;
+    i.style.width = pct + '%';
+    clearInterval(this._avance);
+    this._avance = setInterval(() => {
+      pct += (92 - pct) * 0.12;
+      i.style.width = pct.toFixed(1) + '%';
+    }, 120);
+  },
+
+  terminar() {
+    this._activos = Math.max(0, this._activos - 1);
+    if (this._activos) return;
+    clearTimeout(this._retardo);
+    clearInterval(this._avance);
+    document.body.classList.remove('ocupado');
+    const v = document.getElementById('vista');
+    if (v) v.classList.remove('ocupado');
+    const el = this._barra;
+    if (!el || !el.classList.contains('on')) return;
+    el.firstElementChild.style.width = '100%';
+    setTimeout(() => {
+      el.classList.remove('on');
+      el.firstElementChild.style.width = '0';
+    }, 220);
+  },
+
+  activo() { return this._activos > 0; }
+};
+
 const Toast = (() => {
   function push(msg, tipo, ms) {
     const cont = $('#toasts'); if (!cont) return;
@@ -2446,8 +2518,15 @@ class SupabaseAdapter extends StorageAdapter {
   }
 
   async estadisticasAlmacen() {
+    /* Trece conteos en serie son trece viajes de ida y vuelta a la nube: medido
+       contra el servidor real, 3.493 ms. Lanzados a la vez cuestan lo que el
+       más lento, 655 ms. No hay dependencia entre ellos, así que la cola era
+       gratuita en el sentido malo de la palabra. */
+    const pares = await Promise.all(COLECCIONES_DATOS.map(async c => {
+      try { return [c, await this.count(c)]; } catch { return [c, 0]; }
+    }));
     const colecciones = {};
-    for (const c of COLECCIONES_DATOS) { try { colecciones[c] = await this.count(c); } catch { colecciones[c] = 0; } }
+    for (const [c, n] of pares) colecciones[c] = n;
     return { colecciones, cuota: null, nube: true, url: this.url };
   }
 }
@@ -4012,6 +4091,8 @@ const Estado_App = {
 const Router = (() => {
   const rutas = {};
   let actual = null;
+  let secuencia = 0;              // identifica la última navegación pedida
+  let enCurso = Promise.resolve(); // las navegaciones se atienden en fila
   function parse() {
     const h = (location.hash || '#/dashboard').replace(/^#\/?/, '');
     const partes = h.split('/').filter(Boolean).map(decodeURIComponent);
@@ -4022,21 +4103,38 @@ const Router = (() => {
     ir(ruta) { location.hash = '#/' + String(ruta).replace(/^#?\/?/, ''); },
     reemplazar(ruta) { history.replaceState(null, '', '#/' + String(ruta).replace(/^#?\/?/, '')); this.resolver(); },
     actual: () => actual,
+    /**
+     * Las navegaciones se atienden EN FILA, nunca a la vez. Sin esto, dos clics
+     * seguidos lanzaban dos cargas en paralelo y pintaba la que terminara
+     * última: se podía acabar viendo la pantalla de A con la dirección de B.
+     * Además, una navegación que ya quedó atrás cuando llega su turno se
+     * descarta sin consultar nada: no tiene sentido traer datos de una pantalla
+     * que el usuario ya abandonó.
+     */
     async resolver() {
+      const mio = ++secuencia;
+      enCurso = enCurso.then(() => this._pintar(mio));
+      return enCurso;
+    },
+    async _pintar(mio) {
+      if (mio !== secuencia) return;   // hubo otro clic después: éste sobra
       const r = parse();
       actual = r;
       Estado_App.ruta = r;
       const fn = rutas[r.vista] || rutas['404'];
       const cont = $('#vista');
       if (!cont) return;
+      Cargando.iniciar();
       try {
-        Bus.emit('ruta:cambio', r);
+        Bus.emit('ruta:cambio', r);    // el menú marca el destino al instante
         await fn(cont, r.params);
         cont.scrollIntoView({ block: 'start' });
         window.scrollTo(0, 0);
       } catch (e) {
         console.error('[router]', e);
         cont.innerHTML = Comp.errorPagina(e);
+      } finally {
+        Cargando.terminar();
       }
     },
     iniciar() {
@@ -4912,11 +5010,15 @@ const Shell = {
   async refrescarConteos() {
     try {
       const ctrId = ContratoRepo.activoId();
+      // tres conteos independientes: se piden a la vez, no en fila
+      const [cajas, consignaciones, documentos] = await Promise.all([
+        ctrId ? db.count('cajas', 'contratoId', ctrId) : db.count('cajas'),
+        ctrId ? db.count('consignaciones', 'contratoId', ctrId) : db.count('consignaciones'),
+        db.count('documentos')
+      ]);
       this.conteos = {
-        cajas: ctrId ? await db.count('cajas', 'contratoId', ctrId) : await db.count('cajas'),
-        consignaciones: ctrId ? await db.count('consignaciones', 'contratoId', ctrId) : await db.count('consignaciones'),
+        cajas, consignaciones, documentos,
         personas: PersonaRepo.activas().length,
-        documentos: await db.count('documentos'),
         contratos: ContratoRepo.todos().length
       };
       this.pintarNav();
@@ -9913,8 +10015,11 @@ const Respaldo = {
   async crear(opts) {
     const o = opts || {};
     const cfg = ConfigRepo.get() || {};
+    /* Trece lecturas completas, una detrás de otra, son trece esperas de red
+       encadenadas. No dependen entre sí: se piden a la vez. */
     const datos = {};
-    for (const col of COLECCIONES_DATOS) datos[col] = await db.getAll(col);
+    for (const [col, filas] of await Promise.all(
+          COLECCIONES_DATOS.map(async col => [col, await db.getAll(col)]))) datos[col] = filas;
 
     const archivos = [];
     let bytesDocs = 0;
@@ -10568,8 +10673,11 @@ const Migracion = {
   },
 
   async exportarJson() {
+    /* Trece lecturas completas, una detrás de otra, son trece esperas de red
+       encadenadas. No dependen entre sí: se piden a la vez. */
     const datos = {};
-    for (const col of COLECCIONES_DATOS) datos[col] = await db.getAll(col);
+    for (const [col, filas] of await Promise.all(
+          COLECCIONES_DATOS.map(async col => [col, await db.getAll(col)]))) datos[col] = filas;
     const paquete = {
       _meta: {
         aplicacion: APP.nombre, version: APP.version, esquema: APP.esquema,
@@ -10653,10 +10761,13 @@ const VistaConfiguracion = {
   async render(cont) {
     Shell.titulo('Configuración', 'Datos del contrato y parámetros del sistema');
     const c = ConfigRepo.get() || Modelo.configuracion();
-    const stats = await db.estadisticasAlmacen();
     const ctrAct = ContratoRepo.activo() || {};
     const anioHoy = Fecha.anio(Fecha.hoy());
-    const consecCaja = await Secuencia.ver(Secuencia.claveCaja(ctrAct.id || 'sin', ctrAct.prefijoCaja || 'CM', anioHoy));
+    // las dos consultas son independientes: se piden juntas
+    const [stats, consecCaja] = await Promise.all([
+      db.estadisticasAlmacen(),
+      Secuencia.ver(Secuencia.claveCaja(ctrAct.id || 'sin', ctrAct.prefijoCaja || 'CM', anioHoy))
+    ]);
     const proximaCaja = Secuencia.formatoCaja(anioHoy, consecCaja + 1, ctrAct.prefijoCaja);
 
     cont.innerHTML =
@@ -11200,6 +11311,78 @@ const Pruebas = {
                 Pruebas.ok(Conexion.insignia().includes(esperado), 'Muestra: ' + esperado);
               }
             } finally { Conexion.restaurar(g); }
+          } }
+      ]
+    },
+    {
+      nombre: 'Navegación y tiempos de espera',
+      casos: [
+        { nombre: 'CRÍTICO · los conteos del almacén no hacen cola', fn: async () => {
+            /* Trece conteos en serie costaban 3.493 ms medidos contra el servidor
+               real; en paralelo, 655 ms. Lo que se comprueba aquí no es el
+               tiempo (depende de la red) sino la propiedad que lo causa: que las
+               peticiones salgan a la vez. */
+            const ad = Object.create(SupabaseAdapter.prototype);
+            ad.url = 'https://ejemplo.supabase.co';
+            let enVuelo = 0, pico = 0;
+            ad.count = async () => {
+              enVuelo++; pico = Math.max(pico, enVuelo);
+              await new Promise(r => setTimeout(r, 5));
+              enVuelo--; return 7;
+            };
+            const st = await ad.estadisticasAlmacen();
+            Pruebas.igual(Object.keys(st.colecciones).length, COLECCIONES_DATOS.length,
+              'Devuelve el conteo de todas las colecciones');
+            Pruebas.igual(pico, COLECCIONES_DATOS.length,
+              'Las ' + COLECCIONES_DATOS.length + ' peticiones salen a la vez (pico simultáneo: ' + pico + ')');
+            Pruebas.igual(st.colecciones.cajas, 7, 'Y el resultado de cada una llega a su sitio');
+          } },
+        { nombre: 'CRÍTICO · dos navegaciones seguidas no se pisan', fn: () => {
+            /* Sin fila, dos clics lanzaban dos cargas a la vez y ganaba la que
+               terminara última: se podía acabar viendo la pantalla de A con la
+               dirección de B. */
+            const src = Router.resolver.toString() + ' ' + Router._pintar.toString();
+            Pruebas.ok(/enCurso\s*=\s*enCurso\.then/.test(src),
+              'Las navegaciones se encadenan en vez de lanzarse a la vez');
+            Pruebas.ok(/mio !== secuencia/.test(src),
+              'La navegación que ya quedó atrás se descarta sin consultar nada');
+            Pruebas.ok(/Cargando\.iniciar\(\)/.test(src) && /Cargando\.terminar\(\)/.test(src),
+              'Avisa de la espera al empezar y la retira al terminar');
+          } },
+        { nombre: 'El aviso de espera no parpadea en las vistas instantáneas', fn: () => {
+            /* Se parte de cero y se devuelve como estaba: las pruebas pueden
+               correrse mientras la aplicación tiene una carga en curso. */
+            const previos = Cargando._activos;
+            try {
+              Cargando._activos = 0; Cargando.terminar();
+              Cargando.iniciar();
+              /* Comprobar sólo que no esté visible «ahora mismo» no vale: con
+                 umbral 0 tampoco lo estaría, porque el aplazamiento pasa por el
+                 planificador. Se verifica el umbral en sí y que quede armado. */
+              Pruebas.ok(Cargando.UMBRAL >= 100,
+                'El umbral evita el destello (' + Cargando.UMBRAL + ' ms)');
+              Pruebas.ok(Boolean(Cargando._retardo),
+                'La aparición queda aplazada, no es inmediata');
+              Pruebas.ok(!document.querySelector('.cargabar.on'),
+                'Y no aparece de golpe al pulsar');
+              Cargando.terminar();
+              Pruebas.igual(Cargando.activo(), false, 'Y queda apagado');
+              Pruebas.ok(!document.body.classList.contains('ocupado'),
+                'Sin dejar puesto el cursor de espera');
+            } finally { Cargando._activos = previos; }
+          } },
+        { nombre: 'El aviso cuenta las cargas anidadas antes de apagarse', fn: () => {
+            const previos = Cargando._activos;
+            try {
+              Cargando._activos = 0; Cargando.terminar();
+              Cargando.iniciar(); Cargando.iniciar();
+              Cargando.terminar();
+              Pruebas.ok(Cargando.activo(), 'Con una carga aún abierta sigue encendido');
+              Cargando.terminar();
+              Pruebas.igual(Cargando.activo(), false, 'Se apaga al cerrar la última');
+              Cargando.terminar();
+              Pruebas.igual(Cargando.activo(), false, 'Un cierre de más no lo deja en negativo');
+            } finally { Cargando._activos = previos; }
           } }
       ]
     },
