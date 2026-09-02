@@ -202,10 +202,13 @@ body.ocupado{cursor:progress}
 .g2{grid-template-columns:repeat(2,minmax(0,1fr))}
 .g3{grid-template-columns:repeat(3,minmax(0,1fr))}
 .g4{grid-template-columns:repeat(4,minmax(0,1fr))}
+.g5{grid-template-columns:repeat(5,minmax(0,1fr))}
 .g23{grid-template-columns:minmax(0,2fr) minmax(0,3fr)}
 .g32{grid-template-columns:minmax(0,3fr) minmax(0,2fr)}
-@media(max-width:1200px){.g4{grid-template-columns:repeat(2,minmax(0,1fr))}.g3{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:900px){.g2,.g3,.g4,.g23,.g32{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:1400px){.g5{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:1200px){.g4,.g3{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .g5{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:900px){.g2,.g3,.g4,.g5,.g23,.g32{grid-template-columns:minmax(0,1fr)}}
 
 .kpi{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);
   padding:14px 16px;box-shadow:var(--sh-1);position:relative;overflow:hidden;min-width:0}
@@ -2188,6 +2191,23 @@ const Nube = {
     this.guardarSesion(null);
   },
 
+  /**
+   * PostgreSQL informa los choques de unicidad citando el nombre del índice
+   * («duplicate key value violates unique constraint "ux_categorias_nombre"»),
+   * que no dice nada a quien usa el programa. Se traduce al campo repetido.
+   * Devuelve null si el mensaje no es un choque de unicidad.
+   */
+  traducirDuplicado(msg) {
+    const m = /duplicate key value violates unique constraint "?([^"]+)"?/i.exec(String(msg || ''));
+    if (!m) return null;
+    const partes = m[1].replace(/"$/, '').split('_');
+    const campo = partes[partes.length - 1];
+    const legible = { nombre: 'nombre', cedula: 'cédula', numero: 'número',
+                      codigo: 'código', correo: 'correo', clave: 'clave' }[campo] || campo;
+    return new ErrorDominio('Ya existe un registro con ese ' + legible +
+      '. No se guardó para no duplicarlo.', 'DUPLICADO');
+  },
+
   /** comprueba que la URL, la clave y el esquema respondan */
   async probar(url, anonKey) {
     const base = String(url || '').replace(/\/+$/, '');
@@ -2332,6 +2352,8 @@ class SupabaseAdapter extends StorageAdapter {
     if (!r.ok) {
       const j = await r.json().catch(() => ({}));
       const msg = j.message || j.hint || ('Error ' + r.status);
+      const dup = Nube.traducirDuplicado(msg);
+      if (dup) throw dup;
       // sólo el 401 invalida la credencial; un 403 es una regla RLS haciendo su trabajo
       if (r.status === 401) Conexion.rechazoSesion(msg);
       if (r.status === 401 || r.status === 403)
@@ -3012,6 +3034,29 @@ const CategoriaRepo = {
     if (ex) return ex;
     return this.guardar(Modelo.categoria({ nombre: String(nombre).trim(), origen: origen || Origen.MANUAL }));
   },
+  /**
+   * Vincula a esta categoría los gastos que ya la usaban como texto suelto.
+   *
+   * Un detalle guarda dos cosas: la referencia a la categoría y el nombre
+   * congelado con el que se registró (§62). Los gastos importados antes de que
+   * la categoría existiera en el catálogo se quedaron con el nombre pero sin
+   * referencia; por eso el catálogo mostraba «0 usos» mientras el mismo
+   * concepto seguía apareciendo como texto libre, invitando a añadirlo otra vez.
+   *
+   * Sólo se rellena la referencia que faltaba. El nombre congelado no se toca:
+   * lo que quedó escrito en su día sigue diciendo exactamente lo mismo.
+   */
+  async adoptarTextoLibre(cat) {
+    if (!cat || !cat.id || !cat.nombreNorm) return 0;
+    const todos = await db.getAll('detalles');
+    const sueltos = todos.filter(d => !d.categoriaId && d.categoriaNombre &&
+      Txt.norm(d.categoriaNombre) === cat.nombreNorm);
+    if (!sueltos.length) return 0;
+    await db.putMany('detalles', sueltos.map(d => Object.assign({}, d, { categoriaId: cat.id })));
+    Analitica.invalidar();
+    Bus.emit('categorias:cambio', cat);
+    return sueltos.length;
+  },
   async eliminar(id) {
     const c = this.get(id);
     if (c && c.sistema) throw new ErrorDominio('Las categorías del sistema no se pueden eliminar. Desactívela.', 'SISTEMA');
@@ -3222,7 +3267,12 @@ const CajaService = {
 
   /** Normaliza un detalle de formulario: resuelve categoría (texto libre o catálogo) y rol */
   normalizarDetalle(d, contexto, orden) {
-    const cat = d.categoriaId ? CategoriaRepo.get(d.categoriaId) : null;
+    /* Si se escribió a mano un nombre que ya está en el catálogo, se enlaza con
+       él en vez de dejarlo como texto suelto: es la misma categoría, escrita
+       sin elegirla de la lista. El catálogo sigue siendo una ayuda y no una
+       restricción — un nombre que no exista se conserva tal cual. */
+    const cat = d.categoriaId ? CategoriaRepo.get(d.categoriaId)
+      : (d.categoriaNombre ? CategoriaRepo.porNombre(d.categoriaNombre) : null);
     const nombreCat = cat ? cat.nombre : String(d.categoriaNombre || '').trim();
     let rol = d.rol !== undefined ? d.rol : (cat ? cat.rol : null);
     if (rol === undefined) rol = null;
@@ -7220,15 +7270,26 @@ const VistaCategorias = {
     Shell.titulo('Categorías', 'Catálogo administrable de conceptos');
     const cats = CategoriaRepo.todas();
     const v = await Analitica.vista();
+    /* Un gasto cuenta para una categoría si la referencia apunta a ella o si el
+       nombre congelado coincide. Mirando sólo la referencia, el catálogo decía
+       «0 usos» junto a un concepto con cientos de movimientos a su nombre. */
+    const porNombreNorm = new Map(cats.map(c => [c.nombreNorm, c.id]));
+    const idDe = d => d.categoriaId ||
+      (d.categoriaNombre ? porNombreNorm.get(Txt.norm(d.categoriaNombre)) || null : null);
+
     const uso = new Map(), monto = new Map();
     for (const d of v.detalles) {
-      if (!d.categoriaId) continue;
-      uso.set(d.categoriaId, (uso.get(d.categoriaId) || 0) + 1);
-      monto.set(d.categoriaId, (monto.get(d.categoriaId) || 0) + d.valor);
+      const id = idDe(d);
+      if (!id) continue;
+      uso.set(id, (uso.get(id) || 0) + 1);
+      monto.set(id, (monto.get(id) || 0) + d.valor);
     }
+    /* Sólo es «texto libre» lo que NO está en el catálogo. Antes seguía en la
+       lista después de añadirlo, y el botón invitaba a crearlo de nuevo: de ahí
+       el error de duplicado. */
     const libres = new Map();
     for (const d of v.detalles) {
-      if (d.categoriaId || !d.categoriaNombre) continue;
+      if (idDe(d) || !d.categoriaNombre) continue;
       const k = d.categoriaNombre;
       if (!libres.has(k)) libres.set(k, { nombre: k, n: 0, total: 0 });
       const o = libres.get(k); o.n++; o.total += d.valor;
@@ -7312,13 +7373,18 @@ const VistaCategorias = {
             let rol = c.rol || null;
             if (estad && !rol) rol = Txt.slug(nombre).toUpperCase().slice(0, 24) || null;
             if (!estad && !c.sistema) rol = c.sistema ? rol : (c.rol && ['GASOLINA', 'ACEITE'].includes(c.rol) ? c.rol : null);
-            await CategoriaRepo.guardar({
+            const guardada = await CategoriaRepo.guardar({
               id: c.id, nombre, descripcion: m.querySelector('#cDesc').value.trim(),
               estadistica: estad ? 1 : 0, rol,
               estado: m.querySelector('#cEstado').value,
               sistema: c.sistema || 0, orden: c.orden, origen: c.origen || Origen.MANUAL
             });
-            Modal.cerrar(m); Toast.ok('Categoría guardada.');
+            /* Sólo al crearla: renombrar una categoría no debe arrastrar textos
+               sueltos ajenos que casualmente coincidan con el nombre nuevo. */
+            const adoptados = esNueva ? await CategoriaRepo.adoptarTextoLibre(guardada) : 0;
+            Modal.cerrar(m);
+            Toast.ok('Categoría guardada.' + (adoptados
+              ? ' Se vincularon ' + adoptados + ' movimiento(s) que ya la usaban.' : ''));
             if (alGuardar) alGuardar();
           } catch (e) { manejarError(e); }
         };
@@ -9843,7 +9909,8 @@ const Importador = {
     if (!ok) return;
 
     s.paso = 5;
-    s.progreso = { total: aImportar.length, hechos: 0, creadas: 0, personas: 0, municipios: 0, errores: [], enCurso: true };
+    s.progreso = { total: aImportar.length, hechos: 0, creadas: 0, personas: 0, municipios: 0,
+                   categorias: 0, errores: [], enCurso: true };
     this.render($('#vista'));
 
     const importId = ID.importacion();
@@ -9875,7 +9942,21 @@ const Importador = {
         perPorTexto.set(texto, p.id);
         s.progreso.personas++;
       }
-      /* 3) cajas */
+      /* 3) categorías del archivo
+         Se registran igual que los municipios. Esto no es inventar datos (§64):
+         el nombre está escrito literalmente en la columna CATEGORÍA. Sin este
+         paso, cada gasto guardaba el nombre pero sin referencia al catálogo, y
+         las estadísticas contaban textos sueltos en vez de categorías. */
+      const catPorTexto = new Map();
+      for (const r of aImportar) {
+        const t = r.crudo.categoria != null ? String(r.crudo.categoria).trim() : '';
+        if (!t || catPorTexto.has(t)) continue;
+        const yaEstaba = Boolean(CategoriaRepo.porNombre(t));
+        const c = await CategoriaRepo.obtenerOCrear(t, Origen.IMPORT);
+        if (c) { catPorTexto.set(t, c.id); if (!yaEstaba) s.progreso.categorias++; }
+      }
+
+      /* 4) cajas */
       const categoriaGas = CategoriaRepo.porRol(RolEstadistico.GASOLINA);
       const categoriaAce = CategoriaRepo.porRol(RolEstadistico.ACEITE);
 
@@ -9886,13 +9967,14 @@ const Importador = {
           const consignoId = s.mapConsigno.get(r.textoConsigno) || null;
           const detalles = [];
           const claseTxt = r.crudo.categoria != null ? String(r.crudo.categoria).trim() : '';
+          const claseId = catPorTexto.get(claseTxt) || null;
           const descTxt = r.crudo.descripcion != null ? String(r.crudo.descripcion).trim() : '';
 
           if (r.inconsistente) {
             /* Gasolina + aceite superan el total → NO se altera ningún valor:
                se registra un único detalle por el total real y se conservan las
                cifras declaradas en `legacy` para auditoría. */
-            detalles.push({ categoriaId: null, categoriaNombre: claseTxt || 'Sin clasificar',
+            detalles.push({ categoriaId: claseId, categoriaNombre: claseTxt || 'Sin clasificar',
               descripcion: descTxt, valor: r.total, rol: null, origen: Origen.IMPORT });
           } else {
             if (r.gasolina > 0) detalles.push({ categoriaId: categoriaGas ? categoriaGas.id : null,
@@ -9903,9 +9985,9 @@ const Importador = {
               categoriaNombre: categoriaAce ? categoriaAce.nombre : 'Aceite',
               descripcion: '', valor: r.aceite, rol: RolEstadistico.ACEITE, origen: Origen.IMPORT });
             const resto = r.total - r.gasolina - r.aceite;
-            if (resto > 0) detalles.push({ categoriaId: null, categoriaNombre: claseTxt || 'Sin clasificar',
+            if (resto > 0) detalles.push({ categoriaId: claseId, categoriaNombre: claseTxt || 'Sin clasificar',
               descripcion: descTxt, valor: resto, rol: null, origen: Origen.IMPORT });
-            if (!detalles.length) detalles.push({ categoriaId: null, categoriaNombre: claseTxt || 'Sin clasificar',
+            if (!detalles.length) detalles.push({ categoriaId: claseId, categoriaNombre: claseTxt || 'Sin clasificar',
               descripcion: descTxt, valor: r.total, rol: null, origen: Origen.IMPORT });
           }
 
@@ -9953,7 +10035,7 @@ const Importador = {
         id: importId, archivo: s.archivo.name, hoja: s.hojaSel,
         filasAnalizadas: s.analisis.totales.analizados,
         cajasCreadas: s.progreso.creadas, personasCreadas: s.progreso.personas,
-        municipiosCreados: s.progreso.municipios,
+        municipiosCreados: s.progreso.municipios, categoriasCreadas: s.progreso.categorias,
         omitidas: s.analisis.totales.analizados - s.progreso.creadas,
         errores: s.progreso.errores.length,
         mapeo: s.mapeo, opciones: s.opciones,
@@ -9986,7 +10068,8 @@ const Importador = {
   },
 
   paso5(el) {
-    const s = this.st, p = s.progreso || { total: 0, hechos: 0, creadas: 0, personas: 0, municipios: 0, errores: [] };
+    const s = this.st, p = s.progreso ||
+      { total: 0, hechos: 0, creadas: 0, personas: 0, municipios: 0, categorias: 0, errores: [] };
     if (p.enCurso) {
       el.innerHTML = '<div class="card"><div class="card-b" style="text-align:center;padding:40px">' +
         '<span class="spin" style="width:26px;height:26px;border-width:3px"></span>' +
@@ -9999,10 +10082,11 @@ const Importador = {
     el.innerHTML =
       '<div class="alert a-ok mb16">' + Icon('check') +
       '<div><b>Importación finalizada.</b> Los datos originales se conservaron íntegros en cada registro.</div></div>' +
-      '<div class="grid g4 mb16">' +
+      '<div class="grid g5 mb16">' +
       Comp.kpi({ label: 'Cajas creadas', valor: String(p.creadas), color: 'var(--ok-500)', icono: 'caja' }) +
       Comp.kpi({ label: 'Personas creadas', valor: String(p.personas), color: 'var(--brand-500)', icono: 'personas' }) +
       Comp.kpi({ label: 'Municipios creados', valor: String(p.municipios), color: '#6d4aca', icono: 'pin' }) +
+      Comp.kpi({ label: 'Categorías creadas', valor: String(p.categorias || 0), color: '#8a6d3b', icono: 'tag' }) +
       Comp.kpi({ label: 'Errores', valor: String(p.errores.length), color: 'var(--dang-500)', icono: 'warn' }) +
       '</div>' +
       (p.errores.length ? '<div class="card mb16"><div class="card-h"><h3>Filas no importadas</h3></div>' +
@@ -11556,6 +11640,65 @@ const Pruebas = {
         { nombre: 'Gasolina y aceite existen como categorías del sistema', fn: () => {
             Pruebas.ok(CategoriaRepo.porRol(RolEstadistico.GASOLINA), 'Categoría gasolina');
             Pruebas.ok(CategoriaRepo.porRol(RolEstadistico.ACEITE), 'Categoría aceite');
+          } }
+      ]
+    },
+    {
+      nombre: 'Categorías: catálogo y texto libre',
+      casos: [
+        { nombre: 'CRÍTICO · al crear una categoría adopta los gastos que ya la usaban', fn: async ctx => {
+            /* Los gastos importados antes de que existiera la categoría guardaron
+               el nombre pero no la referencia. Sin adopción, el catálogo decía
+               «0 usos» y el concepto seguía ofreciéndose para añadir, de donde
+               salía el error de clave duplicada. */
+            const caja = await CajaService.crear({
+              fecha: '2026-04-01', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
+              detalles: [
+                { categoriaNombre: 'Poda especial nocturna', descripcion: 'a', valor: 5000000 },
+                { categoriaNombre: 'PODA ESPECIAL NOCTURNA', descripcion: 'b', valor: 3000000 }
+              ]
+            });
+            Pruebas.ok(caja, 'Caja de apoyo creada');
+            const nueva = await CategoriaRepo.guardar(Modelo.categoria({ nombre: 'Poda especial nocturna' }));
+            const n = await CategoriaRepo.adoptarTextoLibre(nueva);
+            Pruebas.igual(n, 2, 'Adopta los dos gastos, sin importar tildes ni mayúsculas');
+            const dets = (await db.getAll('detalles')).filter(d => d.cajaId === caja.id);
+            Pruebas.ok(dets.every(d => d.categoriaId === nueva.id), 'Ambos quedan referenciados');
+            Pruebas.igual(dets[0].categoriaNombre, 'Poda especial nocturna',
+              'El nombre congelado del gasto no se toca (§62)');
+            Pruebas.igual(await CategoriaRepo.adoptarTextoLibre(nueva), 0,
+              'Repetirlo no hace nada: ya no queda ninguno suelto');
+            ctx.catPoda = nueva; ctx.cajaPoda = caja;
+          } },
+        { nombre: 'obtenerOCrear reutiliza la del catálogo en vez de duplicarla', fn: async () => {
+            const antes = CategoriaRepo.todas().length;
+            const a = await CategoriaRepo.obtenerOCrear('Trabajo nocturno', Origen.IMPORT);
+            Pruebas.igual(CategoriaRepo.todas().length, antes + 1, 'La primera vez la crea');
+            const b = await CategoriaRepo.obtenerOCrear('TRABAJO  NOCTURNO', Origen.IMPORT);
+            Pruebas.igual(b.id, a.id, 'La segunda reutiliza la misma pese a mayúsculas y espacios');
+            Pruebas.igual(CategoriaRepo.todas().length, antes + 1, 'Y no aparece una copia');
+          } },
+        { nombre: 'CRÍTICO · la importación registra las categorías del archivo', fn: () => {
+            const src = Importador.ejecutar.toString();
+            Pruebas.ok(/CategoriaRepo\.obtenerOCrear/.test(src),
+              'Las categorías del archivo se registran, igual que los municipios');
+            Pruebas.ok(!/categoriaId: null/.test(src),
+              'Ningún gasto importado queda sin referencia de categoría');
+            Pruebas.ok(/categoriaNombre: claseTxt/.test(src),
+              'Y conserva el nombre escrito en el archivo como dato congelado');
+          } },
+        { nombre: 'El choque de nombres se explica en lenguaje llano', fn: () => {
+            const e = Nube.traducirDuplicado(
+              'duplicate key value violates unique constraint "ux_categorias_nombre"');
+            Pruebas.ok(e instanceof ErrorDominio, 'Se convierte en error del dominio');
+            Pruebas.igual(e.codigo, 'DUPLICADO', 'Con su código');
+            Pruebas.ok(e.message.includes('nombre'), 'Nombra el campo repetido: ' + e.message);
+            Pruebas.ok(!/constraint|ux_/.test(e.message), 'Sin jerga de la base de datos');
+            Pruebas.ok(Nube.traducirDuplicado(
+              'duplicate key value violates unique constraint "ux_personas_cedula"')
+              .message.includes('cédula'), 'Traduce también la cédula');
+            Pruebas.igual(Nube.traducirDuplicado('invalid input syntax for type date'), null,
+              'Otros errores pasan de largo');
           } }
       ]
     },
