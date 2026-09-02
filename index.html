@@ -8733,43 +8733,26 @@ const Exportar = {
     } catch (e) { manejarError(e); }
   },
 
-  /** Plantilla de importación con las columnas históricas + hoja de instrucciones (§40) */
-  async plantilla() {
-    try {
-      const cfg = ConfigRepo.get() || {};
-      const ejemplos = [
-        ['2026-08-15', 'CAJA MENOR', 'CONSIGNACIÓN CAJA', 'FABIÁN', 'Apartadó', 'Alirio Pardo Porras', 100000, 40000,
-          'Gasolina, aceite y nailón', 300000],
-        ['2026-08-15', 'CAJA MENOR', 'CONSIGNACIÓN CAJA', 'FABIÁN', 'Guarne', 'Mauricio Alberto Ramirez Vasquez', 50000, 0,
-          'Gasolina', 50000],
-        ['2026-08-16', 'VIATICOS', 'CONSIGNACIÓN CAJA', 'EMPRESA', 'No aplica', 'Fernando Lopez', '', '',
-          'Viáticos a Medellín', 250000]
-      ];
-      const blob = await Xlsx.escribir([
-        { nombre: 'COMFENALCO', titulo: null,
-          columnas: [
-            { titulo: 'fecha', ancho: 13, tipo: 'fecha' }, { titulo: 'CLASE', ancho: 22 },
-            { titulo: 'TIPO', ancho: 20 }, { titulo: 'CONSIGNÓ', ancho: 14 },
-            { titulo: 'UBICACIÓN', ancho: 20 }, { titulo: 'CONCEPTO', ancho: 34 },
-            { titulo: 'GASOLINA', ancho: 14, tipo: 'dinero' }, { titulo: 'ACEITE', ancho: 14, tipo: 'dinero' },
-            { titulo: 'DESCRIPCIÓN', ancho: 46 }, { titulo: 'Total con iva', ancho: 16, tipo: 'dinero' }
-          ],
-          filas: ejemplos },
-        { nombre: 'INSTRUCCIONES', titulo: 'CÓMO DILIGENCIAR ESTA PLANTILLA',
-          subtitulo: cfg.empresa + ' · Contrato ' + ((ContratoRepo.activo()||{}).nombre || '') + ' · ' + APP.nombre + ' v' + APP.version,
-          columnas: [{ titulo: 'Columna', ancho: 18 }, { titulo: 'Obligatoria', ancho: 12 },
-            { titulo: 'Formato esperado', ancho: 30 }, { titulo: 'Explicación', ancho: 78 }],
-          filas: [
-            ['fecha', 'SÍ', 'Fecha de Excel o dd/mm/aaaa', 'Fecha del movimiento. Si la celda está vacía la fila se rechaza.'],
-            ['CLASE', 'No', 'Texto libre', 'Clasificación del movimiento. Se conserva como categoría/concepto del detalle. Ej.: CAJA MENOR, VIATICOS, EXAMENES MÉDICOS.'],
-            ['TIPO', 'No', 'Texto libre', 'Tipo de operación del archivo original. Se conserva íntegro como dato histórico; no altera los cálculos.'],
-            ['CONSIGNÓ', 'No', 'Texto libre', 'Quién adelantó el dinero (ej.: FABIÁN, EMPRESA). En el paso de mapeo usted decide a qué persona del sistema corresponde.'],
-            ['UBICACIÓN', 'No', 'Texto libre', 'Municipio de la operación. Si no existe en el catálogo se crea automáticamente. "No aplica" es un valor válido.'],
-            ['CONCEPTO', 'No', 'Texto libre', 'En el histórico esta columna contiene a veces el NOMBRE del solicitante y a veces un texto descriptivo. El asistente le pedirá confirmar cuáles son personas: el sistema nunca lo decide solo.'],
-            ['GASOLINA', 'No', 'Número (pesos)', 'Parte del total que corresponde a gasolina. Es un SUBCOMPONENTE: no se suma por encima del total. Dejar vacío o 0 si no aplica.'],
-            ['ACEITE', 'No', 'Número (pesos)', 'Parte del total que corresponde a aceite. También es un subcomponente del total.'],
-            ['DESCRIPCIÓN', 'No', 'Texto libre', 'Detalle de lo comprado o pagado. Se conserva literalmente.'],
-            ['Total con iva', 'SÍ', 'Número (pesos)', 'Valor total del movimiento. Debe ser mayor que cero. Es el valor que manda: gasolina y aceite se descuentan de él.'],
+  /**
+   * Plantilla de importación (§40). Las columnas NO se escriben aquí: salen de
+   * `Importador.CAMPOS`, que es lo mismo que el asistente busca al leer un
+   * archivo. Antes estaban duplicadas en los dos sitios y se separaron — la
+   * plantilla ofrecía CLASE y TIPO cuando el archivo real ya traía CATEGORÍA y
+   * había perdido TIPO. Derivándola no puede volver a pasar.
+   */
+  hojasPlantilla() {
+    const cfg = ConfigRepo.get() || {};
+    const ctr = ContratoRepo.activo() || {};
+    return [
+      { nombre: (ctr.nombre || 'DATOS').slice(0, 31), titulo: null,
+        columnas: Importador.CAMPOS.map(c => ({ titulo: c.t, ancho: c.ancho || 20, tipo: c.celda })),
+        filas: Importador.EJEMPLOS },
+      { nombre: 'INSTRUCCIONES', titulo: 'CÓMO DILIGENCIAR ESTA PLANTILLA',
+        subtitulo: (cfg.empresa || APP.empresa) + (ctr.nombre ? ' · Contrato ' + ctr.nombre : '') +
+                   ' · ' + APP.nombre + ' v' + APP.version,
+        columnas: [{ titulo: 'Columna', ancho: 18 }, { titulo: 'Obligatoria', ancho: 12 },
+          { titulo: 'Formato esperado', ancho: 30 }, { titulo: 'Explicación', ancho: 78 }],
+        filas: Importador.CAMPOS.map(c => [c.t, c.req ? 'SÍ' : 'No', c.formato || '', c.ayuda || '']).concat([
             ['', '', '', ''],
             ['REGLAS GENERALES', '', '', ''],
             ['1', '', '', 'No borre ni renombre la fila de encabezados: el asistente la usa para detectar las columnas. Si cambia los nombres, podrá remapearlos manualmente.'],
@@ -8779,8 +8762,13 @@ const Exportar = {
             ['5', '', '', 'Cada fila importada conserva su archivo, hoja y número de fila de origen para poder auditarla después.'],
             ['6', '', '', 'El asistente detecta posibles duplicados comparando fecha, ubicación, concepto, descripción y valor. Usted decide si importarlos, omitirlos o revisarlos.'],
             ['7', '', '', 'Puede añadir columnas propias: el asistente le permitirá ignorarlas o mapearlas.']
-          ] }
-      ], { titulo: 'Plantilla de importación' });
+        ]) }
+    ];
+  },
+
+  async plantilla() {
+    try {
+      const blob = await Xlsx.escribir(this.hojasPlantilla(), { titulo: 'Plantilla de importación' });
       U.descargar(blob, 'plantilla-importacion-caja-menor.xlsx');
       Toast.ok('Plantilla descargada.');
     } catch (e) { manejarError(e); }
@@ -9218,17 +9206,67 @@ const Documento = {
      · El sistema NO decide qué texto es una persona: lo propone y usted confirma.
    ========================================================================== */
 const Importador = {
+  /* Las columnas se declaran UNA sola vez. De aquí salen las tres cosas que
+     antes se escribían por separado y acabaron separándose entre sí: lo que el
+     asistente busca en el archivo, los encabezados de la plantilla que se
+     descarga y la hoja de instrucciones. Los títulos son literalmente los del
+     archivo real «Cuentas de caja menor 1.xlsx».
+
+     Los `alias` siguen aceptando los nombres anteriores (CLASE) para que un
+     archivo previo al cambio se pueda importar sin tener que retocarlo. */
   CAMPOS: [
-    { k: 'fecha',       t: 'Fecha',            req: true,  alias: ['fecha', 'date', 'dia', 'día'] },
-    { k: 'clase',       t: 'Clase',            req: false, alias: ['clase', 'class', 'tipo de gasto'] },
-    { k: 'tipo',        t: 'Tipo',             req: false, alias: ['tipo', 'type'] },
-    { k: 'consigno',    t: 'Consignó',         req: false, alias: ['consigno', 'consignó', 'consigno?', 'quien consigno', 'adelanto'] },
-    { k: 'ubicacion',   t: 'Ubicación',        req: false, alias: ['ubicacion', 'ubicación', 'municipio', 'lugar', 'ciudad'] },
-    { k: 'concepto',    t: 'Concepto',         req: false, alias: ['concepto', 'solicitante', 'beneficiario', 'nombre'] },
-    { k: 'gasolina',    t: 'Gasolina',         req: false, alias: ['gasolina', 'combustible'] },
-    { k: 'aceite',      t: 'Aceite',           req: false, alias: ['aceite', 'lubricante'] },
-    { k: 'descripcion', t: 'Descripción',      req: false, alias: ['descripcion', 'descripción', 'detalle', 'observacion'] },
-    { k: 'total',       t: 'Total con IVA',    req: true,  alias: ['total con iva', 'total', 'valor', 'valor total', 'monto'] }
+    { k: 'fecha', t: 'FECHA', req: true, ancho: 13, celda: 'fecha',
+      alias: ['fecha', 'date', 'dia', 'día'],
+      formato: 'Fecha de Excel o dd/mm/aaaa',
+      ayuda: 'Fecha del movimiento. Si la celda está vacía la fila se rechaza.' },
+    { k: 'categoria', t: 'CATEGORÍA', req: false, ancho: 24,
+      alias: ['categoria', 'categoría', 'clase', 'class', 'tipo de gasto'],
+      formato: 'Texto libre',
+      ayuda: 'Clasificación del gasto; se conserva como categoría del detalle. Ej.: Caja menor, ' +
+             'Viaticos, Examenes médicos, Mantenimiento/Arreglo. Antes se llamaba CLASE y se siguen ' +
+             'aceptando archivos con ese encabezado.' },
+    { k: 'consigno', t: 'CONSIGNÓ', req: false, ancho: 14,
+      alias: ['consigno', 'consignó', 'consigno?', 'quien consigno', 'adelanto'],
+      formato: 'Texto libre',
+      ayuda: 'Quién adelantó el dinero (ej.: FABIÁN, EMPRESA). En el paso de mapeo usted decide a qué ' +
+             'persona del sistema corresponde. No es el solicitante.' },
+    { k: 'ubicacion', t: 'UBICACIÓN', req: false, ancho: 20,
+      alias: ['ubicacion', 'ubicación', 'municipio', 'lugar', 'ciudad'],
+      formato: 'Texto libre',
+      ayuda: 'Municipio de la operación. Si no existe en el catálogo se crea. «No aplica» es válido.' },
+    { k: 'concepto', t: 'CONCEPTO', req: false, ancho: 34,
+      alias: ['concepto', 'solicitante', 'beneficiario', 'nombre'],
+      formato: 'Texto libre',
+      ayuda: 'En el histórico esta columna contiene a veces el NOMBRE del solicitante y a veces un texto ' +
+             'descriptivo. El asistente le pedirá confirmar cuáles son personas: nunca lo decide solo.' },
+    { k: 'gasolina', t: 'GASOLINA', req: false, ancho: 14, celda: 'dinero',
+      alias: ['gasolina', 'combustible'],
+      formato: 'Número (pesos)',
+      ayuda: 'Parte del total que corresponde a gasolina. Es un SUBCOMPONENTE: no se suma por encima ' +
+             'del total. Dejar vacío o 0 si no aplica.' },
+    { k: 'aceite', t: 'ACEITE', req: false, ancho: 14, celda: 'dinero',
+      alias: ['aceite', 'lubricante'],
+      formato: 'Número (pesos)',
+      ayuda: 'Parte del total que corresponde a aceite. También es un subcomponente del total.' },
+    { k: 'descripcion', t: 'DESCRIPCIÓN', req: false, ancho: 46,
+      alias: ['descripcion', 'descripción', 'detalle', 'observacion'],
+      formato: 'Texto libre',
+      ayuda: 'Detalle de lo comprado o pagado. Se conserva literalmente.' },
+    { k: 'total', t: 'TOTAL', req: true, ancho: 16, celda: 'dinero',
+      alias: ['total', 'total con iva', 'valor', 'valor total', 'monto'],
+      formato: 'Número (pesos)',
+      ayuda: 'Valor total del movimiento. Debe ser mayor que cero. Es el valor que manda: gasolina y ' +
+             'aceite se descuentan de él, nunca se suman.' }
+  ],
+
+  /** Filas de ejemplo de la plantilla, en el mismo orden que CAMPOS */
+  EJEMPLOS: [
+    ['2026-08-15', 'Caja menor', 'FABIÁN', 'Apartadó', 'Alirio Pardo Porras', 100000, 40000,
+      'Gasolina, aceite y nailón', 300000],
+    ['2026-08-15', 'Mantenimiento/Arreglo', 'FABIÁN', 'Guarne', 'Mauricio Alberto Ramirez Vasquez', 50000, 0,
+      'Cambio de aceite y filtro de la guadaña', 180000],
+    ['2026-08-16', 'Viaticos', 'EMPRESA', 'No aplica', 'Fernando Lopez', '', '',
+      'Viáticos a Medellín', 250000]
   ],
 
   st: null,
@@ -9624,7 +9662,7 @@ const Importador = {
 
     for (const f of filas) {
       const crudo = {
-        fecha: this.celda(f, 'fecha'), clase: this.celda(f, 'clase'), tipo: this.celda(f, 'tipo'),
+        fecha: this.celda(f, 'fecha'), categoria: this.celda(f, 'categoria'),
         consigno: this.celda(f, 'consigno'), ubicacion: this.celda(f, 'ubicacion'), concepto: this.celda(f, 'concepto'),
         gasolina: this.celda(f, 'gasolina'), aceite: this.celda(f, 'aceite'),
         descripcion: this.celda(f, 'descripcion'), total: this.celda(f, 'total')
@@ -9747,7 +9785,7 @@ const Importador = {
         return '<tr' + (dec === 'omitir' ? ' style="opacity:.5"' : '') + '>' +
           '<td class="txt-3 mono">' + r.fila + '</td>' +
           '<td class="nowrap">' + (r.fecha ? Fecha.corta(r.fecha) : '<span style="color:var(--dang-500)">—</span>') + '</td>' +
-          '<td class="trunc" style="max-width:120px">' + esc(r.crudo.clase || '') + '</td>' +
+          '<td class="trunc" style="max-width:120px">' + esc(r.crudo.categoria || '') + '</td>' +
           '<td class="trunc" style="max-width:110px">' + esc(r.textoUbic) + '</td>' +
           '<td class="trunc" style="max-width:180px">' + esc(r.textoConcepto) +
             (r.mapPersona.accion === 'crear' ? ' <span class="pill np p-blue">nueva persona</span>' :
@@ -9847,7 +9885,7 @@ const Importador = {
           const solicitanteId = perPorTexto.get(r.textoConcepto) || null;
           const consignoId = s.mapConsigno.get(r.textoConsigno) || null;
           const detalles = [];
-          const claseTxt = r.crudo.clase != null ? String(r.crudo.clase).trim() : '';
+          const claseTxt = r.crudo.categoria != null ? String(r.crudo.categoria).trim() : '';
           const descTxt = r.crudo.descripcion != null ? String(r.crudo.descripcion).trim() : '';
 
           if (r.inconsistente) {
@@ -9893,7 +9931,7 @@ const Importador = {
               : '',
             legacy: {
               archivo: s.archivo.name, hoja: s.hojaSel, fila: r.fila, importId, importadoEn: ahora,
-              fecha: r.crudo.fecha, clase: r.crudo.clase, tipo: r.crudo.tipo, consigno: r.crudo.consigno,
+              fecha: r.crudo.fecha, categoria: r.crudo.categoria, consigno: r.crudo.consigno,
               ubicacion: r.crudo.ubicacion, concepto: r.crudo.concepto,
               gasolina: r.crudo.gasolina, aceite: r.crudo.aceite,
               descripcion: r.crudo.descripcion, totalConIva: r.crudo.total,
@@ -11827,13 +11865,56 @@ const Pruebas = {
             Pruebas.igual(datos.filas[1].celdas[1].valor, 300000, 'Número conservado');
             Pruebas.igual(datos.filas[1].celdas[2].valor, '2026-03-10', 'Fecha conservada');
           } },
-        { nombre: 'La plantilla de importación se genera correctamente', fn: async () => {
-            const blob = await Xlsx.escribir([
-              { nombre: 'COMFENALCO', columnas: Importador.CAMPOS.map(c => ({ titulo: c.t })), filas: [] },
-              { nombre: 'INSTRUCCIONES', columnas: [{ titulo: 'Columna' }], filas: [['fecha']] }
-            ]);
+        { nombre: 'CRÍTICO · la plantilla lleva exactamente las columnas del archivo real', fn: async () => {
+            /* Encabezados de «Cuentas de caja menor 1.xlsx», copiados literalmente.
+               Esta lista es el contrato: si el archivo del usuario cambia, esta
+               prueba falla y obliga a actualizar el programa a la vez. Antes, la
+               plantilla llevaba sus columnas escritas aparte y se separó del
+               archivo sin que nada avisara. */
+            const DEL_ARCHIVO = ['FECHA', 'CATEGORÍA', 'CONSIGNÓ', 'UBICACIÓN', 'CONCEPTO',
+                                 'GASOLINA', 'ACEITE', 'DESCRIPCIÓN', 'TOTAL'];
+            Pruebas.igual(Importador.CAMPOS.map(c => c.t).join(' | '), DEL_ARCHIVO.join(' | '),
+              'El asistente busca esas columnas, en ese orden');
+
+            const blob = await Xlsx.escribir(Exportar.hojasPlantilla(), { titulo: 'Plantilla' });
             const libro = await Xlsx.leer(new File([blob], 'p.xlsx'));
             Pruebas.igual(libro.hojas.length, 2, 'Dos hojas: datos e instrucciones');
+            const datos = await libro.filas(libro.hojas[0].nombre);
+            const enc = datos.filas[0].celdas.map(c => (c && c.valor != null) ? String(c.valor).trim() : '')
+              .filter(Boolean);
+            Pruebas.igual(enc.join(' | '), DEL_ARCHIVO.join(' | '),
+              'Y la plantilla que se descarga lleva las mismas');
+            Pruebas.igual(datos.filas.length - 1, Importador.EJEMPLOS.length, 'Con sus filas de ejemplo');
+            for (const ej of Importador.EJEMPLOS)
+              Pruebas.igual(ej.length, DEL_ARCHIVO.length, 'Cada ejemplo trae una celda por columna');
+          } },
+        { nombre: 'CRÍTICO · los encabezados del archivo se reconocen solos', fn: () => {
+            /* Se simula la detección del asistente sobre los encabezados reales,
+               incluidos los nombres anteriores al cambio: un archivo viejo con
+               CLASE debe seguir entrando sin retoques. */
+            const detectar = encabezados => {
+              const m = {};
+              Importador.CAMPOS.forEach(campo => {
+                m[campo.k] = encabezados.findIndex(h => {
+                  const n = Txt.norm(h);
+                  return n && campo.alias.some(a => n === Txt.norm(a) ||
+                    n.replace(/[^a-z0-9]/g, '') === Txt.norm(a).replace(/[^a-z0-9]/g, ''));
+                });
+              });
+              return m;
+            };
+            const actual = detectar(['FECHA', 'CATEGORÍA', 'CONSIGNÓ', 'UBICACIÓN', 'CONCEPTO',
+                                     'GASOLINA', 'ACEITE', 'DESCRIPCIÓN', 'TOTAL']);
+            for (const c of Importador.CAMPOS)
+              Pruebas.ok(actual[c.k] >= 0, 'Reconoce ' + c.t + ' del archivo actual');
+            Pruebas.igual(actual.categoria, 1, 'CATEGORÍA es la segunda columna');
+            Pruebas.igual(actual.total, 8, 'TOTAL es la novena');
+
+            const viejo = detectar(['fecha', 'CLASE', 'TIPO', 'CONSIGNÓ', 'UBICACIÓN', 'CONCEPTO',
+                                    'GASOLINA', 'ACEITE', 'DESCRIPCIÓN', 'Total con iva']);
+            Pruebas.igual(viejo.categoria, 1, 'Un archivo anterior con CLASE sigue entrando');
+            Pruebas.igual(viejo.total, 9, 'Y su «Total con iva» también');
+            Pruebas.ok(!('tipo' in viejo), 'La columna TIPO ya no se pide: sobra sin estorbar');
           } },
         { nombre: 'Detección de duplicados del importador', fn: () => {
             const a = Importador.claveDuplicado({ fecha: '2026-03-10', ubicacion: 'Apartadó', concepto: 'Alirio Pardo',
