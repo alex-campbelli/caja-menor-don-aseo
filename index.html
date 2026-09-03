@@ -238,6 +238,37 @@ table.tbl .num{text-align:right;font-variant-numeric:tabular-nums;white-space:no
 table.tbl .mono{font-family:var(--mono);font-size:11.5px}
 table.tbl tfoot td{padding:9px 12px;border-top:2px solid var(--border-strong);font-weight:700;
   background:var(--surface-2);font-variant-numeric:tabular-nums}
+
+/* Listado de cajas: trece columnas.
+   Medido a 1366 px de ventana, la tabla ocupaba 1381 px en un hueco de 1069:
+   sobraban 312 px, que es EXACTAMENTE lo que suma el relleno de las celdas
+   (13 columnas x 24 px). No era la letra, era el aire entre columnas. Se
+   aprieta sólo esta tabla; las demás siguen igual de holgadas. */
+table.tbl.compacta{font-size:12px}
+table.tbl.compacta th{padding:8px 7px;letter-spacing:.04em}
+table.tbl.compacta td{padding:6px 7px}
+table.tbl.compacta tfoot td{padding:8px 7px}
+table.tbl.compacta .mono{font-size:11px}
+table.tbl.compacta td.td-estado{min-width:0}
+table.tbl.compacta select.sel-estado{max-width:116px;padding:2px 16px 2px 6px}
+table.tbl.compacta .col-exp{width:24px;padding-left:6px;padding-right:0}
+table.tbl.compacta .btn-sm.btn-icon{width:22px;height:22px;padding:0}
+/* Un escalón más para portátiles de 1280: se recorta el margen de la página y
+   se aprieta un poco más la tabla, en vez de obligar a desplazarse. */
+@media (max-width:1340px){
+  .content{padding-left:14px;padding-right:14px}
+  table.tbl.compacta{font-size:11.5px}
+  table.tbl.compacta th{padding-left:5px;padding-right:5px}
+  table.tbl.compacta td{padding-left:5px;padding-right:5px}
+  table.tbl.compacta tfoot td{padding-left:5px;padding-right:5px}
+  table.tbl.compacta select.sel-estado{max-width:98px}
+  table.tbl.compacta .col-exp{width:20px;padding-left:4px}
+  table.tbl.compacta .btn-sm.btn-icon{width:20px;height:20px}
+  /* Los topes de ancho de las columnas de texto van en el atributo style de
+     cada celda, así que aquí hace falta `!important` para poder bajarlos.
+     El nombre completo sigue saliendo al pasar el ratón. */
+  table.tbl.compacta td.trunc{max-width:116px!important}
+}
 .tbl-wrap{overflow-x:auto;overflow-y:visible}
 .tbl-scroll{max-height:520px;overflow:auto}
 
@@ -446,7 +477,25 @@ html[data-theme="dark"] .money-pos{color:var(--ok-500)}
 .g12{gap:12px}.wrap{flex-wrap:wrap}.f1{flex:1;min-width:0}
 .tr{text-align:right}.tc{text-align:center}.nowrap{white-space:nowrap}
 .trunc{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+mark{background:#fdf3a7;color:inherit;border-radius:2px;padding:0 1px}
+html[data-theme="dark"] mark{background:rgba(224,166,58,.32);color:#f3cb77}
 .hidden{display:none !important}
+.det-fila>td{background:var(--surface-2);padding:0!important;border-top:0}
+/* La celda ocupa las 13 columnas, asi que sin tope la tabla interna se
+   estiraba y el valor quedaba fuera de la pantalla. */
+.det-caja{padding:10px 14px 12px;max-width:860px}
+.tbl-mini{width:100%;border-collapse:collapse;font-size:12px}
+.tbl-mini th{text-align:left;padding:4px 10px 4px 0;color:var(--text-3);font-weight:600;
+  font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;white-space:nowrap}
+.tbl-mini td{padding:4px 10px 4px 0;vertical-align:top;border-top:1px solid var(--border)}
+.tbl-mini td.num,.tbl-mini th.num{text-align:right;padding-right:0;white-space:nowrap}
+.tbl-mini tfoot td{padding:5px 10px 0 0;border-top:2px solid var(--border-strong);font-weight:700}
+.comp-lista{display:flex;flex-direction:column;gap:2px}
+.comp-item{display:flex;align-items:center;gap:9px;padding:5px 7px;border-radius:7px;min-width:0}
+.comp-item:hover{background:var(--surface-2)}
+.comp-item .link{flex:1;min-width:0;background:none;border:0;padding:0;cursor:pointer;font-family:inherit}
+.comp-ic{flex:0 0 auto;width:22px;height:22px;border-radius:6px;display:grid;place-items:center;
+  background:var(--ok-50);color:var(--ok-700)}
 .link{color:var(--accent);cursor:pointer;font-weight:600}
 .link:hover{text-decoration:underline}
 .divider{height:1px;background:var(--border);margin:14px 0}
@@ -1045,6 +1094,37 @@ const Txt = {
       .normalize('NFD').replace(/[̀-ͯ]/g, '')
       .replace(/\s+/g, ' ').trim();
   },
+  /**
+   * Como `norm`, pero SIN colapsar espacios ni recortar: cada carácter de la
+   * salida corresponde a uno de la entrada. Hace falta para poder devolver la
+   * posición exacta de una coincidencia al texto original.
+   */
+  normPos(s) {
+    return String(s == null ? '' : s).toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  },
+
+  /**
+   * Devuelve el texto ya escapado y con la parte buscada envuelta en <mark>.
+   * La comparación ignora mayúsculas y tildes —buscar «alirio» encuentra
+   * «Alirio» y «Álirio»— pero lo que se pinta es el texto original, intacto.
+   * Se escapa cada trozo por separado: nunca se marca sobre HTML ya generado.
+   */
+  resaltar(texto, consulta) {
+    const t = String(texto == null ? '' : texto);
+    const qn = Txt.normPos(String(consulta || '').trim());
+    if (!qn) return esc(t);
+    const tn = Txt.normPos(t);
+    let out = '', i = 0;
+    for (;;) {
+      const p = tn.indexOf(qn, i);
+      if (p < 0) { out += esc(t.slice(i)); break; }
+      out += esc(t.slice(i, p)) + '<mark>' + esc(t.slice(p, p + qn.length)) + '</mark>';
+      i = p + qn.length;
+    }
+    return out;
+  },
+
   /** clave de comparación agresiva: sólo letras y dígitos */
   slug(s) { return Txt.norm(s).replace(/[^a-z0-9]+/g, ''); },
   titulo(s) {
@@ -2452,7 +2532,13 @@ class SupabaseAdapter extends StorageAdapter {
       if (o.valor !== undefined && o.valor !== null) p.push(campo + '=eq.' + encodeURIComponent(o.valor));
       if (o.desde !== undefined) p.push(campo + '=gte.' + encodeURIComponent(o.desde));
       if (o.hasta !== undefined) p.push(campo + '=lte.' + encodeURIComponent(o.hasta));
-      p.push('order=' + campo + '.' + (o.direccion === 'desc' ? 'desc' : 'asc'));
+      /* PostgreSQL no garantiza NINGÚN orden entre filas con la misma clave.
+         Ordenando sólo por fecha, doce cajas del mismo día salían cada vez en
+         una posición distinta —de ahí el 8, 10, 9 en pantalla— y, peor, al
+         pedirlas por páginas con OFFSET una fila podía repetirse en dos páginas
+         o no salir en ninguna. El id es único y creciente: sirve de desempate. */
+      const dir = o.direccion === 'desc' ? 'desc' : 'asc';
+      p.push('order=' + campo + '.' + dir + (campo === 'id' ? '' : ',id.' + dir));
     }
     // con filtro en memoria hay que traerlo todo; sin él se puede limitar en el servidor
     if (o.limite && !o.filtro) p.push('limit=' + o.limite);
@@ -4131,7 +4217,8 @@ const Prefs = {
 const Estado_App = {
   ruta: { vista: 'dashboard', params: {} },
   filtrosDashboard: { periodo: 'todo', anio: '', mes: '', desde: '', hasta: '' },
-  filtrosCajas: { texto: '', estado: '', solicitanteId: '', municipioId: '', consignoId: '', desde: '', hasta: '', pagina: 1, orden: 'fecha', dir: 'desc' },
+  filtrosCajas: { texto: '', estado: '', solicitanteId: '', municipioId: '', consignoId: '', categoriaId: '',
+                  desde: '', hasta: '', pagina: 1, orden: 'fecha', dir: 'desc' },
   filtrosConsignaciones: { texto: '', beneficiarioId: '', desde: '', hasta: '', pagina: 1 },
   borradorCaja: null,
   cargando: false
@@ -4434,6 +4521,26 @@ const Comp = {
         attr(f.hasta || '') + '" data-act="' + attr(prefijo) + ':hasta"></div>' : '') +
       '</div>';
   },
+  /**
+   * Manejador para un filtro de fecha.
+   *
+   * Un <input type="date"> dispara «change» en cuanto la fecha queda completa,
+   * y al teclear el año eso pasa CUATRO veces: 0002, 0020, 0202 y por fin 2026.
+   * Cada una recargaba el listado —contra el servidor— y las intermedias
+   * dejaban la pantalla vacía a mitad de escribir. De ahí la sensación de que
+   * «se calcula con un solo número y recarga de la nada».
+   *
+   * Se espera a que la escritura pare y se descartan las fechas imposibles:
+   * mientras el año está a medias no es una fecha, es un tecleo.
+   */
+  filtroFecha(aplicar) {
+    return U.debounce(el => {
+      const v = el.value;
+      if (v && !Fecha.valida(v)) return;   // año incompleto: aún está escribiendo
+      aplicar(v);
+    }, 420);
+  },
+
   _aniosDisponibles() {
     const ctr = ContratoRepo.activo() || {};
     const ini = Number(Fecha.anio(ctr.fechaInicio || '2025-10-29')) || 2025;
@@ -5292,6 +5399,19 @@ document.addEventListener('click', async e => {
     if (innerWidth <= 860) { $('#sidebar').classList.remove('open'); $('#scrim').classList.remove('on'); }
   }
 });
+/**
+ * Algunos campos deben reaccionar MIENTRAS se escribe, no al salir de ellos.
+ * Los buscadores llevaban su espera puesta desde el principio, pero sólo había
+ * escuchador de «change»: la lista no se movía hasta cambiar de campo o pulsar
+ * Intro. Se marcan con `data-vivo` para no alterar el resto de formularios,
+ * donde reaccionar a cada tecla sí sería molesto.
+ */
+document.addEventListener('input', e => {
+  const a = e.target.closest('[data-act][data-vivo]');
+  if (!a) return;
+  const fn = Acciones[a.getAttribute('data-act')];
+  if (fn) { try { fn(a, e); } catch (err) { manejarError(err); } }
+});
 document.addEventListener('change', async e => {
   const g = e.target.closest('[data-gact]');
   if (g) { const fn = AccionesGlobales[g.getAttribute('data-gact')]; if (fn) { await fn(g, e); return; } }
@@ -5453,7 +5573,7 @@ const VistaDashboard = {
         '<div class="card"><div class="card-h"><h3>Últimas cajas menores</h3>' +
           '<div class="ch-act"><span class="link fs12" data-ir="cajas">Ver todas</span></div></div>' +
           '<div class="card-b flush"><div class="tbl-wrap"><table class="tbl">' +
-          '<thead><tr><th>Número</th><th>Fecha</th><th>Solicitante</th><th>Municipio</th><th class="num">Total</th><th>Estado</th></tr></thead>' +
+          '<thead><tr><th>Número</th><th>Fecha</th><th>Concepto</th><th>Ubicación</th><th class="num">Total</th><th>Estado</th></tr></thead>' +
           '<tbody>' + (ultimas.length ? ultimas.map(c =>
             '<tr class="row-click" data-ir="caja/' + attr(c.id) + '">' +
             '<td class="mono">' + esc(c.numero) + '</td>' +
@@ -5468,7 +5588,7 @@ const VistaDashboard = {
         '<div class="card"><div class="card-h"><h3>Cajas pendientes de reposición</h3>' +
           '<span class="ch-sub">Más antiguas primero</span></div>' +
           '<div class="card-b flush"><div class="tbl-wrap"><table class="tbl">' +
-          '<thead><tr><th>Número</th><th>Fecha</th><th>Solicitante</th><th class="num">Total</th><th class="num">Pendiente</th></tr></thead>' +
+          '<thead><tr><th>Número</th><th>Fecha</th><th>Concepto</th><th class="num">Total</th><th class="num">Pendiente</th></tr></thead>' +
           '<tbody>' + (pendientes.length ? pendientes.map(x =>
             '<tr class="row-click" data-ir="caja/' + attr(x.c.id) + '">' +
             '<td class="mono">' + esc(x.c.numero) + '</td>' +
@@ -5506,8 +5626,8 @@ const VistaDashboard = {
         VistaDashboard.render(cont); },
       'dash:anio': el => { f.anio = el.value; VistaDashboard.render(cont); },
       'dash:mes': el => { f.mes = el.value; VistaDashboard.render(cont); },
-      'dash:desde': el => { f.desde = el.value; VistaDashboard.render(cont); },
-      'dash:hasta': el => { f.hasta = el.value; VistaDashboard.render(cont); },
+      'dash:desde': Comp.filtroFecha(v => { f.desde = v; VistaDashboard.render(cont); }),
+      'dash:hasta': Comp.filtroFecha(v => { f.hasta = v; VistaDashboard.render(cont); }),
       verRevisiones: () => VistaDashboard.modalRevisiones(revisiones)
     });
 
@@ -5526,7 +5646,7 @@ const VistaDashboard = {
       cuerpo: '<div class="alert a-info mb12">' + Icon('info') +
         '<div>Estos registros se importaron <b>tal como estaban</b> en el archivo original. ' +
         'El sistema no alteró ningún valor. Ábralos y corrija manualmente cuando tenga la información correcta.</div></div>' +
-        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Número</th><th>Fecha</th><th>Solicitante</th>' +
+        '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Número</th><th>Fecha</th><th>Concepto</th>' +
         '<th class="num">Total</th><th>Motivo</th></tr></thead><tbody>' +
         lista.map(c => '<tr class="row-click" data-ir="caja/' + attr(c.id) + '">' +
           '<td class="mono">' + esc(c.numero) + '</td><td class="nowrap">' + Fecha.corta(c.fecha) + '</td>' +
@@ -5542,13 +5662,84 @@ const VistaDashboard = {
    VISTA · CAJAS MENORES (listado)
    ========================================================================== */
 const VistaCajas = {
+  /**
+   * Fila desplegable con el desglose de una caja.
+   *
+   * En el archivo, un movimiento es UNA fila con su descripción y las cifras de
+   * gasolina y aceite aparte. Al traerlo, el gasto se parte en tres conceptos y
+   * la descripción queda en el suyo. Eso se leía como si la gasolina se cobrara
+   * dos veces: arriba $170.000 y otra vez nombrada en «Gasolina, aceite,
+   * cuchillas y botas».
+   *
+   * La descripción NO se mueve de su fila: es la anotación de ese gasto y ahí
+   * hace falta. Lo que se añade es lo que faltaba para entenderlo — cada
+   * subcomponente dice que es «Parte de la caja menor», el total va a la vista
+   * para comprobar que la suma cuadra, y debajo se dice con todas las letras
+   * que gasolina y aceite no se suman aparte (§13).
+   */
+  filaDetalle(c, dets, busca) {
+    const haySub = dets.some(d => d.rol === RolEstadistico.GASOLINA || d.rol === RolEstadistico.ACEITE);
+    const suma = U.sumBy(dets, d => d.valor);
+    return '<tr class="det-fila hidden" data-det="' + attr(c.id) + '"><td colspan="13">' +
+      '<div class="det-caja">' +
+      (dets.length
+        ? '<table class="tbl-mini"><thead><tr><th>Desglose del total</th><th>Descripción</th>' +
+          '<th class="num">Valor</th></tr></thead><tbody>' +
+          dets.map(d => {
+            const sub = d.rol === RolEstadistico.GASOLINA || d.rol === RolEstadistico.ACEITE;
+            return '<tr><td class="nowrap">' + Txt.resaltar(d.categoriaNombre || '—', busca) +
+              (sub ? ' <span class="txt-3 fs11">Parte de la caja menor</span>' : '') + '</td>' +
+              '<td>' + (String(d.descripcion || '').trim()
+                ? Txt.resaltar(d.descripcion, busca) : '<span class="txt-3">—</span>') + '</td>' +
+              '<td class="num">' + Money.format(d.valor) + '</td></tr>';
+          }).join('') +
+          '</tbody><tfoot>' +
+          (c.retencion
+            ? '<tr><td colspan="2">Suma de los conceptos</td>' +
+              '<td class="num">' + Money.format(suma) + '</td></tr>' +
+              '<tr><td colspan="2">Retención</td>' +
+              '<td class="num">− ' + Money.format(c.retencion) + '</td></tr>'
+            : '') +
+          '<tr><td colspan="2">Total de la caja</td>' +
+          '<td class="num">' + Money.format(c.total) + '</td></tr>' +
+          '</tfoot></table>'
+        : '') +
+      (haySub ? '<div class="fs11 txt-3 mt8">La gasolina y el aceite son parte del total de caja menor, ' +
+                'no se suman aparte.</div>' : '') +
+      (String(c.observaciones || '').trim()
+        ? '<div class="fs12 mt8"><b>Observaciones:</b> ' + esc(c.observaciones) + '</div>' : '') +
+      '</div></td></tr>';
+  },
+
   async render(cont) {
-    Shell.titulo('Cajas menores', 'Listado, filtros y exportación');
+    Shell.titulo('Cajas menores', 'Las columnas se llaman igual que en su archivo de Excel');
     const f = Estado_App.filtrosCajas;
     cont.innerHTML = Comp.cargando();
 
     const q = Txt.norm(f.texto);
     const ctrId = ContratoRepo.activoId();
+
+    /* La categoría y la descripción viven en los detalles, no en la caja. Se
+       traen de una vez —una lectura, no una por fila— y en paralelo con las
+       aplicaciones, que tampoco dependen de nada. */
+    const [detsTodos, aplsTodas] = await Promise.all([db.getAll('detalles'), db.getAll('aplicaciones')]);
+    const detsPorCaja = new Map();
+    for (const d of detsTodos) {
+      if (!detsPorCaja.has(d.cajaId)) detsPorCaja.set(d.cajaId, []);
+      detsPorCaja.get(d.cajaId).push(d);
+    }
+    /* Gasolina y aceite ya tienen columna propia: como «categoría» de la caja
+       interesa el concepto del gasto, no sus subcomponentes. */
+    const catsDe = c => {
+      const out = [];
+      for (const d of (detsPorCaja.get(c.id) || [])) {
+        if (d.rol === RolEstadistico.GASOLINA || d.rol === RolEstadistico.ACEITE) continue;
+        const n = String(d.categoriaNombre || '').trim();
+        if (n && out.indexOf(n) < 0) out.push(n);
+      }
+      return out;
+    };
+
     const todas = await db.query('cajas', {
       indice: f.orden === 'numero' ? 'numero' : f.orden === 'total' ? 'fecha' : 'fecha',
       direccion: f.dir,
@@ -5559,22 +5750,36 @@ const VistaCajas = {
         if (f.solicitanteId && c.solicitanteId !== f.solicitanteId) return false;
         if (f.municipioId && c.municipioId !== f.municipioId) return false;
         if (f.consignoId && c.consignoId !== f.consignoId) return false;
-        if (f.desde && c.fecha < f.desde) return false;
-        if (f.hasta && c.fecha > f.hasta) return false;
+        /* El rango se aplica cuando hay fecha «hasta». Con sólo la de inicio
+           el listado se recalculaba a media escritura y mostraba un resultado
+           que todavía no se había terminado de pedir. */
+        if (f.hasta) {
+          if (f.desde && c.fecha < f.desde) return false;
+          if (c.fecha > f.hasta) return false;
+        }
         if (f.origen && c.origen !== f.origen) return false;
+        if (f.categoriaId && !(detsPorCaja.get(c.id) || []).some(d => d.categoriaId === f.categoriaId)) return false;
         if (q) {
+          const ds = detsPorCaja.get(c.id) || [];
           const blob = [c.numero, Comp.nombreSolicitante(c), c.municipioNombre, c.observaciones,
-                        c.solicitante && c.solicitante.cedula, Comp.nombreConsigno(c)].join(' ');
+                        c.solicitante && c.solicitante.cedula, Comp.nombreConsigno(c),
+                        ds.map(d => d.categoriaNombre).join(' '), ds.map(d => d.descripcion).join(' ')].join(' ');
           if (!Txt.norm(blob).includes(q)) return false;
         }
         return true;
       }
     });
-    if (f.orden === 'total') todas.sort(U.by('total', f.dir));
+    /* Dentro de un mismo día manda el consecutivo: es el orden en que se
+       registraron y el que se espera al leer la columna NÚMERO de arriba abajo.
+       Ambos campos ordenan bien como texto (la fecha es ISO y el consecutivo va
+       con ceros delante), así que se comparan juntos. */
+    if (f.orden === 'fecha') todas.sort(U.by(c => c.fecha + '|' + (c.numero || ''), f.dir));
+    else if (f.orden === 'total') todas.sort(U.by('total', f.dir));
     else if (f.orden === 'numero') todas.sort(U.by('numero', f.dir));
     else if (f.orden === 'solicitante') todas.sort(U.by(c => Comp.nombreSolicitante(c), f.dir));
+    else if (f.orden === 'categoria') todas.sort(U.by(c => Txt.norm(catsDe(c)[0] || ''), f.dir));
 
-    const apls = await db.getAll('aplicaciones');
+    const apls = aplsTodas;
     const repuesto = new Map();
     apls.forEach(a => repuesto.set(a.cajaId, (repuesto.get(a.cajaId) || 0) + a.monto));
 
@@ -5587,9 +5792,15 @@ const VistaCajas = {
     const sumTotal = U.sumBy(vivas, c => c.total);
     const sumPend = U.sumBy(vivas, c => Finanzas.pendienteDe(c, repuesto.get(c.id) || 0));
 
-    const th = (campo, txt, cls) => {
+    /* Los encabezados llevan los MISMOS nombres que el archivo de Excel, para
+       poder comparar las dos pantallas sin traducir. Donde el nombre del
+       archivo no dice por sí solo qué hay dentro —CONCEPTO son personas— la
+       explicación va en el globo de ayuda, que no ocupa ancho. */
+    const th = (campo, txt, cls, ayuda) => {
       const act = f.orden === campo;
-      return '<th class="sortable' + (act ? ' sorted' : '') + (cls ? ' ' + cls : '') + '" data-act="ordenar" data-campo="' + campo + '">' +
+      return '<th class="sortable' + (act ? ' sorted' : '') + (cls ? ' ' + cls : '') +
+        '" data-act="ordenar" data-campo="' + campo + '"' +
+        (ayuda ? ' title="' + attr(ayuda) + '"' : '') + '>' +
         esc(txt) + '<span class="sarrow">' + (act ? (f.dir === 'asc' ? '▲' : '▼') : '↕') + '</span></th>';
     };
 
@@ -5606,16 +5817,19 @@ const VistaCajas = {
       '<div class="card mb16"><div class="card-b" style="padding:12px 14px">' +
       '<div class="filters" style="margin:0">' +
         '<div class="field" style="flex:1 1 220px"><label>Búsqueda</label>' +
-          '<input class="inp" placeholder="Número, solicitante, cédula, municipio…" value="' + attr(f.texto) + '" data-act="fTexto"></div>' +
+          '<input class="inp" placeholder="Número, concepto, cédula, ubicación, descripción…" value="' +
+          attr(f.texto) + '" data-act="fTexto" data-vivo></div>' +
         '<div class="field"><label>Estado</label><select class="inp" data-act="fEstado">' +
           '<option value="">Todos</option>' +
           Object.keys(ESTADO_CAJA_META).map(k => '<option value="' + k + '"' + (f.estado === k ? ' selected' : '') + '>' +
             ESTADO_CAJA_META[k].label + '</option>').join('') + '</select></div>' +
-        '<div class="field"><label>Solicitante</label><select class="inp" data-act="fSolicitante">' +
+        '<div class="field"><label title="Como en el Excel: la persona que solicita">Concepto</label>' +
+          '<select class="inp" data-act="fSolicitante">' +
           '<option value="">Todos</option>' +
           PersonaRepo.todas().sort(U.by('nombre')).map(p => '<option value="' + p.id + '"' +
             (f.solicitanteId === p.id ? ' selected' : '') + '>' + esc(p.nombre) + '</option>').join('') + '</select></div>' +
-        '<div class="field"><label>Municipio</label><select class="inp" data-act="fMunicipio">' +
+        '<div class="field"><label title="Como en el Excel: el municipio">Ubicación</label>' +
+          '<select class="inp" data-act="fMunicipio">' +
           '<option value="">Todos</option>' +
           MunicipioRepo.todos().map(m => '<option value="' + m.id + '"' + (f.municipioId === m.id ? ' selected' : '') + '>' +
             esc(m.nombre) + '</option>').join('') + '</select></div>' +
@@ -5623,26 +5837,54 @@ const VistaCajas = {
           '<option value="">Todos</option>' +
           PersonaRepo.todas().filter(p => p.esFinanciador).map(p => '<option value="' + p.id + '"' +
             (f.consignoId === p.id ? ' selected' : '') + '>' + esc(p.nombre) + '</option>').join('') + '</select></div>' +
+        '<div class="field"><label>Categoría</label><select class="inp" data-act="fCategoria">' +
+          '<option value="">Todas</option>' +
+          CategoriaRepo.todas().map(k => '<option value="' + attr(k.id) + '"' +
+            (f.categoriaId === k.id ? ' selected' : '') + '>' + esc(k.nombre) + '</option>').join('') + '</select></div>' +
         '<div class="field"><label>Desde</label><input type="date" class="inp" value="' + attr(f.desde) + '" data-act="fDesde"></div>' +
         '<div class="field"><label>Hasta</label><input type="date" class="inp" value="' + attr(f.hasta) + '" data-act="fHasta"></div>' +
         '<button class="btn" data-act="limpiar">' + Icon('refresh', '', 13) + 'Limpiar</button>' +
-      '</div></div></div>' +
+      '</div>' +
+      (f.desde && !f.hasta
+        ? '<div class="fs11 txt-3" style="margin-top:8px">' + Icon('info', '', 12) +
+          ' Escriba también la fecha <b>hasta</b> para aplicar el rango.</div>'
+        : '') +
+      '</div></div>' +
 
-      '<div class="card"><div class="card-b flush"><div class="tbl-wrap"><table class="tbl">' +
-      '<thead><tr>' + th('numero', 'Número') + th('fecha', 'Fecha') + th('solicitante', 'Solicitante') +
-      '<th>Municipio</th><th>Consignó</th>' + th('total', 'Total', 'num') +
-      '<th class="num">Gasolina</th><th class="num">Aceite</th><th class="num">Pendiente</th><th>Estado</th><th></th>' +
+      '<div class="card"><div class="card-b flush"><div class="tbl-wrap"><table class="tbl compacta">' +
+      '<thead><tr><th style="width:30px"></th>' +
+      th('numero', 'Número') + th('fecha', 'Fecha') + th('categoria', 'Categoría') +
+      th('solicitante', 'Concepto', '', 'Como en el Excel. Es la persona que solicita el dinero.') +
+      '<th title="Como en el Excel. Es el municipio de la operación.">Ubicación</th>' +
+      '<th title="Quién adelantó el dinero. No es quien lo solicita.">Consignó</th>' + th('total', 'Total', 'num') +
+      '<th class="num">Gasolina</th><th class="num">Aceite</th>' +
+      '<th class="num" title="Del programa: cuánto falta por reponer de esta caja.">Pendiente</th>' +
+      '<th title="Del programa: en qué punto va la caja.">Estado</th><th></th>' +
       '</tr></thead><tbody>' +
       (pagina.length ? pagina.map(c => {
         const rep = repuesto.get(c.id) || 0;
         const pend = Finanzas.pendienteDe(c, rep);
+        const cats = catsDe(c);
+        const dets = (detsPorCaja.get(c.id) || []).slice().sort(U.by('orden'));
+        const hayTexto = dets.some(d => String(d.descripcion || '').trim()) || String(c.observaciones || '').trim();
         return '<tr class="row-click" data-ir="caja/' + attr(c.id) + '">' +
-          '<td class="mono nowrap">' + esc(c.numero) +
+          '<td class="col-exp">' + (hayTexto
+            ? '<button class="btn btn-sm btn-ghost btn-icon" data-act="verTexto" data-id="' + attr(c.id) +
+              '" title="Ver la descripción">' + Icon('chevR', '', 13) + '</button>'
+            : '') + '</td>' +
+          '<td class="mono nowrap">' + Txt.resaltar(c.numero, f.texto) +
             (c.requiereRevision ? ' <span title="Requiere revisión" style="color:var(--warn-500)">⚠</span>' : '') + '</td>' +
           '<td class="nowrap">' + Fecha.corta(c.fecha) + '</td>' +
-          '<td class="trunc" style="max-width:190px">' + esc(Comp.nombreSolicitante(c)) + '</td>' +
-          '<td class="trunc" style="max-width:130px">' + esc(c.municipioNombre || '—') + '</td>' +
-          '<td class="trunc" style="max-width:120px">' + esc(Comp.nombreConsigno(c)) + '</td>' +
+          '<td class="trunc" style="max-width:126px" title="' + attr(cats.join(' · ')) + '">' +
+            (cats.length ? Txt.resaltar(cats[0], f.texto) + (cats.length > 1
+              ? ' <span class="txt-3 fs11">+' + (cats.length - 1) + '</span>' : '')
+              : '<span class="txt-3">—</span>') + '</td>' +
+          '<td class="trunc" style="max-width:148px" title="' + attr(Comp.nombreSolicitante(c)) + '">' +
+            Txt.resaltar(Comp.nombreSolicitante(c), f.texto) + '</td>' +
+          '<td class="trunc" style="max-width:104px" title="' + attr(c.municipioNombre || '') + '">' +
+            Txt.resaltar(c.municipioNombre || '—', f.texto) + '</td>' +
+          '<td class="trunc" style="max-width:92px" title="' + attr(Comp.nombreConsigno(c)) + '">' +
+            Txt.resaltar(Comp.nombreConsigno(c), f.texto) + '</td>' +
           '<td class="num"><b>' + Money.format(c.total) + '</b></td>' +
           '<td class="num">' + (c.gasolina ? Money.format(c.gasolina) : '<span class="txt-3">—</span>') + '</td>' +
           '<td class="num">' + (c.aceite ? Money.format(c.aceite) : '<span class="txt-3">—</span>') + '</td>' +
@@ -5655,13 +5897,17 @@ const VistaCajas = {
             '<button class="btn btn-sm btn-ghost btn-icon" data-act="copiarImagen" data-id="' + attr(c.id) +
               '" title="Copiar el formato como imagen para WhatsApp">' + Icon('copy', '', 13) + '</button>' +
           '</td>' +
-          '</tr>';
+          '</tr>' +
+          /* La descripción es texto largo: en una columna quedaría cortada y
+             sin poder copiarse. Va en su propia fila, desplegable, con TODOS
+             los detalles de la caja y su texto completo. */
+          (hayTexto ? VistaCajas.filaDetalle(c, dets, f.texto) : '');
       }).join('')
-        : '<tr><td colspan="11">' + Comp.vacio({ icono: 'caja', titulo: 'Sin resultados',
+        : '<tr><td colspan="13">' + Comp.vacio({ icono: 'caja', titulo: 'Sin resultados',
             texto: todas.length === 0 ? 'Aún no hay cajas menores registradas o los filtros no coinciden.' : 'Ajuste los filtros.',
             accion: 'nueva', textoAccion: 'Crear la primera caja', iconoAccion: 'plus' }) + '</td></tr>') +
       '</tbody>' +
-      (pagina.length ? '<tfoot><tr><td colspan="5">Subtotal de la página</td>' +
+      (pagina.length ? '<tfoot><tr><td colspan="7">Subtotal de la página</td>' +
         '<td class="num">' + Money.format(U.sumBy(pagina.filter(c => c.estado !== EstadoCaja.ANULADA), c => c.total)) + '</td>' +
         '<td class="num">' + Money.format(U.sumBy(pagina, c => c.gasolina)) + '</td>' +
         '<td class="num">' + Money.format(U.sumBy(pagina, c => c.aceite)) + '</td>' +
@@ -5677,10 +5923,11 @@ const VistaCajas = {
       fSolicitante: el => { f.solicitanteId = el.value; recargar(); },
       fMunicipio: el => { f.municipioId = el.value; recargar(); },
       fConsigno: el => { f.consignoId = el.value; recargar(); },
-      fDesde: el => { f.desde = el.value; recargar(); },
-      fHasta: el => { f.hasta = el.value; recargar(); },
+      fCategoria: el => { f.categoriaId = el.value; recargar(); },
+      fDesde: Comp.filtroFecha(v => { f.desde = v; recargar(); }),
+      fHasta: Comp.filtroFecha(v => { f.hasta = v; recargar(); }),
       limpiar: () => { Object.assign(f, { texto: '', estado: '', solicitanteId: '', municipioId: '', consignoId: '',
-        desde: '', hasta: '', origen: '', pagina: 1 }); VistaCajas.render(cont); },
+        categoriaId: '', desde: '', hasta: '', origen: '', pagina: 1 }); VistaCajas.render(cont); },
       ordenar: el => {
         const campo = el.dataset.campo;
         if (f.orden === campo) f.dir = f.dir === 'asc' ? 'desc' : 'asc';
@@ -5690,6 +5937,13 @@ const VistaCajas = {
       irPagina: el => { f.pagina = U.clamp(Number(el.dataset.pagina), 1, totalPags); VistaCajas.render(cont); },
       cambiarTam: el => { Prefs.set('paginaTam', Number(el.value)); f.pagina = 1; VistaCajas.render(cont); },
       nueva: () => Router.ir('caja-nueva'),
+      verTexto: el => {
+        const fila = cont.querySelector('tr.det-fila[data-det="' + el.dataset.id + '"]');
+        if (!fila) return;
+        const abierta = !fila.classList.toggle('hidden');
+        el.innerHTML = Icon(abierta ? 'chevD' : 'chevR', '', 13);
+        el.title = abierta ? 'Ocultar la descripción' : 'Ver la descripción';
+      },
       verFormato: async el => { const c = await CajaRepo.get(el.dataset.id); await Documento.previsualizar(c); },
       copiarImagen: async el => {
         const c = await CajaRepo.get(el.dataset.id);
@@ -5746,6 +6000,14 @@ const VistaCaja = {
     const consIds = U.uniq(apls.map(a => a.consignacionId));
     const cons = await db.getMany('consignaciones', consIds);
     const conPorId = new Map(cons.map(c => [c.id, c]));
+    /* El comprobante de la transferencia puede estar colgado de la caja o de la
+       consignación que la repone. Da igual dónde se guardara: desde la caja se
+       ven los dos sitios, para no tener que ir a buscarlo. */
+    const docsCons = consIds.length
+      ? (await Promise.all(consIds.map(i => ConsignacionRepo.documentos(i)))).reduce((a, b) => a.concat(b), [])
+      : [];
+    const esComprobante = d => d.tipo === TipoDocumento.COMPROBANTE_CONSIGNACION;
+    const comprobantes = docs.filter(esComprobante).concat(docsCons.filter(esComprobante));
     const repuesto = Finanzas.repuesto(apls);
     const pendiente = Finanzas.pendiente(caja, apls);
     const calc = Finanzas.calcular(detalles, caja.retencion);
@@ -5863,6 +6125,33 @@ const VistaCaja = {
             '<div>Reposición parcial. Saldo pendiente: <b>' + Money.format(pendiente) + '</b></div></div>' : '')
           : '<div class="empty" style="padding:20px">' + Icon('clock') +
             '<h4>Sin reposición</h4><p>Pendiente por reponer: <b>' + Money.format(pendiente) + '</b></p></div>') +
+
+        /* Comprobante de la transferencia. Va aquí, junto a la reposición, y no
+           perdido entre los soportes de compra: es la prueba de que el dinero
+           de ESTA caja se giró. */
+        '<div class="divider"></div>' +
+        '<div class="flex aic g8 mb8">' +
+          '<b class="fs12">Comprobante de la transferencia</b>' +
+          (comprobantes.length ? '<span class="pill np p-green">' + comprobantes.length + '</span>' : '') +
+          '<span style="flex:1"></span>' +
+          '<button class="btn btn-sm" data-act="adjuntarComprobante">' + Icon('upload', '', 12) + 'Adjuntar</button>' +
+          '<input type="file" id="inComprobante" multiple hidden>' +
+        '</div>' +
+        (comprobantes.length
+          ? '<div class="comp-lista">' + comprobantes.map(d =>
+              '<div class="comp-item">' +
+                '<span class="comp-ic">' + Icon(U.esImagen(d.mime) ? 'eye' : 'file', '', 13) + '</span>' +
+                '<button class="link fs12 trunc" style="text-align:left" data-act="expVer" data-id="' + attr(d.id) +
+                  '" title="' + attr(d.nombre) + '">' + esc(d.nombre) + '</button>' +
+                '<span class="txt-3 fs11 nowrap">' + Txt.bytes(d.tamano) + '</span>' +
+                '<span class="txt-3 fs11 nowrap">' + (d.consignacionId
+                  ? esc((conPorId.get(d.consignacionId) || {}).numero || 'consignación')
+                  : 'en esta caja') + '</span>' +
+                '<button class="btn btn-sm btn-ghost btn-icon" data-act="expDescargar" data-id="' + attr(d.id) +
+                  '" title="Descargar">' + Icon('download', '', 12) + '</button>' +
+              '</div>').join('') + '</div>'
+          : '<div class="fs12 txt-3">Todavía no hay comprobante de la transferencia de esta caja. ' +
+            'Adjunte aquí la captura o el PDF que le envíe quien consignó.</div>') +
         '</div></div>' +
 
       '<div class="card"><div class="card-h"><h3>Trazabilidad</h3></div><div class="card-b">' +
@@ -5910,9 +6199,20 @@ const VistaCaja = {
         VistaCaja.render(cont, params);
       },
       revelarCuenta: () => { $('#ctaMask').textContent = sol.numeroCuenta || VALOR_NO_DISPONIBLE; },
+      adjuntarComprobante: () => { const i = $('#inComprobante'); if (i) i.click(); },
       masAcciones: () => VistaCaja.menuAcciones(caja, cont, params),
       ...Expediente.acciones({ cajaId: caja.id, recargar: () => VistaCaja.render(cont, params) })
     });
+
+    /* Se adjunta a ESTA caja y ya marcado como comprobante de consignación:
+       sin tener que elegir el tipo en un desplegable cada vez. */
+    const inC = $('#inComprobante');
+    if (inC) inC.onchange = async () => {
+      const files = [...inC.files];
+      if (!files.length) return;
+      await Expediente.subir(files, { cajaId: caja.id, tipo: TipoDocumento.COMPROBANTE_CONSIGNACION });
+      VistaCaja.render(cont, params);
+    };
   },
 
   menuAcciones(caja, cont, params) {
@@ -6553,7 +6853,7 @@ const VistaConsignaciones = {
 
       '<div class="card mb16"><div class="card-b" style="padding:12px 14px"><div class="filters" style="margin:0">' +
       '<div class="field" style="flex:1 1 220px"><label>Búsqueda</label>' +
-      '<input class="inp" placeholder="Número, referencia, banco, beneficiario…" value="' + attr(f.texto) + '" data-act="cTexto"></div>' +
+      '<input class="inp" placeholder="Número, referencia, banco, beneficiario…" value="' + attr(f.texto) + '" data-act="cTexto" data-vivo></div>' +
       '<div class="field"><label>Beneficiario</label><select class="inp" data-act="cBenef"><option value="">Todos</option>' +
       PersonaRepo.todas().filter(p => p.esFinanciador).map(p => '<option value="' + p.id + '"' +
         (f.beneficiarioId === p.id ? ' selected' : '') + '>' + esc(p.nombre) + '</option>').join('') + '</select></div>' +
@@ -6592,8 +6892,8 @@ const VistaConsignaciones = {
     setAcciones({
       cTexto: U.debounce(el => { f.texto = el.value; recargar(); }, 260),
       cBenef: el => { f.beneficiarioId = el.value; recargar(); },
-      cDesde: el => { f.desde = el.value; recargar(); },
-      cHasta: el => { f.hasta = el.value; recargar(); },
+      cDesde: Comp.filtroFecha(v => { f.desde = v; recargar(); }),
+      cHasta: Comp.filtroFecha(v => { f.hasta = v; recargar(); }),
       cLimpiar: () => { Object.assign(f, { texto: '', beneficiarioId: '', desde: '', hasta: '', pagina: 1 }); VistaConsignaciones.render(cont); },
       cPagina: el => { f.pagina = U.clamp(Number(el.dataset.pagina), 1, totalPags); VistaConsignaciones.render(cont); },
       cTam: el => { Prefs.set('paginaTam', Number(el.value)); f.pagina = 1; VistaConsignaciones.render(cont); },
@@ -6654,8 +6954,8 @@ const VistaConsignacionForm = {
       '<button class="btn btn-sm" data-act="selNada">Ninguna</button>' +
       '</div></div>' +
       '<div class="card-b flush"><div class="tbl-wrap tbl-scroll"><table class="tbl">' +
-      '<thead><tr><th style="width:34px"></th><th>Número</th><th>Fecha</th><th>Solicitante</th>' +
-      '<th>Municipio</th><th class="num">Total</th><th class="num">Repuesto</th><th class="num">Pendiente</th>' +
+      '<thead><tr><th style="width:34px"></th><th>Número</th><th>Fecha</th><th>Concepto</th>' +
+      '<th>Ubicación</th><th class="num">Total</th><th class="num">Repuesto</th><th class="num">Pendiente</th>' +
       '<th class="num" style="width:130px">Aplicar</th></tr></thead>' +
       '<tbody id="tbPend"></tbody></table></div></div></div></div>' +
 
@@ -6867,7 +7167,7 @@ const VistaConsignacion = {
       '<div class="card"><div class="card-h"><h3>Cajas menores repuestas</h3>' +
       '<span class="ch-sub">Esta consignación repone el dinero de estas cajas</span></div>' +
       '<div class="card-b flush"><div class="tbl-wrap"><table class="tbl">' +
-      '<thead><tr><th>Número</th><th>Fecha</th><th>Solicitante</th><th>Municipio</th>' +
+      '<thead><tr><th>Número</th><th>Fecha</th><th>Concepto</th><th>Ubicación</th>' +
       '<th class="num">Total caja</th><th class="num">Aplicado</th><th>Estado</th></tr></thead><tbody>' +
       (d.filas.length ? d.filas.map(f => {
         const cj = f.caja;
@@ -6963,7 +7263,7 @@ const VistaPersonas = {
 
       '<div class="card mb16"><div class="card-b" style="padding:12px 14px"><div class="filters" style="margin:0">' +
       '<div class="field" style="flex:1 1 240px"><label>Búsqueda</label>' +
-      '<input class="inp" placeholder="Nombre, cédula, banco, cargo…" value="' + attr(f.texto) + '" data-act="pTexto"></div>' +
+      '<input class="inp" placeholder="Nombre, cédula, banco, cargo…" value="' + attr(f.texto) + '" data-act="pTexto" data-vivo></div>' +
       '<div class="field"><label>Estado</label><select class="inp" data-act="pEstado">' +
       '<option value="">Todos</option><option value="ACTIVO"' + (f.estado === 'ACTIVO' ? ' selected' : '') + '>Activos</option>' +
       '<option value="INACTIVO"' + (f.estado === 'INACTIVO' ? ' selected' : '') + '>Inactivos</option></select></div>' +
@@ -7225,7 +7525,7 @@ const VistaPersona = {
       '<div class="card"><div class="card-h"><h3>Historial de cajas menores</h3>' +
       '<span class="ch-sub">' + r.cajas.length + ' registro(s)</span></div>' +
       '<div class="card-b flush"><div class="tbl-wrap tbl-scroll"><table class="tbl">' +
-      '<thead><tr><th>Número</th><th>Fecha</th><th>Municipio</th><th>Conceptos</th>' +
+      '<thead><tr><th>Número</th><th>Fecha</th><th>Ubicación</th><th>Categoría</th>' +
       '<th class="num">Gasolina</th><th class="num">Aceite</th><th class="num">Total</th>' +
       '<th class="num">Pendiente</th><th>Estado</th></tr></thead><tbody>' +
       (r.cajas.length ? r.cajas.map(c => {
@@ -7854,8 +8154,8 @@ const VistaEstadisticas = {
         VistaEstadisticas.render(cont); },
       'est:anio': el => { f.anio = el.value; VistaEstadisticas.render(cont); },
       'est:mes': el => { f.mes = el.value; VistaEstadisticas.render(cont); },
-      'est:desde': el => { f.desde = el.value; VistaEstadisticas.render(cont); },
-      'est:hasta': el => { f.hasta = el.value; VistaEstadisticas.render(cont); },
+      'est:desde': Comp.filtroFecha(v => { f.desde = v; VistaEstadisticas.render(cont); }),
+      'est:hasta': Comp.filtroFecha(v => { f.hasta = v; VistaEstadisticas.render(cont); }),
       'est:sol': el => { f.solicitanteId = el.value; VistaEstadisticas.render(cont); },
       'est:mun': el => { f.municipioId = el.value; VistaEstadisticas.render(cont); },
       'est:cat': el => { f.categoriaId = el.value; VistaEstadisticas.render(cont); },
@@ -7958,8 +8258,8 @@ const VistaAnalisis = {
         VistaAnalisis.render(cont); },
       'ana:anio': el => { f.anio = el.value; VistaAnalisis.render(cont); },
       'ana:mes': el => { f.mes = el.value; VistaAnalisis.render(cont); },
-      'ana:desde': el => { f.desde = el.value; VistaAnalisis.render(cont); },
-      'ana:hasta': el => { f.hasta = el.value; VistaAnalisis.render(cont); }
+      'ana:desde': Comp.filtroFecha(v => { f.desde = v; VistaAnalisis.render(cont); }),
+      'ana:hasta': Comp.filtroFecha(v => { f.hasta = v; VistaAnalisis.render(cont); })
     });
   }
 };
@@ -8013,7 +8313,7 @@ const VistaMunicipio = {
       '</tbody></table></div></div></div></div>' +
 
       '<div class="card"><div class="card-h"><h3>Cajas menores del municipio</h3></div><div class="card-b flush">' +
-      '<div class="tbl-wrap tbl-scroll"><table class="tbl"><thead><tr><th>Número</th><th>Fecha</th><th>Solicitante</th>' +
+      '<div class="tbl-wrap tbl-scroll"><table class="tbl"><thead><tr><th>Número</th><th>Fecha</th><th>Concepto</th>' +
       '<th class="num">Gasolina</th><th class="num">Aceite</th><th class="num">Total</th><th>Estado</th></tr></thead><tbody>' +
       r.cajas.map(c => '<tr class="row-click" data-ir="caja/' + attr(c.id) + '">' +
         '<td class="mono">' + esc(c.numero) + '</td><td class="nowrap">' + Fecha.corta(c.fecha) + '</td>' +
@@ -8073,8 +8373,8 @@ const VistaCategoria = {
       Comp.ranking(r.porMunicipio, { limite: 12, color: 'var(--info-500)',
         ruta: it => it.ref ? 'municipio/' + it.clave : null }) + '</div></div></div>' +
       '<div class="card"><div class="card-h"><h3>Movimientos</h3></div><div class="card-b flush">' +
-      '<div class="tbl-wrap tbl-scroll"><table class="tbl"><thead><tr><th>Fecha</th><th>Caja</th><th>Solicitante</th>' +
-      '<th>Descripción</th><th>Municipio</th><th class="num">Valor</th></tr></thead><tbody>' +
+      '<div class="tbl-wrap tbl-scroll"><table class="tbl"><thead><tr><th>Fecha</th><th>Caja</th><th>Concepto</th>' +
+      '<th>Descripción</th><th>Ubicación</th><th class="num">Valor</th></tr></thead><tbody>' +
       r.detalles.sort(U.by('fecha', 'desc')).slice(0, 500).map(d => {
         const c = v.cajaPorId.get(d.cajaId);
         return '<tr class="row-click" data-ir="caja/' + attr(d.cajaId) + '">' +
@@ -8133,7 +8433,7 @@ const VistaExpediente = {
       '</div>' +
       '<div class="card mb16"><div class="card-b" style="padding:12px 14px"><div class="filters" style="margin:0">' +
       '<div class="field" style="flex:1 1 260px"><label>Búsqueda</label>' +
-      '<input class="inp" placeholder="Nombre del archivo, caja, consignación…" value="' + attr(f.texto) + '" data-act="dTexto"></div>' +
+      '<input class="inp" placeholder="Nombre del archivo, caja, consignación…" value="' + attr(f.texto) + '" data-act="dTexto" data-vivo></div>' +
       '<div class="field"><label>Vinculado a</label><select class="inp" data-act="dVinculo">' +
       '<option value="">Todo</option><option value="caja"' + (f.vinculo === 'caja' ? ' selected' : '') + '>Cajas menores</option>' +
       '<option value="consignacion"' + (f.vinculo === 'consignacion' ? ' selected' : '') + '>Consignaciones</option>' +
@@ -8640,8 +8940,8 @@ const Exportar = {
   },
   COLS_CAJAS: [
     { titulo: 'Número', ancho: 16 }, { titulo: 'Fecha', ancho: 12, tipo: 'fecha' },
-    { titulo: 'Solicitante', ancho: 30 }, { titulo: 'Cédula', ancho: 14 },
-    { titulo: 'Municipio', ancho: 18 }, { titulo: 'Dirección', ancho: 24 }, { titulo: 'Consignó', ancho: 20 },
+    { titulo: 'Concepto', ancho: 30 }, { titulo: 'Cédula', ancho: 14 },
+    { titulo: 'Ubicación', ancho: 18 }, { titulo: 'Dirección', ancho: 24 }, { titulo: 'Consignó', ancho: 20 },
     { titulo: 'Banco', ancho: 16 }, { titulo: 'Tipo cuenta', ancho: 13 }, { titulo: 'N.° cuenta', ancho: 18 },
     { titulo: 'Subtotal', ancho: 14, tipo: 'dinero' }, { titulo: 'Retención', ancho: 12, tipo: 'dinero' },
     { titulo: 'Total', ancho: 14, tipo: 'dinero' }, { titulo: 'Gasolina', ancho: 13, tipo: 'dinero' },
@@ -11946,7 +12246,31 @@ const Pruebas = {
         { nombre: 'Eliminar documento con su archivo', fn: async ctx => {
             await DocumentoService.eliminar(ctx.docPdf.id);
             Pruebas.igual(await DocumentoService.blob(ctx.docPdf.id), null, 'El binario debe desaparecer');
-          } }
+          } },
+        { nombre: 'CRÍTICO · el comprobante queda ligado a la caja que se pagó', fn: async ctx => {
+            /* Fabián transfiere a UNA caja concreta y manda su comprobante. Ese
+               soporte tiene que quedar colgado de esa caja, no en un montón
+               común: es la prueba de que ese dinero, el de esa caja, se giró. */
+            const png = new File([new Uint8Array([137, 80, 78, 71])], 'comprobante.png', { type: 'image/png' });
+            const doc = await DocumentoService.adjuntar(png,
+              { cajaId: ctx.caja300.id, tipo: TipoDocumento.COMPROBANTE_CONSIGNACION });
+            Pruebas.igual(doc.cajaId, ctx.caja300.id, 'Apunta a esa caja concreta');
+            const docs = await CajaRepo.documentos(ctx.caja300.id);
+            const comp = docs.filter(d => d.tipo === TipoDocumento.COMPROBANTE_CONSIGNACION);
+            Pruebas.igual(comp.length, 1, 'Y se recupera desde ella');
+            const ajenos = await CajaRepo.documentos(ctx.cajaSimple.id);
+            Pruebas.igual(ajenos.filter(d => d.id === doc.id).length, 0, 'Sin aparecer en otra caja');
+
+            /* Si el comprobante se guardó en la consignación que la repone, la
+               caja también lo enseña: no importa dónde se archivara. */
+            const src = VistaCaja.render.toString();
+            Pruebas.ok(/ConsignacionRepo\.documentos/.test(src),
+              'La caja reúne también los comprobantes de sus consignaciones');
+            Pruebas.ok(/COMPROBANTE_CONSIGNACION/.test(src),
+              'Y los distingue de los soportes de compra');
+            Pruebas.ok(/adjuntarComprobante/.test(src),
+              'Con un botón propio para adjuntarlo sin elegir el tipo a mano');
+          } },
       ]
     },
     {
@@ -11988,6 +12312,221 @@ const Pruebas = {
             Pruebas.ok(r1.total > 0, 'Debe encontrar por número de caja');
             const r2 = await Buscador.buscar('Fernando');
             Pruebas.ok(r2.total > 0, 'Debe encontrar por nombre');
+          } }
+      ]
+    },
+    {
+      nombre: 'Listado de cajas: filtros y columnas',
+      casos: [
+        { nombre: 'CRÍTICO · un filtro de fecha no se aplica con el año a medias', fn: async () => {
+            /* Chrome dispara «change» en cuanto la fecha queda completa, así que
+               al teclear 2026 lo hace cuatro veces: 0002, 0020, 0202 y 2026.
+               Cada una recargaba el listado contra el servidor, y con «hasta»
+               las intermedias dejaban la pantalla en cero registros. */
+            const aplicadas = [];
+            const manejar = Comp.filtroFecha(v => aplicadas.push(v));
+            for (const v of ['0002-12-31', '0020-12-31', '0202-12-31', '2026-12-31']) manejar({ value: v });
+            await new Promise(r => setTimeout(r, 700));
+            Pruebas.igual(aplicadas.length, 1, 'Se aplica una sola vez, no cuatro');
+            Pruebas.igual(aplicadas[0], '2026-12-31', 'Y con la fecha terminada, no con un año a medias');
+          } },
+        { nombre: 'Vaciar el filtro de fecha sí se aplica', fn: async () => {
+            const aplicadas = [];
+            const manejar = Comp.filtroFecha(v => aplicadas.push(v));
+            manejar({ value: '' });
+            await new Promise(r => setTimeout(r, 700));
+            Pruebas.igual(aplicadas.length, 1, 'Borrar la fecha quita el filtro');
+            Pruebas.igual(aplicadas[0], '', 'Con valor vacío, no descartado como incompleto');
+          } },
+        { nombre: 'Ningún filtro de fecha quedó sin proteger', fn: () => {
+            const vistas = [['Cajas menores', VistaCajas], ['Consignaciones', VistaConsignaciones],
+                            ['Dashboard', VistaDashboard], ['Estadísticas', VistaEstadisticas],
+                            ['Análisis', VistaAnalisis]];
+            for (const [nombre, vista] of vistas) {
+              const src = vista.render.toString();
+              if (!/desde|hasta/.test(src)) continue;
+              Pruebas.ok(!/f\.(desde|hasta) = el\.value/.test(src),
+                nombre + ': la fecha pasa por el filtro con espera');
+            }
+          } },
+        { nombre: 'CRÍTICO · el desglose no hace parecer que la gasolina se cobra dos veces', fn: () => {
+            /* Caso real del archivo: una fila con total 300.000, gasolina
+               170.000, aceite 45.000 y una sola descripción que los menciona.
+               Al partirse en tres conceptos, esa descripción quedaba pegada al
+               último y se leía como un cobro repetido. */
+            const caja = { id: 'cm_x', total: 30000000, retencion: 0, observaciones: '' };
+            const dets = [
+              { categoriaNombre: 'Gasolina', rol: RolEstadistico.GASOLINA, descripcion: '', valor: 17000000 },
+              { categoriaNombre: 'Aceite', rol: RolEstadistico.ACEITE, descripcion: '', valor: 4500000 },
+              { categoriaNombre: 'Caja menor', rol: null,
+                descripcion: 'Gasolina, aceite, cuchillas y botas', valor: 8500000 }
+            ];
+            const html = VistaCajas.filaDetalle(caja, dets);
+            const veces = (html.match(/Gasolina, aceite, cuchillas y botas/g) || []).length;
+            Pruebas.igual(veces, 1, 'La descripción aparece una vez, sin repetirse');
+            /* La anotación NO se saca de su fila: es de ese gasto y ahí hace falta. */
+            const fila = html.split('<tr>').find(x => x.includes('Caja menor'));
+            Pruebas.ok(fila && fila.includes('Gasolina, aceite, cuchillas y botas'),
+              'Y sigue en la fila de su concepto, no movida a otro sitio');
+            Pruebas.ok(!html.includes('Sin descripción'),
+              'Sin tres «Sin descripción» seguidos, que era puro ruido');
+            Pruebas.ok(html.includes('Parte de la caja menor'),
+              'Gasolina y aceite quedan marcados como partes, no como extras (§13)');
+            Pruebas.ok(html.includes('parte del total de caja menor, no se suman aparte'),
+              'Y se dice con todas las letras debajo del desglose');
+            Pruebas.ok(html.includes('Total de la caja') && html.includes(Money.format(30000000)),
+              'La suma queda a la vista para comprobar que cuadra');
+          } },
+        { nombre: 'Con descripciones distintas se mantiene la columna', fn: () => {
+            const caja = { id: 'cm_y', total: 9000000, retencion: 0, observaciones: '' };
+            const dets = [
+              { categoriaNombre: 'Abono', rol: null, descripcion: 'Cinco bultos', valor: 5000000 },
+              { categoriaNombre: 'Nailon', rol: null, descripcion: 'Dos rollos', valor: 4000000 }
+            ];
+            const html = VistaCajas.filaDetalle(caja, dets);
+            Pruebas.ok(html.includes('<th>Descripción</th>'), 'La columna de descripción siempre está');
+            Pruebas.ok(html.includes('Cinco bultos') && html.includes('Dos rollos'),
+              'Y cada concepto conserva la suya');
+          } },
+        { nombre: 'Con retención se explica por qué la suma no es el total', fn: () => {
+            const caja = { id: 'cm_z', total: 9500000, retencion: 500000, observaciones: '' };
+            const dets = [{ categoriaNombre: 'Servicio', rol: null, descripcion: 'Poda', valor: 10000000 }];
+            const html = VistaCajas.filaDetalle(caja, dets);
+            Pruebas.ok(html.includes('Suma de los conceptos') && html.includes(Money.format(10000000)),
+              'Se muestra lo que suman los conceptos');
+            Pruebas.ok(html.includes('Retención'), 'Y la retención que se descuenta');
+            Pruebas.ok(html.includes(Money.format(9500000)), 'Para llegar al total real');
+          } },
+        { nombre: 'CRÍTICO · el resaltado no rompe el escapado de HTML', fn: () => {
+            /* Se marca sobre el texto ORIGINAL, escapando cada trozo por
+               separado. Si se marcara sobre HTML ya generado, una descripción
+               con etiquetas podría inyectar código en la página. */
+            const html = Txt.resaltar('<script>alert(1)<\/script> peligro', 'alert');
+            Pruebas.ok(html.includes('&lt;script&gt;'), 'Las etiquetas siguen escapadas');
+            Pruebas.ok(!/<script>/.test(html), 'Sin ninguna etiqueta viva');
+            Pruebas.ok(html.includes('<mark>alert</mark>'), 'Y la coincidencia queda marcada');
+            const div = document.createElement('div');
+            div.innerHTML = html;
+            Pruebas.ok(!div.querySelector('script'), 'Al pintarlo no aparece ningún script');
+            Pruebas.igual(div.innerText, '<script>alert(1)<\/script> peligro',
+              'El texto que se ve es exactamente el original');
+            const conComillas = Txt.resaltar('Pago a "Fulano" & Cía.', 'fulano');
+            Pruebas.ok(conComillas.includes('&amp;') && conComillas.includes('&quot;'),
+              'Comillas y ampersand también se escapan');
+          } },
+        { nombre: 'El resaltado ignora tildes y mayúsculas, pero pinta el texto tal cual', fn: () => {
+            Pruebas.igual(Txt.resaltar('MEDELLÍN', 'medellin'), '<mark>MEDELLÍN</mark>',
+              'Sin tilde encuentra con tilde, y se muestra con ella');
+            Pruebas.igual(Txt.resaltar('Sebastián Cardona', 'bastian'), 'Se<mark>bastián</mark> Cardona',
+              'La posición se mantiene pese a la tilde');
+            Pruebas.igual(Txt.resaltar('Alirio Pardo', 'zzz'), 'Alirio Pardo', 'Sin coincidencia no marca nada');
+            Pruebas.igual(Txt.resaltar('Alirio Pardo', ''), 'Alirio Pardo', 'Con la búsqueda vacía tampoco');
+            Pruebas.igual(Txt.resaltar('ala ala', 'ala'), '<mark>ala</mark> <mark>ala</mark>',
+              'Marca todas las apariciones');
+            Pruebas.igual(Txt.resaltar(null, 'a'), '', 'Un valor vacío no revienta');
+          } },
+        { nombre: 'CRÍTICO · el rango de fechas espera a la fecha «hasta»', fn: () => {
+            /* Con sólo la fecha de inicio el listado se recalculaba a media
+               escritura y enseñaba un resultado que aún no se había pedido. */
+            const cajas = [{ fecha: '2026-05-30' }, { fecha: '2026-06-15' }, { fecha: '2026-07-10' }];
+            const filtrar = f => cajas.filter(c => {
+              if (f.hasta) {
+                if (f.desde && c.fecha < f.desde) return false;
+                if (c.fecha > f.hasta) return false;
+              }
+              return true;
+            });
+            Pruebas.igual(filtrar({ desde: '2026-06-01', hasta: '' }).length, 3,
+              'Con sólo «desde» no se filtra todavía');
+            Pruebas.igual(filtrar({ desde: '2026-06-01', hasta: '2026-06-30' }).length, 1,
+              'Al escribir «hasta» se aplica el rango completo');
+            Pruebas.igual(filtrar({ desde: '', hasta: '2026-06-30' }).length, 2,
+              'Y «hasta» sola sigue valiendo');
+            const src = VistaCajas.render.toString();
+            Pruebas.ok(/if \(f\.hasta\) \{/.test(src), 'El listado aplica esa misma regla');
+            Pruebas.ok(/Escriba también la fecha/.test(src),
+              'Y avisa mientras falta, para que no parezca que no hace nada');
+          } },
+        { nombre: 'CRÍTICO · dos cajas del mismo día salen por consecutivo', fn: () => {
+            /* Ordenando sólo por fecha, las doce cajas de un mismo día salían en
+               cualquier posición y la columna NÚMERO se leía 8, 10, 9, 11, 16
+               como si faltaran consecutivos. No faltaba ninguno: era el orden. */
+            const filas = [
+              { fecha: '2025-11-07', numero: 'CM-2025-00010' },
+              { fecha: '2025-11-07', numero: 'CM-2025-00008' },
+              { fecha: '2025-11-04', numero: 'CM-2025-00007' },
+              { fecha: '2025-11-07', numero: 'CM-2025-00009' }
+            ];
+            const clave = c => c.fecha + '|' + (c.numero || '');
+            filas.sort(U.by(clave, 'asc'));
+            Pruebas.igual(filas.map(c => c.numero.slice(-5)).join(' '), '00007 00008 00009 00010',
+              'Dentro del mismo día manda el consecutivo');
+            filas.sort(U.by(clave, 'desc'));
+            Pruebas.igual(filas.map(c => c.numero.slice(-5)).join(' '), '00010 00009 00008 00007',
+              'Y al revés, el más alto primero');
+            const src = VistaCajas.render.toString();
+            Pruebas.ok(/c\.fecha \+ '\|' \+ \(c\.numero/.test(src),
+              'El listado ordena con esa clave, no sólo con la fecha');
+          } },
+        { nombre: 'CRÍTICO · la consulta al servidor lleva desempate', fn: async () => {
+            /* Sin desempate, además del desorden, al pedir por páginas con
+               OFFSET una fila puede repetirse en dos páginas o no salir en
+               ninguna. El id es único y creciente. */
+            const ad = Object.create(SupabaseAdapter.prototype);
+            ad.url = 'https://ejemplo.supabase.co'; ad.anonKey = 'k';
+            let ruta = '';
+            ad._pedir = async r => { ruta = r; return []; };
+            await ad.query('cajas', { indice: 'fecha', direccion: 'asc' });
+            Pruebas.ok(/order=fecha\.asc,id\.asc/.test(decodeURIComponent(ruta)),
+              'Ascendente desempata por id: ' + decodeURIComponent(ruta).slice(0, 60));
+            await ad.query('cajas', { indice: 'fecha', direccion: 'desc' });
+            Pruebas.ok(/order=fecha\.desc,id\.desc/.test(decodeURIComponent(ruta)),
+              'Y descendente también');
+            await ad.query('cajas', { indice: 'id', direccion: 'asc' });
+            Pruebas.ok(!/id\.asc,id\.asc/.test(decodeURIComponent(ruta)),
+              'Sin repetir el id cuando ya se ordena por él');
+          } },
+        { nombre: 'Las columnas del listado se llaman como en el Excel', fn: () => {
+            /* El listado y el archivo se leen en paralelo: si los encabezados no
+               coinciden hay que traducir mentalmente en cada consulta. Los que
+               no existen en el archivo (PENDIENTE, ESTADO) son del programa y se
+               marcan como tales en su globo de ayuda. */
+            const src = VistaCajas.render.toString();
+            for (const t of ['Categoría', 'Concepto', 'Ubicación', 'Consignó', 'Gasolina', 'Aceite', 'Total'])
+              Pruebas.ok(src.indexOf(t) >= 0, 'El listado usa el encabezado ' + t);
+            Pruebas.ok(!/'Solicitante'/.test(src), 'Ya no lo llama Solicitante, como pidió el usuario');
+            Pruebas.ok(!/>Municipio</.test(src), 'Ni Municipio: en el archivo es UBICACIÓN');
+            Pruebas.ok(/Como en el Excel/.test(src),
+              'CONCEPTO explica en el globo de ayuda que son personas');
+            const cols = Importador.CAMPOS.map(c => c.t);
+            for (const t of ['CATEGORÍA', 'CONSIGNÓ', 'UBICACIÓN', 'CONCEPTO'])
+              Pruebas.ok(cols.indexOf(t) >= 0, t + ' sigue siendo una columna del archivo');
+          } },
+        { nombre: 'CRÍTICO · la categoría de una caja sale de sus detalles', fn: async ctx => {
+            /* La caja no guarda categoría: la guardan sus gastos. La columna
+               muestra el concepto, no los subcomponentes gasolina y aceite, que
+               ya tienen columna propia. */
+            const cat = await CategoriaRepo.obtenerOCrear('Poda de altura');
+            const gas = CategoriaRepo.porRol(RolEstadistico.GASOLINA);
+            /* Persona propia: si usara la de las demás pruebas, esta gasolina
+               entraría en su historial y descuadraría las de estadísticas. */
+            const quien = await PersonaRepo.guardar({ nombre: 'Podador de Prueba', esSolicitante: 1 });
+            const caja = await CajaService.crear({
+              fecha: '2026-05-02', solicitanteId: quien.id, municipioId: ctx.municipio.id,
+              detalles: [
+                { categoriaId: gas.id, descripcion: '', valor: 2000000 },
+                { categoriaId: cat.id, descripcion: 'Poda del cerezo de la entrada', valor: 8000000 }
+              ]
+            });
+            const dets = (await db.getAll('detalles')).filter(d => d.cajaId === caja.id);
+            const concepto = dets.filter(d => d.rol !== RolEstadistico.GASOLINA &&
+                                              d.rol !== RolEstadistico.ACEITE);
+            Pruebas.igual(concepto.length, 1, 'Un solo concepto, aparte de la gasolina');
+            Pruebas.igual(concepto[0].categoriaNombre, 'Poda de altura', 'Y es el que va en la columna');
+            Pruebas.igual(concepto[0].descripcion, 'Poda del cerezo de la entrada',
+              'La descripción se conserva completa, sin recortar');
+            Pruebas.igual(caja.gasolina, 2000000, 'La gasolina sigue siendo subcomponente del total');
+            Pruebas.igual(caja.total, 10000000, 'Y el total no se altera');
           } }
       ]
     },
