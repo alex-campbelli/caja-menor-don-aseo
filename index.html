@@ -5087,13 +5087,26 @@ const Combo = {
       return o;
     });
   },
+  /**
+   * Categorías que se pueden elegir al registrar un gasto.
+   *
+   * Gasolina y aceite quedan fuera a propósito: son un PAPEL ESTADÍSTICO, no
+   * una categoría. Un tanque de gasolina pertenece a «Caja menor» igual que
+   * una lima; lo que lo distingue es que además cuenta en la serie de
+   * gasolina, y eso se marca en la casilla de Estadística. Ofrecerlos en los
+   * dos sitios hacía dudar de cuál era el bueno.
+   *
+   * Siguen existiendo en el catálogo —el histórico y las estadísticas las
+   * usan—; lo único que cambia es que ya no se proponen al escribir.
+   */
   opcionesCategorias() {
-    return CategoriaRepo.activas().map(c => ({
-      id: c.id, texto: c.nombre,
-      sub: c.descripcion || '',
-      tag: c.rol === RolEstadistico.GASOLINA ? 'GASOLINA' : c.rol === RolEstadistico.ACEITE ? 'ACEITE' :
-           (c.estadistica ? 'ESTADÍSTICA' : '')
-    }));
+    return CategoriaRepo.activas()
+      .filter(c => c.rol !== RolEstadistico.GASOLINA && c.rol !== RolEstadistico.ACEITE)
+      .map(c => ({
+        id: c.id, texto: c.nombre,
+        sub: c.descripcion || '',
+        tag: c.estadistica ? 'ESTADÍSTICA' : ''
+      }));
   },
   opcionesMunicipios() {
     return MunicipioRepo.activos().map(m => ({ id: m.id, texto: m.nombre, sub: m.departamento || '' }));
@@ -5907,24 +5920,29 @@ const VistaCajas = {
     return '<tr class="det-fila hidden" data-det="' + attr(c.id) + '"><td colspan="15">' +
       '<div class="det-caja">' +
       (dets.length
-        ? '<table class="tbl-mini"><thead><tr><th>Desglose del total</th><th>Descripción</th>' +
-          '<th class="num">Valor</th></tr></thead><tbody>' +
+        /* Las mismas columnas que dentro de la caja: al separar categoría y
+           elemento, este desglose se quedó enseñando sólo la categoría y las
+           doce filas de una caja menor decían todas «Caja menor». */
+        ? '<table class="tbl-mini"><thead><tr><th>Categoría</th><th>Elemento</th>' +
+          '<th>Descripción</th><th class="num">Valor</th></tr></thead><tbody>' +
           dets.map(d => {
             const sub = d.rol === RolEstadistico.GASOLINA || d.rol === RolEstadistico.ACEITE;
             return '<tr><td class="nowrap">' + esc(d.categoriaNombre || '—') +
               (sub ? ' <span class="txt-3 fs11">Parte de la caja menor</span>' : '') + '</td>' +
+              '<td class="nowrap">' + (String(d.elemento || '').trim()
+                ? esc(d.elemento) : '<span class="txt-3">—</span>') + '</td>' +
               '<td>' + (String(d.descripcion || '').trim()
                 ? esc(d.descripcion) : '<span class="txt-3">—</span>') + '</td>' +
               '<td class="num">' + Money.format(d.valor) + '</td></tr>';
           }).join('') +
           '</tbody><tfoot>' +
           (c.retencion
-            ? '<tr><td colspan="2">Suma de los conceptos</td>' +
+            ? '<tr><td colspan="3">Suma de los conceptos</td>' +
               '<td class="num">' + Money.format(suma) + '</td></tr>' +
-              '<tr><td colspan="2">Retención</td>' +
+              '<tr><td colspan="3">Retención</td>' +
               '<td class="num">− ' + Money.format(c.retencion) + '</td></tr>'
             : '') +
-          '<tr><td colspan="2">Total de la caja</td>' +
+          '<tr><td colspan="3">Total de la caja</td>' +
           '<td class="num">' + Money.format(c.total) + '</td></tr>' +
           '</tfoot></table>'
         : '') +
@@ -6993,7 +7011,8 @@ const VistaCajaForm = {
           '<div style="padding:10px 14px;border-top:1px solid var(--border)">' +
           '<button class="btn btn-sm" data-act="addDetalle">' + Icon('plus', '', 12) + 'Agregar detalle</button>' +
           '<span class="fs11 txt-3" style="margin-left:10px">La <b>categoría</b> agrupa (Caja menor, Viáticos…) ' +
-          'y el <b>elemento</b> es lo que se compró (una lima, un machete). Ambas admiten texto libre.</span>' +
+          'y el <b>elemento</b> es lo que se compró (una lima, un machete). ' +
+          'Si escribe gasolina o aceite, la casilla de <b>Estadística</b> se marca sola.</span>' +
           '</div>' +
         '</div></div>' +
 
@@ -7126,6 +7145,22 @@ const VistaCajaForm = {
       });
       const inElem = tb.querySelector('[data-elem="' + i + '"]');
       inElem.addEventListener('input', e => { d.elemento = e.target.value; });
+      /* Si el artículo es gasolina o aceite se marca solo en Estadística, que
+         es lo que uno espera al escribirlo. Sólo cuando la casilla está en
+         blanco: una elección hecha a mano nunca se pisa. Y se cambia el valor
+         del desplegable en vez de repintar la tabla, para no arrancarle el
+         foco a quien viene tabulando. */
+      inElem.addEventListener('change', () => {
+        if (d.rol) return;
+        const n = Txt.norm(d.elemento);
+        const rol = /gasolina/.test(n) ? RolEstadistico.GASOLINA
+                  : /aceite/.test(n) ? RolEstadistico.ACEITE : null;
+        if (!rol) return;
+        d.rol = rol;
+        const sel = tb.querySelector('[data-act="cambiarRol"][data-i="' + i + '"]');
+        if (sel) sel.value = rol;
+        this.pintarTotales();
+      });
       inElem.addEventListener('keydown', e => {
         if (e.key === 'Enter') { e.preventDefault(); tb.querySelector('[data-desc="' + i + '"]').focus(); }
       });
@@ -12873,6 +12908,36 @@ const Pruebas = {
             Pruebas.ok(/d.elemento = e.target.value/.test(VistaCajaForm.pintarDetalles.toString()),
               'Y lo que se escriba ahí va al artículo, no a la categoría');
           } },
+        { nombre: 'CRÍTICO · gasolina y aceite no se ofrecen como categoría', fn: async () => {
+            /* Eran categoría y papel estadístico a la vez, y al escribir un gasto
+               había que adivinar cuál de los dos sitios era el bueno. Ahora la
+               categoría dice de qué bolsillo sale (caja menor, viáticos…) y la
+               casilla de Estadística dice si además cuenta como gasolina. */
+            const gas = await CategoriaRepo.obtenerOCrear('Gasolina');
+            await CategoriaRepo.guardar(Object.assign({}, gas, { rol: RolEstadistico.GASOLINA }));
+            const ace = await CategoriaRepo.obtenerOCrear('Aceite');
+            await CategoriaRepo.guardar(Object.assign({}, ace, { rol: RolEstadistico.ACEITE }));
+            await CategoriaRepo.obtenerOCrear('Caja menor');
+            await Cache.cargar();
+
+            const ofrecidas = Combo.opcionesCategorias().map(o => o.texto);
+            Pruebas.ok(!ofrecidas.includes('Gasolina'), 'La gasolina no aparece en la lista');
+            Pruebas.ok(!ofrecidas.includes('Aceite'), 'El aceite tampoco');
+            Pruebas.ok(ofrecidas.includes('Caja menor'), 'Las demás siguen ahí');
+
+            /* Pero siguen en el catálogo: el histórico importado las usa y las
+               estadísticas de gasolina se calculan a partir de ellas. */
+            Pruebas.ok(!!CategoriaRepo.porRol(RolEstadistico.GASOLINA),
+              'La categoría sigue existiendo para el histórico y las estadísticas');
+
+            /* Y escribirlo en el artículo marca la casilla solo, que es lo que
+               se esperaba que pasara «automático». */
+            const p = VistaCajaForm.pintarDetalles.toString();
+            Pruebas.ok(/gasolina\/\.test\(n\)/.test(p) && /aceite\/\.test\(n\)/.test(p),
+              'El artículo gasolina o aceite marca la estadística');
+            Pruebas.ok(/if \(d\.rol\) return;/.test(p),
+              'Y nunca pisa una elección hecha a mano');
+          } },
         { nombre: 'El documento de la persona puede no ser cédula', fn: async () => {
             Pruebas.ok(TIPOS_DOCUMENTO.includes('Pasaporte'), 'El pasaporte es una opción');
             const p = await PersonaRepo.guardar({ nombre: 'Trabajador Con Pasaporte',
@@ -13243,20 +13308,34 @@ const Pruebas = {
                último y se leía como un cobro repetido. */
             const caja = { id: 'cm_x', total: 30000000, retencion: 0, observaciones: '' };
             const dets = [
-              { categoriaNombre: 'Gasolina', rol: RolEstadistico.GASOLINA, descripcion: '', valor: 17000000 },
-              { categoriaNombre: 'Aceite', rol: RolEstadistico.ACEITE, descripcion: '', valor: 4500000 },
-              { categoriaNombre: 'Caja menor', rol: null,
+              { categoriaNombre: 'Caja menor', elemento: 'Gasolina', rol: RolEstadistico.GASOLINA,
+                descripcion: '', valor: 17000000 },
+              { categoriaNombre: 'Caja menor', elemento: 'Aceite', rol: RolEstadistico.ACEITE,
+                descripcion: '', valor: 4500000 },
+              { categoriaNombre: 'Caja menor', elemento: 'Cuchillas', rol: null,
                 descripcion: 'Gasolina, aceite, cuchillas y botas', valor: 8500000 }
             ];
             const html = VistaCajas.filaDetalle(caja, dets);
             const veces = (html.match(/Gasolina, aceite, cuchillas y botas/g) || []).length;
             Pruebas.igual(veces, 1, 'La descripción aparece una vez, sin repetirse');
-            /* La anotación NO se saca de su fila: es de ese gasto y ahí hace falta. */
-            const fila = html.split('<tr>').find(x => x.includes('Caja menor'));
+            /* La anotación NO se saca de su fila: es de ese gasto y ahí hace falta.
+               Se busca por el artículo, que es lo único que distingue una fila
+               de otra cuando todas comparten categoría. */
+            const fila = html.split('<tr>').find(x => x.includes('>Cuchillas<'));
             Pruebas.ok(fila && fila.includes('Gasolina, aceite, cuchillas y botas'),
-              'Y sigue en la fila de su concepto, no movida a otro sitio');
+              'Y sigue en la fila de su artículo, no movida a otro sitio');
+            const filaGas = html.split('<tr>').find(x => x.includes('>Gasolina<'));
+            Pruebas.ok(filaGas && !filaGas.includes('Gasolina, aceite, cuchillas'),
+              'Sin contagiar la anotación a las filas vecinas');
             Pruebas.ok(!html.includes('Sin descripción'),
               'Sin tres «Sin descripción» seguidos, que era puro ruido');
+            /* Al separar categoría y elemento este desglose se quedó mostrando
+               sólo la categoría: las doce filas de una caja decían «Caja menor»
+               y no se sabía qué era cada una. */
+            Pruebas.ok(html.includes('<th>Elemento</th>'),
+              'Tiene columna para el artículo, igual que dentro de la caja');
+            for (const art of ['Gasolina', 'Aceite', 'Cuchillas'])
+              Pruebas.ok(html.includes('>' + art + '<'), 'Se ve el artículo: ' + art);
             Pruebas.ok(html.includes('Parte de la caja menor'),
               'Gasolina y aceite quedan marcados como partes, no como extras (§13)');
             Pruebas.ok(html.includes('parte del total de caja menor, no se suman aparte'),
