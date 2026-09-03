@@ -255,6 +255,12 @@ table.tbl.compacta td.td-estado{min-width:0}
 table.tbl.compacta select.sel-estado{max-width:116px;padding:2px 16px 2px 6px}
 table.tbl.compacta .col-exp{width:24px;padding-left:6px;padding-right:0}
 table.tbl.compacta .btn-sm.btn-icon{width:22px;height:22px;padding:0}
+/* Dentro de una tabla compacta los campos pegan al borde de la celda y usan
+   todo el ancho disponible: es donde se escribe, no hay que regalarle sitio
+   al relleno. */
+table.tbl.compacta .inp{padding-left:7px;padding-right:7px;height:30px;font-size:12px}
+table.tbl.compacta select.inp{padding-right:20px}
+table.tbl.compacta td{padding-top:4px;padding-bottom:4px}
 /* Un escalón más para portátiles de 1280: se recorta el margen de la página y
    se aprieta un poco más la tabla, en vez de obligar a desplazarse. */
 @media (max-width:1340px){
@@ -491,7 +497,23 @@ table.tbl tbody tr.marcada > td{background:var(--past-verde)}
 table.tbl tbody tr.marcada > td:first-child{box-shadow:inset 3px 0 0 var(--brand-500)}
 .col-sel{width:30px;padding-left:8px!important;padding-right:0!important}
 .col-sel input{cursor:pointer}
-.nota{color:var(--info-500);cursor:help;vertical-align:middle}
+/* Columna de marcas: dos señales pequeñas que se leen de un vistazo bajando
+   la vista por la columna, sin robarle sitio al número. */
+.tip{position:fixed;z-index:9998;max-width:280px;background:#111a22;color:#eaf1f6;font-size:11.5px;
+  line-height:1.45;padding:6px 9px;border-radius:7px;box-shadow:var(--sh-3);pointer-events:none;
+  opacity:0;transform:translateY(3px);transition:opacity .1s,transform .1s;left:0;top:0}
+.tip.on{opacity:1;transform:translateY(0)}
+html[data-theme="dark"] .tip{background:#e6edf3;color:#0e1419}
+.col-marcas{width:36px;white-space:nowrap;padding-left:4px!important;padding-right:0!important}
+.marca{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;
+  border-radius:4px;cursor:help;vertical-align:middle;outline-offset:1px}
+.marca+.marca{margin-left:2px}
+.m-nota{color:var(--info-700);background:var(--info-50)}
+.m-comp{color:var(--ok-700);background:var(--ok-50)}
+.m-falta{color:var(--warn-700);background:var(--warn-50)}
+.caja-coment{display:flex;align-items:center;gap:7px;margin-top:6px;font-size:12px;flex-wrap:wrap}
+.caja-coment .cc-txt{color:var(--text-2);background:var(--info-50);border-radius:6px;padding:2px 8px}
+.caja-coment .link{background:none;border:0;padding:0;cursor:pointer;font-family:inherit}
 
 /* Barra de lo marcado: flotante, encima de todo y sin tapar la última fila */
 .selbar{position:sticky;bottom:0;z-index:20;margin-top:12px;pointer-events:none}
@@ -626,6 +648,9 @@ html[data-theme="dark"] .tip{background:#323f4a;border:1px solid var(--border)}
   max-height:calc(100vh - 260px)}
 html[data-theme="dark"] .preview-shell{background:#0a0f13}
 .preview-shell .doc-page{box-shadow:0 4px 24px rgba(0,0,0,.28)}
+.rr-tbl td,.rr-tbl th{font-size:8pt;padding:1.2mm 1.8mm}
+.rr-sub td{background:#f2f2f2;font-weight:700}
+.rr-tot td{background:#e6e6e6;font-weight:800}
 
 @media print{
   @page{size:letter;margin:0}
@@ -643,6 +668,9 @@ html[data-theme="dark"] .preview-shell{background:#0a0f13}
   .doc-cab-min{font-size:11px;font-weight:700;border-bottom:1px solid #999;
     padding-bottom:5px;margin-bottom:10px}
   .doc-nota{font-size:9.5px;color:#555;margin:6px 0 0}
+  .rr-tbl td,.rr-tbl th{font-size:7.5pt;padding:1.1mm 1.6mm}
+  .rr-sub td{background:#f2f2f2;font-weight:700}
+  .rr-tot td{background:#e6e6e6;font-weight:800;font-size:8.5pt}
   .doc-firmas{display:flex;gap:40px;margin-top:34px;font-size:10px}
   .doc-firmas div{flex:1}
   .doc-firmas span{display:block;border-top:1px solid #333;margin-bottom:4px}
@@ -1390,6 +1418,9 @@ const Cargando = {
   },
 
   _mostrar() {
+    /* Si hay una ventana abierta esperando respuesta —una confirmación, por
+       ejemplo— no se está cargando nada: se está esperando a la persona. */
+    if (document.querySelector('#modals .modal-bd')) return;
     const el = this._elemento(), i = el.firstElementChild;
     document.body.classList.add('ocupado');
     const v = document.getElementById('vista');
@@ -1862,8 +1893,6 @@ const Modelo = {
       prefijoCaja: p.prefijoCaja || 'CM',
       prefijoConsignacion: p.prefijoConsignacion || 'CON',
       infoAdicional: p.infoAdicional || '',
-      leyendaAceptacion: p.leyendaAceptacion ||
-        'Declaro que recibí a satisfacción el valor relacionado en este documento y que los bienes o servicios descritos corresponden a la operación del contrato.',
       esquemaVersion: APP.esquema,
       creadoEn: p.creadoEn || Modelo.ahora(),
       actualizadoEn: Modelo.ahora()
@@ -3221,6 +3250,26 @@ const CategoriaRepo = {
 
 const CajaRepo = {
   get: id => db.get('cajas', id),
+
+  /**
+   * Cambia SÓLO la nota corta de la caja.
+   *
+   * Pasar por la actualización completa recalcularía totales y reescribiría
+   * todos los detalles para guardar una frase. Aquí no se toca ni un peso:
+   * los importes, los detalles y la copia congelada del solicitante quedan
+   * exactamente como estaban.
+   */
+  async comentar(id, texto) {
+    const caja = await db.get('cajas', id);
+    if (!caja) throw new ErrorDominio('Caja no encontrada.', 'NO_EXISTE');
+    const limpio = String(texto == null ? '' : texto).trim().slice(0, 140);
+    if (limpio === String(caja.comentario || '')) return caja;
+    const nueva = Object.assign({}, caja, { comentario: limpio, actualizadoEn: Modelo.ahora() });
+    await db.put('cajas', nueva);
+    await Auditoria.registrar('caja', id, 'COMENTAR', { comentario: limpio });
+    Bus.emit('cajas:cambio', nueva);
+    return nueva;
+  },
   porNumero: async num => (await db.query('cajas', { indice: 'numero', valor: num }))[0] || null,
   detalles: async cajaId => (await db.query('detalles', { indice: 'cajaId', valor: cajaId })).sort(U.by('orden')),
   aplicaciones: cajaId => db.query('aplicaciones', { indice: 'cajaId', valor: cajaId }),
@@ -4733,6 +4782,65 @@ const Modal = (() => {
   return { abrir, cerrar, cerrarTop, confirmar, alerta };
 })();
 
+/* --- Aviso emergente ------------------------------------------------------
+   El `title` del navegador no es de fiar: tarda cerca de un segundo, no se ve
+   en pantallas táctiles, desaparece solo a los pocos segundos y —lo que llevó
+   a escribir esto— unas veces sale y otras no sobre elementos pequeños.
+
+   Se dibuja en una capa fija ÚNICA anclada al <body>, por el mismo motivo que
+   el desplegable del combo: dentro de una tabla con `overflow-x:auto` el
+   navegador recorta también el eje vertical y el aviso quedaría cortado por el
+   borde de la tarjeta.
+   -------------------------------------------------------------------------- */
+const Tip = {
+  _el: null,
+  _capa() {
+    if (this._el && document.body.contains(this._el)) return this._el;
+    /* Si ya hay una capa en el documento se reutiliza en vez de añadir otra:
+       dos capas superpuestas dejarían una vacía y visible por encima. */
+    const previa = document.querySelector('body > .tip');
+    if (previa) return (this._el = previa);
+    const d = document.createElement('div');
+    d.className = 'tip';
+    document.body.appendChild(d);
+    return (this._el = d);
+  },
+  mostrar(sobre, texto) {
+    if (!texto) return;
+    const d = this._capa();
+    d.textContent = texto;
+    d.classList.add('on');
+    const r = sobre.getBoundingClientRect();
+    const t = d.getBoundingClientRect();
+    /* Encima del elemento; si no cabe arriba, debajo. Y siempre dentro de la
+       ventana, para que no se salga por los bordes. */
+    let x = r.left + r.width / 2 - t.width / 2;
+    x = Math.max(6, Math.min(x, innerWidth - t.width - 6));
+    const arriba = r.top - t.height - 8;
+    d.style.left = Math.round(x) + 'px';
+    d.style.top = Math.round(arriba > 6 ? arriba : r.bottom + 8) + 'px';
+  },
+  ocultar() { if (this._el) this._el.classList.remove('on'); },
+  iniciar() {
+    if (this._iniciado) return;
+    this._iniciado = true;
+    const de = e => e.target.closest && e.target.closest('[data-tip]');
+    document.addEventListener('mouseover', e => {
+      const el = de(e); if (!el) return;
+      Tip.mostrar(el, el.getAttribute('data-tip'));
+    });
+    document.addEventListener('mouseout', e => { if (de(e)) Tip.ocultar(); });
+    document.addEventListener('focusin', e => {
+      const el = de(e); if (el) Tip.mostrar(el, el.getAttribute('data-tip'));
+    });
+    document.addEventListener('focusout', () => Tip.ocultar());
+    /* Al desplazarse o repintar, el elemento se mueve y el aviso quedaría
+       flotando en el aire: se retira. */
+    addEventListener('scroll', () => Tip.ocultar(), true);
+    addEventListener('resize', () => Tip.ocultar());
+  }
+};
+
 /* --- ComboBox: SELECT + AUTOCOMPLETE + TEXTO LIBRE (§11) ------------------
    El desplegable se dibuja en una capa fija ÚNICA anclada al <body> y se
    posiciona con getBoundingClientRect().
@@ -5439,6 +5547,27 @@ const Shell = {
   }
 };
 
+/**
+ * Ejecuta una acción y, si tarda, enseña el aviso de espera.
+ *
+ * Muchas acciones van al servidor —adjuntar un comprobante, cambiar el estado
+ * de una caja— y mientras tanto la pantalla se quedaba igual, como si el clic
+ * no hubiera entrado: parecía que el programa se había colgado y de pronto
+ * refrescaba solo. Sólo se avisa cuando la acción devuelve una promesa; las
+ * instantáneas no encienden nada, y el aviso tampoco aparece antes de los
+ * 180 ms, así que lo rápido sigue viéndose rápido.
+ */
+async function correrAccion(fn, el, ev) {
+  let r;
+  try { r = fn(el, ev); }
+  catch (err) { manejarError(err); return; }
+  if (!r || typeof r.then !== 'function') return r;
+  Cargando.iniciar();
+  try { return await r; }
+  catch (err) { manejarError(err); }
+  finally { Cargando.terminar(); }
+}
+
 /* --- Delegación global de eventos ---------------------------------------- */
 const AccionesGlobales = {
   async cambiarContrato(el) {
@@ -5484,7 +5613,7 @@ document.addEventListener('click', async e => {
     if (g.tagName === 'SELECT' || g.tagName === 'INPUT') { e.stopPropagation(); return; }
     e.preventDefault();
     const fn = AccionesGlobales[g.getAttribute('data-gact')];
-    if (fn) fn(g, e);
+    if (fn) correrAccion(fn, g, e);
     return;
   }
   if (masInterno(a)) {
@@ -5492,11 +5621,7 @@ document.addEventListener('click', async e => {
     // se impide que el clic escale hasta la fila navegable
     if (a.tagName === 'SELECT' || a.tagName === 'INPUT' || a.tagName === 'TEXTAREA') { e.stopPropagation(); return; }
     const fn = Acciones[a.getAttribute('data-act')];
-    if (fn) {
-      e.preventDefault();
-      try { await fn(a, e); }
-      catch (err) { manejarError(err); }
-    }
+    if (fn) { e.preventDefault(); await correrAccion(fn, a, e); }
     return;
   }
   if (ir) {
@@ -5507,17 +5632,18 @@ document.addEventListener('click', async e => {
 });
 document.addEventListener('change', async e => {
   const g = e.target.closest('[data-gact]');
-  if (g) { const fn = AccionesGlobales[g.getAttribute('data-gact')]; if (fn) { await fn(g, e); return; } }
+  if (g) { const fn = AccionesGlobales[g.getAttribute('data-gact')];
+    if (fn) { await correrAccion(fn, g, e); return; } }
   const a = e.target.closest('[data-act]');
   if (a && (a.tagName === 'SELECT' || a.tagName === 'INPUT' || a.tagName === 'TEXTAREA')) {
     const fn = Acciones[a.getAttribute('data-act')];
-    if (fn) { try { await fn(a, e); } catch (err) { manejarError(err); } }
+    if (fn) await correrAccion(fn, a, e);
   }
 });
 document.addEventListener('submit', async e => {
   const f = e.target.closest('form[data-act]');
   if (f) { e.preventDefault(); const fn = Acciones[f.getAttribute('data-act')];
-    if (fn) { try { await fn(f, e); } catch (err) { manejarError(err); } } }
+    if (fn) await correrAccion(fn, f, e); }
 });
 document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); const q = $('#gq'); if (q) { q.focus(); q.select(); } }
@@ -5778,7 +5904,7 @@ const VistaCajas = {
   filaDetalle(c, dets) {
     const haySub = dets.some(d => d.rol === RolEstadistico.GASOLINA || d.rol === RolEstadistico.ACEITE);
     const suma = U.sumBy(dets, d => d.valor);
-    return '<tr class="det-fila hidden" data-det="' + attr(c.id) + '"><td colspan="14">' +
+    return '<tr class="det-fila hidden" data-det="' + attr(c.id) + '"><td colspan="15">' +
       '<div class="det-caja">' +
       (dets.length
         ? '<table class="tbl-mini"><thead><tr><th>Desglose del total</th><th>Descripción</th>' +
@@ -5814,11 +5940,13 @@ const VistaCajas = {
    * caja y suma sobre la marcha: sirve para escoger a ojo las que faltan por
    * reembolsar y ver de una vez cuánto suman, sin sacar la calculadora.
    */
-  barraSeleccion(todas, repuesto) {
-    const sel = todas.filter(c => VistaCajas.seleccion.has(c.id));
+  barraSeleccion() {
+    const ctx = VistaCajas._ctx;
+    if (!ctx) return '';
+    const sel = ctx.todas.filter(c => VistaCajas.seleccion.has(c.id));
     if (!sel.length) return '';
     const total = U.sumBy(sel, c => c.total);
-    const pend = U.sumBy(sel, c => Finanzas.pendienteDe(c, repuesto.get(c.id) || 0));
+    const pend = U.sumBy(sel, c => Finanzas.pendienteDe(c, ctx.repuesto.get(c.id) || 0));
     return '<div class="selbar">' +
       '<div class="selbar-in">' +
         '<b>' + sel.length + '</b> caja(s) marcada(s)' +
@@ -5835,6 +5963,32 @@ const VistaCajas = {
       '</div></div>';
   },
 
+  /**
+   * Refresca SÓLO lo que cambia al marcar: la fila, la casilla del encabezado
+   * y la barra del total.
+   *
+   * Antes esto repintaba la vista completa, y repintar significa volver a
+   * pedir cajas, detalles y aplicaciones al servidor: marcar cinco casillas
+   * seguidas eran cinco consultas y varios segundos. Ahora no se consulta
+   * nada: la suma sale de lo que ya está en pantalla.
+   */
+  refrescarSeleccion() {
+    const ctx = VistaCajas._ctx;
+    if (!ctx || !document.contains(ctx.cont)) return;
+    ctx.cont.querySelectorAll('tr.row-click[data-ir]').forEach(tr => {
+      const cb = tr.querySelector('[data-act="selUna"]');
+      if (!cb) return;
+      const marcada = VistaCajas.seleccion.has(cb.dataset.id);
+      cb.checked = marcada;
+      tr.classList.toggle('marcada', marcada);
+    });
+    const cabecera = ctx.cont.querySelector('[data-act="selPagina"]');
+    if (cabecera) cabecera.checked = ctx.pagina.length > 0 &&
+      ctx.pagina.every(c => VistaCajas.seleccion.has(c.id));
+    const barra = ctx.cont.querySelector('#selBarra');
+    if (barra) barra.innerHTML = VistaCajas.barraSeleccion();
+  },
+
   async render(cont) {
     Shell.titulo('Cajas menores', 'Las columnas se llaman igual que en su archivo de Excel');
     const f = Estado_App.filtrosCajas;
@@ -5846,7 +6000,23 @@ const VistaCajas = {
     /* La categoría y la descripción viven en los detalles, no en la caja. Se
        traen de una vez —una lectura, no una por fila— y en paralelo con las
        aplicaciones, que tampoco dependen de nada. */
-    const [detsTodos, aplsTodas] = await Promise.all([db.getAll('detalles'), db.getAll('aplicaciones')]);
+    const [detsTodos, aplsTodas, docsTodos] = await Promise.all([
+      db.getAll('detalles'), db.getAll('aplicaciones'), db.getAll('documentos')]);
+
+    /* Qué cajas tienen ya su comprobante de consignación. Puede estar colgado
+       de la caja o de la consignación que la repone: las dos cuentan, igual
+       que en el detalle de la caja. */
+    const conComprobante = new Set();
+    {
+      const esComp = d => d.tipo === TipoDocumento.COMPROBANTE_CONSIGNACION && d.estado !== Estado.INACTIVO;
+      const consConComp = new Set();
+      for (const d of docsTodos) {
+        if (!esComp(d)) continue;
+        if (d.cajaId) conComprobante.add(d.cajaId);
+        if (d.consignacionId) consConComp.add(d.consignacionId);
+      }
+      for (const a of aplsTodas) if (consConComp.has(a.consignacionId)) conComprobante.add(a.cajaId);
+    }
     const detsPorCaja = new Map();
     for (const d of detsTodos) {
       if (!detsPorCaja.has(d.cajaId)) detsPorCaja.set(d.cajaId, []);
@@ -5990,6 +6160,7 @@ const VistaCajas = {
       '<th style="width:30px" title="Marcar todas las de esta página">' +
         '<input type="checkbox" data-act="selPagina"' + (todasMarcadas ? ' checked' : '') + '></th>' +
       '<th style="width:30px"></th>' +
+      '<th style="width:36px" title="Marcas: comentario y comprobante"></th>' +
       th('numero', 'Número') + th('fecha', 'Fecha') + th('categoria', 'Categoría') +
       th('solicitante', 'Concepto', '', 'Como en el Excel. Es la persona que solicita el dinero.') +
       '<th title="Como en el Excel. Es el municipio de la operación.">Ubicación</th>' +
@@ -6007,16 +6178,30 @@ const VistaCajas = {
         const marcada = VistaCajas.seleccion.has(c.id);
         return '<tr class="row-click est-' + attr(c.estado) + (marcada ? ' marcada' : '') +
           '" data-ir="caja/' + attr(c.id) + '">' +
-          '<td class="col-sel"><input type="checkbox" data-act="selUna" data-id="' + attr(c.id) + '"' +
+          '<td class="col-sel" onclick="event.stopPropagation()">' +
+            '<input type="checkbox" data-act="selUna" data-id="' + attr(c.id) + '"' +
             (marcada ? ' checked' : '') + '></td>' +
           '<td class="col-exp">' + (hayTexto
             ? '<button class="btn btn-sm btn-ghost btn-icon" data-act="verTexto" data-id="' + attr(c.id) +
               '" title="Ver la descripción">' + Icon('chevR', '', 13) + '</button>'
             : '') + '</td>' +
-          '<td class="mono nowrap">' + esc(c.numero) +
-            (c.requiereRevision ? ' <span title="Requiere revisión" style="color:var(--warn-500)">⚠</span>' : '') +
+          '<td class="col-marcas">' +
             (String(c.comentario || '').trim()
-              ? ' <span class="nota" title="' + attr(c.comentario) + '">' + Icon('doc', '', 11) + '</span>' : '') +
+              ? '<span class="marca m-nota" tabindex="0" data-tip="' + attr(c.comentario) + '">' +
+                Icon('doc', '', 11) + '</span>'
+              : '') +
+            (conComprobante.has(c.id)
+              ? '<span class="marca m-comp" tabindex="0" ' +
+                'data-tip="Tiene adjunto el comprobante de la consignación">' + Icon('check', '', 11) + '</span>'
+              : (ESTADOS_POR_REEMBOLSAR.includes(c.estado)
+                  ? '<span class="marca m-falta" tabindex="0" ' +
+                    'data-tip="Consignada, pero todavía sin comprobante adjunto">' +
+                    Icon('warn', '', 11) + '</span>'
+                  : '')) +
+            '</td>' +
+          '<td class="mono nowrap">' + esc(c.numero) +
+            (c.requiereRevision ? ' <span tabindex="0" data-tip="Requiere revisión: los valores del origen ' +
+              'no cuadraban y se dejaron tal cual" style="color:var(--warn-500);cursor:help">⚠</span>' : '') +
             '</td>' +
           '<td class="nowrap">' + Fecha.corta(c.fecha) + '</td>' +
           '<td class="trunc" style="max-width:126px" title="' + attr(cats.join(' · ')) + '">' +
@@ -6047,11 +6232,11 @@ const VistaCajas = {
              los detalles de la caja y su texto completo. */
           (hayTexto ? VistaCajas.filaDetalle(c, dets) : '');
       }).join('')
-        : '<tr><td colspan="14">' + Comp.vacio({ icono: 'caja', titulo: 'Sin resultados',
+        : '<tr><td colspan="15">' + Comp.vacio({ icono: 'caja', titulo: 'Sin resultados',
             texto: todas.length === 0 ? 'Aún no hay cajas menores registradas o los filtros no coinciden.' : 'Ajuste los filtros.',
             accion: 'nueva', textoAccion: 'Crear la primera caja', iconoAccion: 'plus' }) + '</td></tr>') +
       '</tbody>' +
-      (pagina.length ? '<tfoot><tr><td colspan="8">Subtotal de la página</td>' +
+      (pagina.length ? '<tfoot><tr><td colspan="9">Subtotal de la página</td>' +
         '<td class="num">' + Money.format(U.sumBy(pagina.filter(c => c.estado !== EstadoCaja.ANULADA), c => c.total)) + '</td>' +
         '<td class="num">' + Money.format(U.sumBy(pagina, c => c.gasolina)) + '</td>' +
         '<td class="num">' + Money.format(U.sumBy(pagina, c => c.aceite)) + '</td>' +
@@ -6059,7 +6244,11 @@ const VistaCajas = {
       '</table></div>' +
       Comp.pager({ total: todas.length, tam, pagina: f.pagina, actPag: 'irPagina', actTam: 'cambiarTam' }) +
       '</div></div>' +
-      VistaCajas.barraSeleccion(todas, repuesto);
+      '<div id="selBarra">' + VistaCajas.barraSeleccion() + '</div>';
+
+    /* Lo que hace falta para recalcular la barra sin volver a pedir nada a la
+       base: marcar una casilla no puede costar una consulta. */
+    VistaCajas._ctx = { cont: cont, todas: todas, repuesto: repuesto, pagina: pagina };
 
     const recargar = () => { f.pagina = 1; VistaCajas.render(cont); };
     const sugerencias = [];
@@ -6097,15 +6286,15 @@ const VistaCajas = {
       cambiarTam: el => { Prefs.set('paginaTam', Number(el.value)); f.pagina = 1; VistaCajas.render(cont); },
       nueva: () => Router.ir('caja-nueva'),
       selUna: el => {
-        const id = el.dataset.id;
-        if (el.checked) VistaCajas.seleccion.add(id); else VistaCajas.seleccion.delete(id);
-        VistaCajas.render(cont);
+        if (el.checked) VistaCajas.seleccion.add(el.dataset.id);
+        else VistaCajas.seleccion.delete(el.dataset.id);
+        VistaCajas.refrescarSeleccion();
       },
       selPagina: el => {
         pagina.forEach(c => el.checked ? VistaCajas.seleccion.add(c.id) : VistaCajas.seleccion.delete(c.id));
-        VistaCajas.render(cont);
+        VistaCajas.refrescarSeleccion();
       },
-      selLimpiar: () => { VistaCajas.seleccion.clear(); VistaCajas.render(cont); },
+      selLimpiar: () => { VistaCajas.seleccion.clear(); VistaCajas.refrescarSeleccion(); },
       /* Atajo para lo que se pide cada semana: las que ya se consignaron y
          todavía no se han reembolsado. */
       selPorReembolsar: () => {
@@ -6114,11 +6303,11 @@ const VistaCajas = {
           Finanzas.pendienteDe(c, repuesto.get(c.id) || 0) > 0)
           .forEach(c => VistaCajas.seleccion.add(c.id));
         if (!VistaCajas.seleccion.size) Toast.warn('No hay cajas consignadas pendientes de reembolso.');
-        VistaCajas.render(cont);
+        VistaCajas.refrescarSeleccion();
       },
       resumenSeleccion: () => {
         const sel = todas.filter(c => VistaCajas.seleccion.has(c.id));
-        Documento.resumenReembolso(sel, repuesto);
+        Documento.resumenReembolso(sel, repuesto, detsPorCaja);
       },
       pdfSeleccion: async () => {
         const sel = todas.filter(c => VistaCajas.seleccion.has(c.id));
@@ -6210,7 +6399,16 @@ const VistaCaja = {
         '<h1 style="font-family:var(--mono);letter-spacing:0">' + esc(caja.numero) + '</h1>' +
         Comp.pillEstadoCaja(caja.estado) + Comp.pillOrigen(caja.origen) +
         (caja.requiereRevision ? '<span class="pill p-amber">Requiere revisión</span>' : '') + '</div>' +
-      '<div class="ph-sub">' + Fecha.larga(caja.fecha) + ' · creada ' + Fecha.stamp(caja.creadoEn) + '</div></div>' +
+      '<div class="ph-sub">' + Fecha.larga(caja.fecha) + ' · creada ' + Fecha.stamp(caja.creadoEn) + '</div>' +
+      /* La nota corta se escribe aquí, en la caja, no metida en el formulario
+         de edición: es un apunte del día a día, no parte del documento. */
+      '<div class="caja-coment">' + Icon('doc', 'txt-3', 13) +
+        (String(caja.comentario || '').trim()
+          ? '<span class="cc-txt">' + esc(caja.comentario) + '</span>' +
+            '<button class="link fs11" data-act="editarComentario">cambiar</button>' +
+            '<button class="link fs11" data-act="quitarComentario">quitar</button>'
+          : '<button class="link fs12" data-act="editarComentario">Agregar un comentario corto</button>') +
+      '</div></div>' +
       '<div class="ph-actions">' +
         '<button class="btn btn-primary" data-act="copiarImagen" title="Copiar el formato como imagen para enviarlo por WhatsApp">' +
           Icon('copy', '', 14) + 'Copiar imagen</button>' +
@@ -6249,7 +6447,7 @@ const VistaCaja = {
       '<div class="card"><div class="card-h"><h3>Detalles del gasto</h3>' +
         '<span class="ch-sub">Gasolina y aceite son subcomponentes del total, no se suman por encima</span></div>' +
         '<div class="card-b flush"><div class="tbl-wrap"><table class="tbl">' +
-        '<thead><tr><th style="width:34px">#</th><th>Categoría / concepto</th><th>Descripción</th>' +
+        '<thead><tr><th style="width:34px">#</th><th>Categoría</th><th>Elemento</th><th>Descripción</th>' +
         '<th class="num">Cant.</th><th class="num">Vr. unitario</th><th class="num">Vr. total</th></tr></thead><tbody>' +
         detalles.map((d, i) => '<tr>' +
           '<td class="txt-3">' + (i + 1) + '</td>' +
@@ -6259,14 +6457,15 @@ const VistaCaja = {
             (d.rol && d.rol !== RolEstadistico.GASOLINA && d.rol !== RolEstadistico.ACEITE ?
               ' <span class="pill np p-blue">' + esc(d.rol) + '</span>' : '') +
             (!d.categoriaId && d.categoriaNombre ? ' <span class="co-tag" title="Concepto escrito libremente">libre</span>' : '') + '</td>' +
+          '<td>' + esc(d.elemento || '—') + '</td>' +
           '<td>' + esc(d.descripcion || '—') + '</td>' +
           '<td class="num txt-3">' + (d.cantidad != null ? d.cantidad : '') + '</td>' +
           '<td class="num txt-3">' + (d.valorUnitario ? Money.format(d.valorUnitario) : '') + '</td>' +
           '<td class="num"><b>' + Money.format(d.valor) + '</b></td></tr>').join('') +
         '</tbody><tfoot>' +
-        '<tr><td colspan="5">Subtotal</td><td class="num">' + Money.format(caja.subtotal) + '</td></tr>' +
-        '<tr><td colspan="5">Retención</td><td class="num">' + Money.format(caja.retencion) + '</td></tr>' +
-        '<tr><td colspan="5" style="font-size:13px">TOTAL</td><td class="num" style="font-size:14px">' +
+        '<tr><td colspan="6">Subtotal</td><td class="num">' + Money.format(caja.subtotal) + '</td></tr>' +
+        '<tr><td colspan="6">Retención</td><td class="num">' + Money.format(caja.retencion) + '</td></tr>' +
+        '<tr><td colspan="6" style="font-size:13px">TOTAL</td><td class="num" style="font-size:14px">' +
           Money.format(caja.total) + '</td></tr>' +
         '</tfoot></table></div></div>' +
         (caja.observaciones ? '<div class="card-f"><b>Observaciones:</b> ' + esc(caja.observaciones) + '</div>' : '') +
@@ -6386,6 +6585,12 @@ const VistaCaja = {
         VistaCaja.render(cont, params);
       },
       revelarCuenta: () => { $('#ctaMask').textContent = sol.numeroCuenta || VALOR_NO_DISPONIBLE; },
+      editarComentario: () => VistaCaja.pedirComentario(caja, cont, params),
+      quitarComentario: async () => {
+        await CajaRepo.comentar(caja.id, '');
+        Toast.ok('Comentario quitado.');
+        VistaCaja.render(cont, params);
+      },
       adjuntarComprobante: () => { const i = $('#inComprobante'); if (i) i.click(); },
       masAcciones: () => VistaCaja.menuAcciones(caja, cont, params),
       ...Expediente.acciones({ cajaId: caja.id, recargar: () => VistaCaja.render(cont, params) })
@@ -6400,6 +6605,36 @@ const VistaCaja = {
       await Expediente.subir(files, { cajaId: caja.id, tipo: TipoDocumento.COMPROBANTE_CONSIGNACION });
       VistaCaja.render(cont, params);
     };
+  },
+
+  /** Ventanita para escribir la nota corta que se ve en el listado */
+  pedirComentario(caja, cont, params) {
+    const m = Modal.abrir({
+      titulo: 'Comentario de ' + caja.numero,
+      ancho: 'narrow',
+      cuerpo: '<div class="field"><label>Una línea, para recordar algo de esta caja</label>' +
+        '<input class="inp" id="ccTexto" maxlength="140" autofocus value="' +
+        attr(caja.comentario || '') + '" placeholder="Ej.: falta el soporte de la compra"></div>' +
+        '<div class="fs11 txt-3">Se verá en el listado al pasar el cursor por el número. ' +
+        'No sale en el formato impreso.</div>',
+      pie: '<button class="btn" data-cerrar>Cancelar</button>' +
+           '<button class="btn btn-primary" id="ccOk">Guardar</button>',
+      alMontar(el) {
+        const inp = el.querySelector('#ccTexto');
+        const guardar = async () => {
+          const txt = inp.value.trim();
+          Modal.cerrar(el);
+          try {
+            await CajaRepo.comentar(caja.id, txt);
+            Toast.ok(txt ? 'Comentario guardado.' : 'Comentario quitado.');
+            VistaCaja.render(cont, params);
+          } catch (e) { manejarError(e); }
+        };
+        el.querySelector('#ccOk').onclick = guardar;
+        inp.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); guardar(); } });
+      }
+    });
+    return m;
   },
 
   menuAcciones(caja, cont, params) {
@@ -6693,7 +6928,7 @@ const VistaCajaForm = {
       base = borrador || {
         fecha: Fecha.hoy(), solicitanteId: '', consignoId: fabian ? fabian.id : '',
         municipioId: '', direccion: '', estado: EstadoCaja.BORRADOR, observaciones: '', retencion: 0,
-        detalles: [{ categoriaId: null, categoriaNombre: '', descripcion: '', valor: 0, rol: null }]
+        detalles: [detalleNuevo()]   // la primera fila también trae la categoría puesta
       };
       if (!base.consignoId && fabian) base.consignoId = fabian.id;
       if (!base.detalles || !base.detalles.length) base.detalles = [{ categoriaId: null, categoriaNombre: '', descripcion: '', valor: 0, rol: null }];
@@ -6746,11 +6981,14 @@ const VistaCajaForm = {
           '<span class="ch-sub">Puede agregar tantos conceptos como necesite</span>' +
           '<div class="ch-act"><button class="btn btn-sm" data-act="addDetalle">' + Icon('plus', '', 12) + 'Agregar detalle</button></div>' +
         '</div><div class="card-b flush">' +
-          '<div class="tbl-wrap"><table class="tbl" id="tblDetalles">' +
-          '<thead><tr><th style="width:30px"></th><th style="min-width:150px">Categoría</th>' +
-          '<th style="min-width:150px">Elemento</th>' +
-          '<th style="min-width:180px">Descripción</th><th style="width:120px">Estadística</th>' +
-          '<th class="num" style="width:130px">Valor</th><th style="width:34px"></th></tr></thead>' +
+          /* Al separar categoría y elemento la tabla pedía 717 px en un hueco
+             de 653: los campos se estrujaban y el valor quedaba en 37 px. Se
+             aprieta igual que el listado de cajas y se reparten los anchos. */
+          '<div class="tbl-wrap"><table class="tbl compacta" id="tblDetalles">' +
+          '<thead><tr><th style="width:22px"></th><th style="min-width:118px">Categoría</th>' +
+          '<th style="min-width:112px">Elemento</th>' +
+          '<th style="min-width:110px">Descripción</th><th style="width:86px">Estadística</th>' +
+          '<th class="num" style="width:92px">Valor</th><th style="width:26px"></th></tr></thead>' +
           '<tbody id="tbDetalles"></tbody></table></div>' +
           '<div style="padding:10px 14px;border-top:1px solid var(--border)">' +
           '<button class="btn btn-sm" data-act="addDetalle">' + Icon('plus', '', 12) + 'Agregar detalle</button>' +
@@ -6760,9 +6998,6 @@ const VistaCajaForm = {
         '</div></div>' +
 
         '<div class="card"><div class="card-h"><h3>Observaciones</h3></div><div class="card-b">' +
-        '<div class="field"><label>Comentario corto</label>' +
-        '<input class="inp" id="fComent" maxlength="140" value="' + attr(base.comentario || '') + '" ' +
-        'placeholder="Una línea; se ve en el listado al pasar el cursor"></div>' +
         '<textarea class="inp" id="fObs" placeholder="Notas internas sobre esta caja menor…">' + esc(base.observaciones || '') + '</textarea>' +
         '</div></div>' +
       '</div>' +
@@ -6842,7 +7077,6 @@ const VistaCajaForm = {
     $('#fDireccion').addEventListener('input', e => { this.estado.direccion = e.target.value; });
     $('#fEstado').addEventListener('change', e => { this.estado.estado = e.target.value; });
     $('#fObs').addEventListener('input', e => { this.estado.observaciones = e.target.value; });
-    $('#fComent').addEventListener('input', e => { this.estado.comentario = e.target.value; });
     setTimeout(() => { if (!editandoId && !base.solicitanteId) inSol.focus(); }, 80);
   },
 
@@ -6860,13 +7094,13 @@ const VistaCajaForm = {
     tb.innerHTML = this.estado.detalles.map((d, i) =>
       '<tr data-fila="' + i + '">' +
       '<td class="txt-3 tc">' + (i + 1) + '</td>' +
-      '<td><div class="combo"><input class="inp" data-cat="' + i + '" placeholder="Ej.: Gasolina, Nailón…" autocomplete="off" value="' +
+      '<td><div class="combo"><input class="inp" data-cat="' + i + '" placeholder="Caja menor, Viáticos…" autocomplete="off" value="' +
         attr(d.categoriaNombre || '') + '"' + (d.categoriaId ? ' data-id="' + attr(d.categoriaId) + '"' : '') + '></div></td>' +
       '<td><input class="inp" data-elem="' + i + '" placeholder="Ej.: lima, machete, nailón" value="' +
         attr(d.elemento || '') + '"></td>' +
-      '<td><input class="inp" data-desc="' + i + '" placeholder="Descripción del gasto" value="' + attr(d.descripcion || '') + '"></td>' +
+      '<td><input class="inp" data-desc="' + i + '" placeholder="Opcional" value="' + attr(d.descripcion || '') + '"></td>' +
       '<td><select class="inp" data-act="cambiarRol" data-i="' + i + '" style="font-size:11.5px">' +
-        '<option value="">— ninguna —</option>' +
+        '<option value="">Ninguna</option>' +
         roles.map(r => '<option value="' + attr(r.v) + '"' + (d.rol === r.v ? ' selected' : '') + '>' + esc(r.t) + '</option>').join('') +
         '</select></td>' +
       '<td><input class="inp inp-money" data-val="' + i + '" value="' + attr(Money.formatInput(d.valor || 0)) + '" placeholder="0"></td>' +
@@ -9462,7 +9696,8 @@ const Documento = {
       '<table class="dp-tbl">' +
         '<thead><tr>' +
           '<th style="width:8mm">#</th>' +
-          '<th style="width:42mm">CATEGORÍA</th>' +
+          '<th style="width:34mm">CATEGORÍA</th>' +
+          '<th style="width:34mm">ELEMENTO</th>' +
           '<th>DETALLE</th>' +
           '<th style="width:26mm">VR. UNITARIO</th>' +
           '<th style="width:28mm">VR. TOTAL</th>' +
@@ -9470,11 +9705,13 @@ const Documento = {
         detalles.map((d, i) => '<tr>' +
           '<td class="c">' + (i + 1) + '</td>' +
           '<td>' + esc(d.categoriaNombre || '') + '</td>' +
+          '<td>' + esc(d.elemento || '') + '</td>' +
           '<td>' + esc(d.descripcion || '') + '</td>' +
           '<td class="n">' + (d.valorUnitario ? Money.format(d.valorUnitario) : '') + '</td>' +
           '<td class="n">' + Money.format(d.valor) + '</td>' +
         '</tr>').join('') +
-        Array.from({ length: vacias }, () => '<tr class="empty-r"><td></td><td></td><td></td><td></td><td></td></tr>').join('') +
+        Array.from({ length: vacias }, () => '<tr class="empty-r">' +
+          '<td></td><td></td><td></td><td></td><td></td><td></td></tr>').join('') +
         '</tbody>' +
       '</table>' +
 
@@ -9484,19 +9721,16 @@ const Documento = {
         '<tr class="grand"><td>Total</td><td>' + Money.format(caja.total) + '</td></tr>' +
       '</table></div>' +
 
-      (caja.gasolina || caja.aceite
-        ? '<div class="dp-obs"><b>Discriminación estadística (subcomponentes del total)</b>' +
-          'Gasolina: ' + Money.format(caja.gasolina) + ' · Aceite: ' + Money.format(caja.aceite) +
-          ' · Otros conceptos: ' + Money.format(caja.total - caja.gasolina - caja.aceite) +
-          '. Estos valores están contenidos dentro del total y no se suman por encima de él.</div>'
-        : '') +
+      /* La discriminación de gasolina y aceite y la leyenda de aceptación se
+         quitaron del impreso: ocupaban dos bloques y apretaban la hoja. Las
+         cifras siguen estando —cada una en su fila del detalle— y la firma de
+         quien recibe ya deja constancia de la aceptación. */
       (caja.observaciones ? '<div class="dp-obs"><b>Observaciones</b>' + esc(caja.observaciones) + '</div>' : '') +
-
-      '<div class="dp-obs" style="border-top:none"><b>Aceptación</b>' + esc(cfg.leyendaAceptacion) + '</div>' +
 
       '<div class="dp-sign">' +
         '<div><div class="ln"></div><b>' + esc(sol.nombre || caja.solicitanteTexto || '') + '</b>' +
-          '<small>C.C. ' + esc(sol.cedula ? Txt.cedulaFmt(sol.cedula) : '____________') + '</small>' +
+          '<small>' + esc(sol.tipoDocumento || 'C.C.') + ' ' +
+            esc(sol.cedula ? Txt.cedulaFmt(sol.cedula) : '____________') + '</small>' +
           '<small>Recibí a satisfacción</small></div>' +
         '<div><div class="ln"></div><b>' + esc(cfg.responsable || '') + '</b>' +
           '<small>' + esc(cfg.cargoResponsable || 'Responsable de caja menor') + '</small>' +
@@ -9560,9 +9794,19 @@ const Documento = {
 
   /** genera el PNG del formato. escala 2 = ~1630 px de ancho, nítido en móvil */
   async aPngBlob(caja, opts) {
+    return this.htmlAPngBlob(await this.construir(caja), opts);
+  },
+
+  /**
+   * Convierte a PNG cualquier documento ya compuesto.
+   *
+   * Antes esto sólo sabía dibujar una caja menor. Se separó para que la
+   * relación de reembolso pueda copiarse como imagen con exactamente el mismo
+   * camino —y las mismas trampas ya resueltas— en vez de tener una copia.
+   */
+  async htmlAPngBlob(html, opts) {
     const o = opts || {};
     const escala = o.escala || 2;
-    const html = await this.construir(caja);
 
     const caja_ = document.createElement('div');
     caja_.style.cssText = 'position:fixed;left:-20000px;top:0;width:230mm;background:#fff;';
@@ -9616,6 +9860,27 @@ const Documento = {
   },
 
   /** copia el formato al portapapeles como imagen; si no se puede, lo descarga */
+  /** Copia al portapapeles un documento ya compuesto (o lo descarga si el
+      navegador no deja escribir en el portapapeles). */
+  async copiarHtmlComoImagen(html, nombre, escala) {
+    const promesa = this.htmlAPngBlob(html, { escala });
+    promesa.catch(() => {});
+    const puedeCopiar = !!(navigator.clipboard && navigator.clipboard.write &&
+                           window.ClipboardItem && window.isSecureContext);
+    if (puedeCopiar) {
+      try {
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': promesa })]);
+        Toast.ok('Imagen copiada. Péguela en WhatsApp con Ctrl + V.');
+        return { copiada: true };
+      } catch (e) { console.warn('[copiar imagen] portapapeles no disponible:', e && e.name); }
+    }
+    const png = await promesa;
+    U.descargar(png, nombre);
+    Toast.warn('El navegador no permitió copiar al portapapeles. Se descargó la imagen «' +
+      nombre + '»: adjúntela en WhatsApp.', 9000);
+    return { copiada: false, descargada: true };
+  },
+
   async copiarImagen(caja, escala) {
     const nombre = U.nombreSeguro(caja.numero || 'caja-menor') + '.png';
     // Se genera UNA sola vez y se reutiliza la misma promesa: pasarla sin
@@ -9781,11 +10046,30 @@ const Documento = {
      bolsillo y todavía no le han devuelto, para poder cotejar que lo que le
      reembolsan es exactamente lo que giró.
      ======================================================================= */
-  resumenReembolso(cajas, repuesto) {
+  resumenReembolso(cajas, repuesto, detsPorCaja) {
     if (!cajas || !cajas.length) { Toast.warn('No hay cajas marcadas.'); return; }
     const cfg = ConfigRepo.get() || {};
     const ctr = ContratoRepo.activo() || {};
     const orden = cajas.slice().sort((a, b) => (a.fecha + a.numero).localeCompare(b.fecha + b.numero));
+    const pendDe = c => Finanzas.pendienteDe(c, (repuesto && repuesto.get(c.id)) || 0);
+
+    /* Para qué es el dinero: la categoría del gasto. Gasolina y aceite no
+       cuentan aquí —son partes del total de una caja menor, no el motivo—,
+       salvo que la caja no tenga ninguna otra cosa. */
+    const categoriaDe = c => {
+      const ds = (detsPorCaja && detsPorCaja.get(c.id)) || [];
+      const propias = [], subs = [];
+      for (const d of ds) {
+        const n = String(d.categoriaNombre || '').trim();
+        if (!n) continue;
+        const esSub = d.rol === RolEstadistico.GASOLINA || d.rol === RolEstadistico.ACEITE;
+        const donde = esSub ? subs : propias;
+        if (donde.indexOf(n) < 0) donde.push(n);
+      }
+      const lista = propias.length ? propias : subs;
+      return lista.join(' · ');
+    };
+
     /* Se agrupa por quien puso el dinero: si en la semana consignaron dos
        personas distintas, cada una recibe su propio corte. */
     const grupos = new Map();
@@ -9794,51 +10078,60 @@ const Documento = {
       if (!grupos.has(k)) grupos.set(k, []);
       grupos.get(k).push(c);
     }
-    const pendDe = c => Finanzas.pendienteDe(c, (repuesto && repuesto.get(c.id)) || 0);
     const totalGeneral = U.sumBy(orden, c => c.total);
     const pendGeneral = U.sumBy(orden, c => pendDe(c));
+    const variosGrupos = grupos.size > 1;
 
     const bloque = (quien, lista) =>
-      '<div class="dp-sec"><div class="dp-sec-t">Consignó: ' + esc(quien) + '</div></div>' +
-      '<table class="dp-tbl"><thead><tr>' +
-        '<th>Número</th><th>Fecha</th><th>Concepto</th><th>Ubicación</th>' +
-        '<th>Total</th><th>Pendiente</th></tr></thead><tbody>' +
+      (variosGrupos ? '<div class="dp-sec"><div class="dp-sec-t">Consignó: ' + esc(quien) +
+        '</div></div>' : '') +
+      '<table class="dp-tbl rr-tbl"><thead><tr>' +
+        '<th style="width:26mm">NÚMERO</th><th style="width:17mm">FECHA</th>' +
+        '<th>CONCEPTO</th><th style="width:30mm">CATEGORÍA</th><th style="width:28mm">UBICACIÓN</th>' +
+        '<th style="width:26mm">TOTAL</th><th style="width:26mm">PENDIENTE</th></tr></thead><tbody>' +
       lista.map(c => '<tr>' +
         '<td>' + esc(c.numero) + '</td>' +
         '<td class="c">' + Fecha.corta(c.fecha) + '</td>' +
         '<td>' + esc(Comp.nombreSolicitante(c)) + '</td>' +
+        '<td>' + esc(categoriaDe(c)) + '</td>' +
         '<td>' + esc(c.municipioNombre || '') + '</td>' +
         '<td class="n">' + Money.format(c.total) + '</td>' +
         '<td class="n">' + Money.format(pendDe(c)) + '</td></tr>').join('') +
-      '<tr><td colspan="4"><b>Subtotal de ' + esc(quien) + '</b></td>' +
-        '<td class="n"><b>' + Money.format(U.sumBy(lista, c => c.total)) + '</b></td>' +
-        '<td class="n"><b>' + Money.format(U.sumBy(lista, c => pendDe(c))) + '</b></td></tr>' +
+      (variosGrupos
+        ? '<tr class="rr-sub"><td colspan="5">Subtotal de ' + esc(quien) + '</td>' +
+          '<td class="n">' + Money.format(U.sumBy(lista, c => c.total)) + '</td>' +
+          '<td class="n">' + Money.format(U.sumBy(lista, c => pendDe(c))) + '</td></tr>'
+        : '') +
+      '<tr class="rr-tot"><td colspan="5">TOTAL PENDIENTE POR REEMBOLSAR' +
+        (variosGrupos ? '' : ' A ' + esc(quien.toUpperCase())) + '</td>' +
+        '<td class="n">' + Money.format(variosGrupos ? U.sumBy(lista, c => c.total) : totalGeneral) + '</td>' +
+        '<td class="n">' + Money.format(variosGrupos ? U.sumBy(lista, c => pendDe(c)) : pendGeneral) + '</td></tr>' +
       '</tbody></table>';
+
+    const logo = cfg.logoDataUrl
+      ? '<img src="' + attr(cfg.logoDataUrl) + '" alt="">'
+      : '<img src="' + attr(LOGO_DON_ASEO) + '" alt="">';
 
     const html =
       '<div class="doc-page">' +
       '<div class="dp-head">' +
-        '<div class="dp-logo">' + (Shell.marca(cfg)
-          ? '<img src="' + attr(Shell.marca(cfg)) + '" alt="">' : '') + '</div>' +
+        '<div class="dp-logo">' + logo + '</div>' +
         '<div class="dp-hc"><h1>RELACIÓN DE CAJAS POR REEMBOLSAR</h1>' +
           '<div class="dp-co">' + esc(cfg.empresa || APP.empresa) +
             (cfg.nit ? ' · NIT ' + esc(cfg.nit) : '') + '</div>' +
-          '<div class="dp-meta"><b>Contrato:</b> ' + esc(ctr.nombre || '') + '</div>' +
-          '<div class="dp-meta">Elaborada el ' + Fecha.larga(Fecha.hoy()) + '</div>' +
+          '<div class="dp-meta"><b>Contrato:</b> ' + esc(ctr.nombre || '') +
+            ' · ' + Fecha.larga(Fecha.hoy()) + '</div>' +
         '</div>' +
-        '<div class="dp-num"><div>CAJAS<b>' + orden.length + '</b></div></div>' +
+        '<div class="dp-num"><div>CAJAS<b>' + orden.length + '</b></div>' +
+          '<div>PENDIENTE<b>' + Money.format(pendGeneral) + '</b></div></div>' +
       '</div>' +
       [...grupos.entries()].map(([k, l]) => bloque(k, l)).join('') +
-      '<table class="dp-tbl"><tbody>' +
-        '<tr><td><b>TOTAL DE ' + orden.length + ' CAJA(S)</b></td>' +
-          '<td class="n"><b>' + Money.format(totalGeneral) + '</b></td></tr>' +
-        '<tr><td><b>TOTAL PENDIENTE POR REEMBOLSAR</b></td>' +
-          '<td class="n"><b>' + Money.format(pendGeneral) + '</b></td></tr>' +
-      '</tbody></table>' +
-      '<p class="doc-nota">Los valores son los mismos que constan en cada caja menor: ' +
-        'esta relación no recalcula ni ajusta nada.</p>' +
-      '<div class="doc-firmas"><div><span></span>Elaboró</div>' +
-        '<div><span></span>Recibió conforme</div></div>' +
+      (variosGrupos
+        ? '<table class="dp-tbl rr-tbl"><tbody><tr class="rr-tot">' +
+          '<td>TOTAL GENERAL · ' + orden.length + ' CAJA(S)</td>' +
+          '<td class="n" style="width:24mm">' + Money.format(totalGeneral) + '</td>' +
+          '<td class="n" style="width:24mm">' + Money.format(pendGeneral) + '</td></tr></tbody></table>'
+        : '') +
       '</div>';
 
     Modal.abrir({
@@ -9847,14 +10140,25 @@ const Documento = {
       ancho: 'xwide',
       cuerpo: '<div class="doc-vista">' + html + '</div>',
       pie: '<button class="btn mf-left" data-cerrar>Cerrar</button>' +
-           '<button class="btn btn-primary" id="impResumen">' + Icon('print', '', 14) + 'Imprimir / PDF</button>',
+           '<button class="btn" id="rrCopiar">' + Icon('copy', '', 14) + 'Copiar imagen</button>' +
+           '<button class="btn btn-primary" id="rrImprimir">' + Icon('print', '', 14) + 'Imprimir / PDF</button>',
       alMontar(m) {
-        m.querySelector('#impResumen').onclick = () => {
+        m.querySelector('#rrImprimir').onclick = () => {
           const root = $('#printRoot');
           root.innerHTML = html;
           const limpiar = () => { root.innerHTML = ''; window.removeEventListener('afterprint', limpiar); };
           window.addEventListener('afterprint', limpiar);
           setTimeout(() => { window.print(); setTimeout(limpiar, 1500); }, 60);
+        };
+        const btn = m.querySelector('#rrCopiar');
+        btn.onclick = async () => {
+          const original = btn.innerHTML;
+          btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Generando…';
+          try {
+            await Documento.copiarHtmlComoImagen(html,
+              'relacion-reembolso-' + Fecha.hoy() + '.png');
+          } catch (e) { manejarError(e); }
+          finally { btn.disabled = false; btn.innerHTML = original; }
         };
       }
     });
@@ -11633,8 +11937,6 @@ const VistaConfiguracion = {
       '<textarea class="inp" id="cTitulo" style="min-height:56px">' + esc(c.tituloDocumento) + '</textarea></div>' +
       '<div class="field"><label>Referencia normativa</label>' +
       '<textarea class="inp" id="cNorma" style="min-height:56px">' + esc(c.referenciaNormativa) + '</textarea></div>' +
-      '<div class="field"><label>Leyenda de aceptación</label>' +
-      '<textarea class="inp" id="cLeyenda" style="min-height:56px">' + esc(c.leyendaAceptacion) + '</textarea></div>' +
       '<div class="alert a-info" style="padding:8px 11px">' + Icon('info', '', 13) +
       '<div>Próximo número del contrato activo: <b>' + esc(proximaCaja) + '</b>. ' +
       'Los prefijos se configuran en cada contrato.</div></div>' +
@@ -11713,7 +12015,6 @@ const VistaConfiguracion = {
             marcaDataUrl: marcaTemp,
             logoPropio: propioTemp,
             tituloDocumento: $('#cTitulo').value.trim(), referenciaNormativa: $('#cNorma').value.trim(),
-            leyendaAceptacion: $('#cLeyenda').value.trim(),
             logoDataUrl: logoTemp
           });
           Toast.ok('Configuración guardada.');
@@ -12555,6 +12856,16 @@ const Pruebas = {
             const d = detalleNuevo();
             Pruebas.igual(d.categoriaNombre, 'Caja menor', 'Categoría por defecto');
             Pruebas.igual(d.elemento, '', 'Artículo vacío, listo para escribir');
+            /* La primera fila nace del estado inicial, no de «Agregar detalle»:
+               salía sin categoría mientras las demás sí la traían. */
+            Pruebas.ok(/detalles: \[detalleNuevo\(\)\]/.test(VistaCajaForm.render.toString()),
+              'La primera fila también la trae');
+            /* Al separar categoría y elemento la tabla no cabía en su columna y
+               el campo del valor quedaba en 37 px. */
+            const tabla = VistaCajaForm.render.toString();
+            Pruebas.ok(/class="tbl compacta" id="tblDetalles"/.test(tabla),
+              'La tabla del detalle va compacta para que quepan los campos');
+            Pruebas.ok(!/min-width:180px/.test(tabla), 'Sin los anchos que la desbordaban');
             Pruebas.ok(/>Elemento</.test(VistaCajaForm.render.toString()),
               'La tabla tiene columna propia para el artículo');
             Pruebas.ok(/data-elem=/.test(VistaCajaForm.pintarDetalles.toString()),
@@ -12570,6 +12881,108 @@ const Pruebas = {
             Pruebas.igual(p.cedula, 'AP998877', 'Y el número, con letras incluidas');
             const malo = Validar.persona(Modelo.persona({ nombre: 'Otro', tipoDocumento: 'Carné del club' }));
             Pruebas.ok(malo.some(x => /Tipo de documento/.test(x)), 'Un tipo inventado se rechaza');
+          } },
+        { nombre: 'CRÍTICO · marcar una caja no consulta la base', fn: () => {
+            /* Repintar la vista significa volver a pedir cajas, detalles y
+               aplicaciones al servidor. Marcando cinco casillas eso eran cinco
+               consultas y varios segundos, cuando lo único que hace falta es
+               sumar lo que ya está en pantalla. */
+            const src = VistaCajas.render.toString();
+            Pruebas.ok(/refrescarSeleccion\(\)/.test(src),
+              'Al marcar se refresca sólo la selección');
+            const marcar = src.slice(src.indexOf('selUna:'), src.indexOf('selPagina:'));
+            Pruebas.ok(!/VistaCajas\.render\(/.test(marcar),
+              'Y no se repinta la vista entera');
+            const ref = VistaCajas.refrescarSeleccion.toString();
+            Pruebas.ok(!/await|db\./.test(ref),
+              'El refresco no toca la base ni espera a nadie');
+            Pruebas.ok(/selBarra/.test(ref), 'Sólo reescribe la barra del total');
+          } },
+        { nombre: 'CRÍTICO · las acciones lentas avisan; las rápidas no', fn: async () => {
+            const previos = Cargando._activos;
+            try {
+              Cargando._activos = 0; Cargando.terminar();
+              /* Una acción instantánea no debe encender nada: si cada clic
+                 parpadeara, el aviso dejaría de significar algo. */
+              correrAccion(() => 42, null, null);
+              Pruebas.igual(Cargando.activo(), false, 'Lo instantáneo no enciende el aviso');
+              let soltar;
+              const lenta = () => new Promise(r => { soltar = r; });
+              const p = correrAccion(lenta, null, null);
+              Pruebas.igual(Cargando.activo(), true, 'Lo que va al servidor sí');
+              soltar();
+              await p;
+              Pruebas.igual(Cargando.activo(), false, 'Y se apaga al terminar');
+              const err = await correrAccion(() => Promise.reject(new ErrorDominio('x', 'X')), null, null);
+              Pruebas.igual(Cargando.activo(), false, 'Aunque la acción falle, el aviso no se queda puesto');
+            } finally { Cargando._activos = previos; }
+          } },
+        { nombre: 'El comentario corto llega hasta la caja guardada', fn: () => {
+            /* Estaba enlazado al campo pero no se incluía en lo que se envía al
+               guardar: se escribía y se perdía sin decir nada. */
+            Pruebas.ok(/CajaRepo\.comentar/.test(VistaCaja.pedirComentario.toString()),
+              'Se escribe desde la caja, con su propia operación');
+            const op = CajaRepo.comentar.toString();
+            Pruebas.ok(!/Finanzas|detalles/.test(op),
+              'Guardar una nota no recalcula importes ni toca los detalles');
+            Pruebas.ok(/comentario:/.test(Modelo.caja.toString()), 'Y el modelo lo guarda');
+            Pruebas.ok(/marca m-nota/.test(VistaCajas.render.toString()),
+              'El listado enseña la burbuja cuando hay comentario');
+          } },
+        { nombre: 'CRÍTICO · el formato impreso va sin los bloques que sobraban', fn: () => {
+            /* Ocupaban dos recuadros y apretaban la hoja. Las cifras de gasolina
+               y aceite siguen estando, cada una en su fila del detalle, y la
+               firma de quien recibe ya deja constancia de la aceptación. */
+            const src = Documento.construir.toString();
+            Pruebas.ok(!/Discriminación estadística/i.test(src),
+              'Fuera el recuadro de discriminación');
+            Pruebas.ok(!/leyendaAceptacion/.test(src), 'Fuera la leyenda de aceptación');
+            Pruebas.ok(!/leyendaAceptacion/.test(Modelo.configuracion.toString()),
+              'Y el ajuste desaparece: un ajuste que no cambia nada estorba');
+            Pruebas.ok(/dp-sign/.test(src), 'Las firmas se quedan');
+            Pruebas.ok(/sol\.tipoDocumento/.test(src),
+              'Y la firma dice el documento real, no «C.C.» a todo el mundo');
+            Pruebas.ok(/dp-tbl/.test(src), 'El detalle con sus valores sigue completo');
+          } },
+        { nombre: 'CRÍTICO · el listado marca cuáles ya tienen comprobante', fn: () => {
+            /* El comprobante puede estar colgado de la caja o de la consignación
+               que la repone. Si sólo se mirara un sitio, cajas con su soporte
+               al día aparecerían como si les faltara. */
+            const src = VistaCajas.render.toString();
+            Pruebas.ok(/conComprobante/.test(src), 'Se sabe cuáles lo tienen');
+            Pruebas.ok(/d\.cajaId\) conComprobante\.add/.test(src),
+              'Cuenta el que está colgado de la caja');
+            Pruebas.ok(/consConComp\.has\(a\.consignacionId\)/.test(src),
+              'Y también el de la consignación que la repone');
+            Pruebas.ok(/m-comp/.test(src) && /m-falta/.test(src),
+              'Marca las que lo tienen y avisa en las consignadas que no');
+            Pruebas.ok(/estado !== Estado\.INACTIVO/.test(src),
+              'Un documento eliminado no cuenta como comprobante');
+          } },
+        { nombre: 'CRÍTICO · la relación lleva el logo completo y se puede copiar', fn: () => {
+            const src = Documento.resumenReembolso.toString();
+            Pruebas.ok(!/LO QUE SE PIDIÓ/.test(src),
+              'La relación va sin la columna de artículos: sólo el corte de dinero');
+            Pruebas.ok(/CONCEPTO/.test(src) && /CATEGORÍA/.test(src) && /PENDIENTE/.test(src),
+              'Con quién pidió, para qué es y cuánto se le debe');
+            Pruebas.ok(/RolEstadistico\.GASOLINA/.test(src),
+              'La categoría deja fuera gasolina y aceite: son partes del total, no el motivo');
+            Pruebas.ok(/cfg\.logoDataUrl/.test(src) && /LOGO_DON_ASEO/.test(src),
+              'Con el logo completo, no con la marca pequeña');
+            Pruebas.ok(!/MARCA_DON_ASEO/.test(src), 'Sin la marca cuadrada');
+            Pruebas.ok(!/no recalcula ni ajusta/.test(src) && !/Recibió conforme/.test(src),
+              'Sin el pie que sobraba');
+            Pruebas.ok(/copiarHtmlComoImagen/.test(src),
+              'Se copia como imagen, para mandarla por WhatsApp igual que una caja');
+            Pruebas.ok(!/clipboard\.writeText/.test(src),
+              'Ya no se copia como texto suelto');
+            Pruebas.ok(/window\.print/.test(src), 'Y se puede imprimir');
+            /* El generador de PNG es el mismo de las cajas: una sola pieza con
+               las trampas del lienzo ya resueltas, no una copia. */
+            Pruebas.ok(/htmlAPngBlob/.test(Documento.copiarHtmlComoImagen.toString()),
+              'Usando el mismo generador de imagen que las cajas');
+            Pruebas.ok(/htmlAPngBlob/.test(Documento.aPngBlob.toString()),
+              'Que es exactamente el que usa una caja menor');
           } },
         { nombre: 'CRÍTICO · la relación de reembolso ordena y suma lo marcado', fn: async ctx => {
             const src = Documento.pdfConComprobantes.toString();
@@ -13578,6 +13991,7 @@ async function arrancar() {
 
     msg('Cargando la interfaz…');
     Shell.render();
+    Tip.iniciar();
     Conexion.iniciar();
     Shell.aplicarFavicon();
     registrarRutas();
