@@ -4768,8 +4768,8 @@ const Combo = {
       let html = api.filtradas.map((o, i) =>
         '<div class="combo-opt' + (i === api.hl || (api.hl < 0 && Txt.norm(o.texto) === q) ? ' hl' : '') +
         '" data-i="' + i + '">' +
-        '<div style="min-width:0;flex:1"><div class="trunc">' + esc(o.texto) + '</div>' +
-        (o.sub ? '<div class="fs11 txt-3 trunc">' + esc(o.sub) + '</div>' : '') + '</div>' +
+        '<div style="min-width:0;flex:1"><div class="trunc">' + Txt.resaltar(o.texto, input.value) + '</div>' +
+        (o.sub ? '<div class="fs11 txt-3 trunc">' + Txt.resaltar(o.sub, input.value) + '</div>' : '') + '</div>' +
         (o.tag ? '<span class="co-tag">' + esc(o.tag) + '</span>' : '') + '</div>').join('');
       if (!api.filtradas.length && !input.value) html = '<div class="combo-opt txt-3">Sin opciones</div>';
       if (cfg.permitirLibre && input.value.trim() && !exacta) {
@@ -4845,6 +4845,44 @@ const Combo = {
       setTimeout(() => { if (Combo._act === api && document.activeElement !== input) api.cerrar(); }, 120);
     });
     return api;
+  },
+
+  /**
+   * Buscador con lista de sugerencias. Se comporta igual en todas las
+   * pantallas: mientras se escribe sólo se mueve la lista, y el listado de
+   * abajo se rehace únicamente al elegir una sugerencia o al confirmar.
+   *
+   * Filtrar tecla a tecla obligaba a recorrer y repintar la tabla entera con
+   * cada letra; con 447 cajas se notaba. Las sugerencias, en cambio, se
+   * construyen una vez por pintado y filtrar unas decenas de textos es
+   * instantáneo.
+   *
+   * `valores` es una lista de {texto, tag}. El orden de los grupos lo decide
+   * el orden en que aparece cada `tag` por primera vez, así cada pantalla
+   * manda lo suyo primero.
+   */
+  buscador(id, valores, alBuscar) {
+    const input = document.getElementById(id);
+    if (!input) return null;
+    const vistos = new Set(), opciones = [], ordenTag = new Map();
+    for (const v of (valores || [])) {
+      const t = String((v && v.texto) || '').trim();
+      const tag = String((v && v.tag) || '');
+      if (!t || t === '—' || t === VALOR_NO_DISPONIBLE) continue;
+      if (!ordenTag.has(tag)) ordenTag.set(tag, ordenTag.size);
+      const k = tag + '|' + Txt.norm(t);
+      if (vistos.has(k)) continue;
+      vistos.add(k);
+      opciones.push({ id: k, texto: t, tag: tag });
+    }
+    opciones.sort((a, b) => (ordenTag.get(a.tag) - ordenTag.get(b.tag)) ||
+      a.texto.localeCompare(b.texto, 'es'));
+    return Combo.montar(input, {
+      opciones: opciones,
+      permitirLibre: true,
+      etiquetaLibre: 'buscar este texto',
+      alElegir: (op, libre) => alBuscar(op ? op.texto : String(libre || ''))
+    });
   },
 
   /** helpers de opciones */
@@ -5399,19 +5437,6 @@ document.addEventListener('click', async e => {
     if (innerWidth <= 860) { $('#sidebar').classList.remove('open'); $('#scrim').classList.remove('on'); }
   }
 });
-/**
- * Algunos campos deben reaccionar MIENTRAS se escribe, no al salir de ellos.
- * Los buscadores llevaban su espera puesta desde el principio, pero sólo había
- * escuchador de «change»: la lista no se movía hasta cambiar de campo o pulsar
- * Intro. Se marcan con `data-vivo` para no alterar el resto de formularios,
- * donde reaccionar a cada tecla sí sería molesto.
- */
-document.addEventListener('input', e => {
-  const a = e.target.closest('[data-act][data-vivo]');
-  if (!a) return;
-  const fn = Acciones[a.getAttribute('data-act')];
-  if (fn) { try { fn(a, e); } catch (err) { manejarError(err); } }
-});
 document.addEventListener('change', async e => {
   const g = e.target.closest('[data-gact]');
   if (g) { const fn = AccionesGlobales[g.getAttribute('data-gact')]; if (fn) { await fn(g, e); return; } }
@@ -5677,7 +5702,7 @@ const VistaCajas = {
    * para comprobar que la suma cuadra, y debajo se dice con todas las letras
    * que gasolina y aceite no se suman aparte (§13).
    */
-  filaDetalle(c, dets, busca) {
+  filaDetalle(c, dets) {
     const haySub = dets.some(d => d.rol === RolEstadistico.GASOLINA || d.rol === RolEstadistico.ACEITE);
     const suma = U.sumBy(dets, d => d.valor);
     return '<tr class="det-fila hidden" data-det="' + attr(c.id) + '"><td colspan="13">' +
@@ -5687,10 +5712,10 @@ const VistaCajas = {
           '<th class="num">Valor</th></tr></thead><tbody>' +
           dets.map(d => {
             const sub = d.rol === RolEstadistico.GASOLINA || d.rol === RolEstadistico.ACEITE;
-            return '<tr><td class="nowrap">' + Txt.resaltar(d.categoriaNombre || '—', busca) +
+            return '<tr><td class="nowrap">' + esc(d.categoriaNombre || '—') +
               (sub ? ' <span class="txt-3 fs11">Parte de la caja menor</span>' : '') + '</td>' +
               '<td>' + (String(d.descripcion || '').trim()
-                ? Txt.resaltar(d.descripcion, busca) : '<span class="txt-3">—</span>') + '</td>' +
+                ? esc(d.descripcion) : '<span class="txt-3">—</span>') + '</td>' +
               '<td class="num">' + Money.format(d.valor) + '</td></tr>';
           }).join('') +
           '</tbody><tfoot>' +
@@ -5740,6 +5765,11 @@ const VistaCajas = {
       return out;
     };
 
+    /* Las sugerencias tienen que salir de lo que de verdad hay, y sin que el
+       texto ya escrito las recorte: si no, tras elegir «Alirio» sólo se podría
+       sugerir dentro de sus cajas. Se recogen en la MISMA pasada del filtro,
+       justo antes de comprobar el texto. */
+    const candidatos = [];
     const todas = await db.query('cajas', {
       indice: f.orden === 'numero' ? 'numero' : f.orden === 'total' ? 'fecha' : 'fecha',
       direccion: f.dir,
@@ -5759,6 +5789,7 @@ const VistaCajas = {
         }
         if (f.origen && c.origen !== f.origen) return false;
         if (f.categoriaId && !(detsPorCaja.get(c.id) || []).some(d => d.categoriaId === f.categoriaId)) return false;
+        candidatos.push(c);
         if (q) {
           const ds = detsPorCaja.get(c.id) || [];
           const blob = [c.numero, Comp.nombreSolicitante(c), c.municipioNombre, c.observaciones,
@@ -5818,7 +5849,7 @@ const VistaCajas = {
       '<div class="filters" style="margin:0">' +
         '<div class="field" style="flex:1 1 220px"><label>Búsqueda</label>' +
           '<input class="inp" placeholder="Número, concepto, cédula, ubicación, descripción…" value="' +
-          attr(f.texto) + '" data-act="fTexto" data-vivo></div>' +
+          attr(f.texto) + '" id="buscaCaja" data-act="fTexto"></div>' +
         '<div class="field"><label>Estado</label><select class="inp" data-act="fEstado">' +
           '<option value="">Todos</option>' +
           Object.keys(ESTADO_CAJA_META).map(k => '<option value="' + k + '"' + (f.estado === k ? ' selected' : '') + '>' +
@@ -5872,19 +5903,19 @@ const VistaCajas = {
             ? '<button class="btn btn-sm btn-ghost btn-icon" data-act="verTexto" data-id="' + attr(c.id) +
               '" title="Ver la descripción">' + Icon('chevR', '', 13) + '</button>'
             : '') + '</td>' +
-          '<td class="mono nowrap">' + Txt.resaltar(c.numero, f.texto) +
+          '<td class="mono nowrap">' + esc(c.numero) +
             (c.requiereRevision ? ' <span title="Requiere revisión" style="color:var(--warn-500)">⚠</span>' : '') + '</td>' +
           '<td class="nowrap">' + Fecha.corta(c.fecha) + '</td>' +
           '<td class="trunc" style="max-width:126px" title="' + attr(cats.join(' · ')) + '">' +
-            (cats.length ? Txt.resaltar(cats[0], f.texto) + (cats.length > 1
+            (cats.length ? esc(cats[0]) + (cats.length > 1
               ? ' <span class="txt-3 fs11">+' + (cats.length - 1) + '</span>' : '')
               : '<span class="txt-3">—</span>') + '</td>' +
           '<td class="trunc" style="max-width:148px" title="' + attr(Comp.nombreSolicitante(c)) + '">' +
-            Txt.resaltar(Comp.nombreSolicitante(c), f.texto) + '</td>' +
+            esc(Comp.nombreSolicitante(c)) + '</td>' +
           '<td class="trunc" style="max-width:104px" title="' + attr(c.municipioNombre || '') + '">' +
-            Txt.resaltar(c.municipioNombre || '—', f.texto) + '</td>' +
+            esc(c.municipioNombre || '—') + '</td>' +
           '<td class="trunc" style="max-width:92px" title="' + attr(Comp.nombreConsigno(c)) + '">' +
-            Txt.resaltar(Comp.nombreConsigno(c), f.texto) + '</td>' +
+            esc(Comp.nombreConsigno(c)) + '</td>' +
           '<td class="num"><b>' + Money.format(c.total) + '</b></td>' +
           '<td class="num">' + (c.gasolina ? Money.format(c.gasolina) : '<span class="txt-3">—</span>') + '</td>' +
           '<td class="num">' + (c.aceite ? Money.format(c.aceite) : '<span class="txt-3">—</span>') + '</td>' +
@@ -5901,7 +5932,7 @@ const VistaCajas = {
           /* La descripción es texto largo: en una columna quedaría cortada y
              sin poder copiarse. Va en su propia fila, desplegable, con TODOS
              los detalles de la caja y su texto completo. */
-          (hayTexto ? VistaCajas.filaDetalle(c, dets, f.texto) : '');
+          (hayTexto ? VistaCajas.filaDetalle(c, dets) : '');
       }).join('')
         : '<tr><td colspan="13">' + Comp.vacio({ icono: 'caja', titulo: 'Sin resultados',
             texto: todas.length === 0 ? 'Aún no hay cajas menores registradas o los filtros no coinciden.' : 'Ajuste los filtros.',
@@ -5917,8 +5948,22 @@ const VistaCajas = {
       '</div></div>';
 
     const recargar = () => { f.pagina = 1; VistaCajas.render(cont); };
+    const sugerencias = [];
+    for (const c of candidatos) {
+      sugerencias.push({ texto: Comp.nombreSolicitante(c), tag: 'Concepto' });
+      for (const d of (detsPorCaja.get(c.id) || []))
+        sugerencias.push({ texto: d.categoriaNombre, tag: 'Categoría' });
+      sugerencias.push({ texto: c.municipioNombre, tag: 'Ubicación' });
+      sugerencias.push({ texto: Comp.nombreConsigno(c), tag: 'Consignó' });
+    }
+    Combo.buscador('buscaCaja', sugerencias, texto => {
+      if (texto === f.texto) return;
+      f.texto = texto; recargar();
+    });
     setAcciones({
-      fTexto: U.debounce(el => { f.texto = el.value; recargar(); }, 260),
+      /* Sólo al confirmar (Intro o salir del campo). Mientras se escribe lo
+         que se mueve es la lista de sugerencias, no las 447 filas. */
+      fTexto: el => { if (el.value === f.texto) return; f.texto = el.value; recargar(); },
       fEstado: el => { f.estado = el.value; recargar(); },
       fSolicitante: el => { f.solicitanteId = el.value; recargar(); },
       fMunicipio: el => { f.municipioId = el.value; recargar(); },
@@ -6806,6 +6851,7 @@ const VistaConsignaciones = {
 
     const q = Txt.norm(f.texto);
     const ctrId = ContratoRepo.activoId();
+    const candidatos = [];   // para las sugerencias: sin el filtro de texto
     const todas = await db.query('consignaciones', {
       indice: 'fecha', direccion: 'desc',
       filtro: c => {
@@ -6813,6 +6859,7 @@ const VistaConsignaciones = {
         if (f.beneficiarioId && c.beneficiarioId !== f.beneficiarioId) return false;
         if (f.desde && c.fecha < f.desde) return false;
         if (f.hasta && c.fecha > f.hasta) return false;
+        candidatos.push(c);
         if (q) {
           const blob = [c.numero, c.referencia, c.banco, c.beneficiario && c.beneficiario.nombre, c.observaciones].join(' ');
           if (!Txt.norm(blob).includes(q)) return false;
@@ -6853,7 +6900,8 @@ const VistaConsignaciones = {
 
       '<div class="card mb16"><div class="card-b" style="padding:12px 14px"><div class="filters" style="margin:0">' +
       '<div class="field" style="flex:1 1 220px"><label>Búsqueda</label>' +
-      '<input class="inp" placeholder="Número, referencia, banco, beneficiario…" value="' + attr(f.texto) + '" data-act="cTexto" data-vivo></div>' +
+      '<input class="inp" placeholder="Número, referencia, banco, beneficiario…" value="' + attr(f.texto) +
+        '" id="buscaCons" data-act="cTexto"></div>' +
       '<div class="field"><label>Beneficiario</label><select class="inp" data-act="cBenef"><option value="">Todos</option>' +
       PersonaRepo.todas().filter(p => p.esFinanciador).map(p => '<option value="' + p.id + '"' +
         (f.beneficiarioId === p.id ? ' selected' : '') + '>' + esc(p.nombre) + '</option>').join('') + '</select></div>' +
@@ -6889,8 +6937,15 @@ const VistaConsignaciones = {
       '</div></div>';
 
     const recargar = () => { f.pagina = 1; VistaConsignaciones.render(cont); };
+    Combo.buscador('buscaCons', candidatos.flatMap(c => [
+      { texto: c.beneficiario && c.beneficiario.nombre, tag: 'Beneficiario' },
+      { texto: c.numero, tag: 'Número' },
+      { texto: c.banco, tag: 'Banco' },
+      { texto: c.referencia, tag: 'Referencia' }
+    ]), texto => { if (texto === f.texto) return; f.texto = texto; recargar(); });
+
     setAcciones({
-      cTexto: U.debounce(el => { f.texto = el.value; recargar(); }, 260),
+      cTexto: el => { if (el.value === f.texto) return; f.texto = el.value; recargar(); },
       cBenef: el => { f.beneficiarioId = el.value; recargar(); },
       cDesde: Comp.filtroFecha(v => { f.desde = v; recargar(); }),
       cHasta: Comp.filtroFecha(v => { f.hasta = v; recargar(); }),
@@ -7232,11 +7287,13 @@ const VistaPersonas = {
     Shell.titulo('Personas', 'Solicitantes y personas que adelantan dinero');
     const f = this.filtros;
     const q = Txt.norm(f.texto);
+    const candidatos = [];   // para las sugerencias: sin el filtro de texto
     let lista = PersonaRepo.todas().filter(p => {
       if (f.estado && p.estado !== f.estado) return false;
       if (f.rol === 'financiador' && !p.esFinanciador) return false;
       if (f.rol === 'solicitante' && !p.esSolicitante) return false;
       if (f.municipioId && p.municipioId !== f.municipioId) return false;
+      candidatos.push(p);
       if (q) {
         const blob = [p.nombre, p.cedula, p.banco, p.cargo, p.correo, p.telefono,
           MunicipioRepo.nombre(p.municipioId)].join(' ');
@@ -7263,7 +7320,8 @@ const VistaPersonas = {
 
       '<div class="card mb16"><div class="card-b" style="padding:12px 14px"><div class="filters" style="margin:0">' +
       '<div class="field" style="flex:1 1 240px"><label>Búsqueda</label>' +
-      '<input class="inp" placeholder="Nombre, cédula, banco, cargo…" value="' + attr(f.texto) + '" data-act="pTexto" data-vivo></div>' +
+      '<input class="inp" placeholder="Nombre, cédula, banco, cargo…" value="' + attr(f.texto) +
+        '" id="buscaPer" data-act="pTexto"></div>' +
       '<div class="field"><label>Estado</label><select class="inp" data-act="pEstado">' +
       '<option value="">Todos</option><option value="ACTIVO"' + (f.estado === 'ACTIVO' ? ' selected' : '') + '>Activos</option>' +
       '<option value="INACTIVO"' + (f.estado === 'INACTIVO' ? ' selected' : '') + '>Inactivos</option></select></div>' +
@@ -7300,8 +7358,16 @@ const VistaPersonas = {
             accion: 'nueva', textoAccion: 'Crear persona', iconoAccion: 'plus' }) + '</td></tr>') +
       '</tbody></table></div></div></div>';
 
+    Combo.buscador('buscaPer', candidatos.flatMap(p => [
+      { texto: p.nombre, tag: 'Nombre' },
+      { texto: p.cedula, tag: 'Cédula' },
+      { texto: MunicipioRepo.nombre(p.municipioId), tag: 'Municipio' },
+      { texto: p.banco, tag: 'Banco' },
+      { texto: p.cargo, tag: 'Cargo' }
+    ]), texto => { if (texto === f.texto) return; f.texto = texto; VistaPersonas.render(cont); });
+
     setAcciones({
-      pTexto: U.debounce(el => { f.texto = el.value; VistaPersonas.render(cont); }, 240),
+      pTexto: el => { if (el.value === f.texto) return; f.texto = el.value; VistaPersonas.render(cont); },
       pEstado: el => { f.estado = el.value; VistaPersonas.render(cont); },
       pRol: el => { f.rol = el.value; VistaPersonas.render(cont); },
       pMun: el => { f.municipioId = el.value; VistaPersonas.render(cont); },
@@ -8433,7 +8499,8 @@ const VistaExpediente = {
       '</div>' +
       '<div class="card mb16"><div class="card-b" style="padding:12px 14px"><div class="filters" style="margin:0">' +
       '<div class="field" style="flex:1 1 260px"><label>Búsqueda</label>' +
-      '<input class="inp" placeholder="Nombre del archivo, caja, consignación…" value="' + attr(f.texto) + '" data-act="dTexto" data-vivo></div>' +
+      '<input class="inp" placeholder="Nombre del archivo, caja, consignación…" value="' + attr(f.texto) +
+        '" id="buscaDoc" data-act="dTexto"></div>' +
       '<div class="field"><label>Vinculado a</label><select class="inp" data-act="dVinculo">' +
       '<option value="">Todo</option><option value="caja"' + (f.vinculo === 'caja' ? ' selected' : '') + '>Cajas menores</option>' +
       '<option value="consignacion"' + (f.vinculo === 'consignacion' ? ' selected' : '') + '>Consignaciones</option>' +
@@ -8469,8 +8536,19 @@ const VistaExpediente = {
       (lista.length > 500 ? '<div class="card-f">Mostrando los 500 más recientes de ' + lista.length + '.</div>' : '') +
       '</div></div>';
 
+    Combo.buscador('buscaDoc', todos.flatMap(d => {
+      const c = d.cajaId ? v.cajaPorId.get(d.cajaId) : null;
+      const cn = d.consignacionId ? consPorId.get(d.consignacionId) : null;
+      return [
+        { texto: d.nombre, tag: 'Archivo' },
+        { texto: c && c.numero, tag: 'Caja' },
+        { texto: cn && cn.numero, tag: 'Consignación' },
+        { texto: c && Comp.nombreSolicitante(c), tag: 'Concepto' }
+      ];
+    }), texto => { if (texto === f.texto) return; f.texto = texto; VistaExpediente.render(cont); });
+
     setAcciones(Object.assign({
-      dTexto: U.debounce(el => { f.texto = el.value; VistaExpediente.render(cont); }, 240),
+      dTexto: el => { if (el.value === f.texto) return; f.texto = el.value; VistaExpediente.render(cont); },
       dVinculo: el => { f.vinculo = el.value; VistaExpediente.render(cont); },
       filTipo: el => { f.tipo = el.dataset.t; VistaExpediente.render(cont); }
     }, Expediente.acciones({ recargar: () => VistaExpediente.render(cont) })));
@@ -12396,6 +12474,51 @@ const Pruebas = {
               'Se muestra lo que suman los conceptos');
             Pruebas.ok(html.includes('Retención'), 'Y la retención que se descuenta');
             Pruebas.ok(html.includes(Money.format(9500000)), 'Para llegar al total real');
+          } },
+        { nombre: 'CRÍTICO · ninguna búsqueda rehace su lista al escribir', fn: () => {
+            /* Filtrar tecla a tecla obligaba a recorrer y repintar la lista
+               entera con cada letra; con 447 cajas se notaba. Las cuatro
+               búsquedas se comportan igual: mientras se escribe sólo se mueve
+               la lista de sugerencias. */
+            const vistas = [['Cajas menores', VistaCajas], ['Consignaciones', VistaConsignaciones],
+                            ['Personas', VistaPersonas], ['Expediente', VistaExpediente]];
+            for (const [nombre, vista] of vistas) {
+              const src = vista.render.toString();
+              Pruebas.ok(/Combo\.buscador/.test(src), nombre + ': usa el buscador con sugerencias');
+              Pruebas.ok(!/data-vivo/.test(src), nombre + ': no filtra con cada tecla');
+              Pruebas.ok(!/U\.debounce/.test(src), nombre + ': ya no necesita esperar al teclado');
+            }
+            const comp = Combo.buscador.toString();
+            Pruebas.ok(/permitirLibre: true/.test(comp), 'Se puede buscar cualquier texto libre');
+            Pruebas.ok(/Txt\.resaltar/.test(Combo.montar.toString()),
+              'El desplegable marca la parte que coincide');
+            Pruebas.ok(!/Txt\.resaltar/.test(VistaCajas.render.toString()),
+              'Las celdas de la tabla van sin marcas: con una letra se llenaba de amarillo');
+          } },
+        { nombre: 'El buscador agrupa, no repite y respeta el orden de la pantalla', fn: () => {
+            const div = document.createElement('div');
+            div.innerHTML = '<input id="pruebaBuscador">';
+            document.body.appendChild(div);
+            try {
+              let elegido = null;
+              const api = Combo.buscador('pruebaBuscador', [
+                { texto: 'Alirio Pardo', tag: 'Concepto' },
+                { texto: 'Andes', tag: 'Ubicación' },
+                { texto: 'ALIRIO  PARDO', tag: 'Concepto' },   // duplicado con otro formato
+                { texto: '', tag: 'Concepto' },                 // vacío: se descarta
+                { texto: '—', tag: 'Ubicación' },               // guion: se descarta
+                { texto: 'Caja menor', tag: 'Concepto' }
+              ], t => { elegido = t; });
+              const ops = api.cfg.opciones;
+              Pruebas.igual(ops.length, 3, 'Descarta vacíos, guiones y repetidos');
+              Pruebas.igual(ops.map(o => o.tag).join(','), 'Concepto,Concepto,Ubicación',
+                'Los grupos salen en el orden en que la pantalla los declara');
+              Pruebas.igual(ops[0].texto, 'Alirio Pardo', 'Y dentro de cada grupo, alfabético');
+              api.cfg.alElegir(ops[0]);
+              Pruebas.igual(elegido, 'Alirio Pardo', 'Al elegir se busca ese texto');
+              api.cfg.alElegir(null, 'texto suelto');
+              Pruebas.igual(elegido, 'texto suelto', 'Y el texto libre también');
+            } finally { div.remove(); }
           } },
         { nombre: 'CRÍTICO · el resaltado no rompe el escapado de HTML', fn: () => {
             /* Se marca sobre el texto ORIGINAL, escapando cada trozo por
