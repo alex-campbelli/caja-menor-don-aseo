@@ -19,6 +19,7 @@
   --ok-50:#e9f7ef;--ok-500:#12915a;--ok-700:#0a6c42;
   --warn-50:#fdf5e3;--warn-500:#c8860d;--warn-700:#8f5f06;
   --dang-50:#fdecec;--dang-500:#c8372d;--dang-700:#93261e;
+  --past-amber:#fffaf0; --past-blue:#f2f7fe; --past-verde:#f0faf5;
   --info-50:#e8f1fd;--info-500:#2563c9;--info-700:#1a4894;
   --violet-500:#6d4aca; --violet-50:#f0ecfb;
   --bg:var(--ink-100); --surface:#fff; --surface-2:var(--ink-50); --surface-3:var(--ink-100);
@@ -49,6 +50,7 @@ html[data-theme="dark"]{
      oscuro; en oscuro tiene que ser el más claro, o el texto de alertas y
      etiquetas queda ilegible (medido: 2,0-2,8:1 frente al mínimo de 4,5:1). */
   --ok-700:#79e3ae;--warn-700:#f3cb77;--dang-700:#ffa79d;--info-700:#9cc0ff;
+  --past-amber:#231d12; --past-blue:#141d29; --past-verde:#12211a;
   --sh-1:0 1px 2px rgba(0,0,0,.3); --sh-2:0 2px 8px rgba(0,0,0,.35);
   --sh-3:0 12px 32px rgba(0,0,0,.5); --sh-pop:0 12px 28px rgba(0,0,0,.55);
 }
@@ -479,6 +481,24 @@ html[data-theme="dark"] .money-pos{color:var(--ok-500)}
 .trunc{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 mark{background:#fdf3a7;color:inherit;border-radius:2px;padding:0 1px}
 html[data-theme="dark"] mark{background:rgba(224,166,58,.32);color:#f3cb77}
+/* Cajas sin cerrar: se distinguen de un vistazo sin gritar. El tono va en la
+   izquierda y muy suave en el fondo, para no pelear con el texto. */
+table.tbl tbody tr.est-PENDIENTE > td:first-child{box-shadow:inset 3px 0 0 var(--warn-500)}
+table.tbl tbody tr.est-PENDIENTE > td{background:var(--past-amber)}
+table.tbl tbody tr.est-CONSIGNADA > td:first-child{box-shadow:inset 3px 0 0 var(--info-500)}
+table.tbl tbody tr.est-CONSIGNADA > td{background:var(--past-blue)}
+table.tbl tbody tr.marcada > td{background:var(--past-verde)}
+table.tbl tbody tr.marcada > td:first-child{box-shadow:inset 3px 0 0 var(--brand-500)}
+.col-sel{width:30px;padding-left:8px!important;padding-right:0!important}
+.col-sel input{cursor:pointer}
+.nota{color:var(--info-500);cursor:help;vertical-align:middle}
+
+/* Barra de lo marcado: flotante, encima de todo y sin tapar la última fila */
+.selbar{position:sticky;bottom:0;z-index:20;margin-top:12px;pointer-events:none}
+.selbar-in{pointer-events:auto;display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-lg);
+  box-shadow:var(--sh-3);padding:9px 12px;font-size:12.5px}
+.selbar-sep{width:1px;height:16px;background:var(--border)}
 .hidden{display:none !important}
 .det-fila>td{background:var(--surface-2);padding:0!important;border-top:0}
 /* La celda ocupa las 13 columnas, asi que sin tope la tabla interna se
@@ -616,6 +636,16 @@ html[data-theme="dark"] .preview-shell{background:#0a0f13}
   .doc-page{width:100%;min-height:auto;box-shadow:none !important;margin:0;padding:10mm 12mm;
     page-break-after:always}
   .doc-page:last-child{page-break-after:auto}
+  .doc-comp{margin:0 0 10px;text-align:center;page-break-inside:avoid}
+  .doc-comp img{max-width:100%;max-height:22cm;border:1px solid #ccc}
+  .doc-comp figcaption{font-size:9px;color:#666;margin-top:3px}
+  .doc-comp-otro{font-size:10px;color:#666;padding:6px 0}
+  .doc-cab-min{font-size:11px;font-weight:700;border-bottom:1px solid #999;
+    padding-bottom:5px;margin-bottom:10px}
+  .doc-nota{font-size:9.5px;color:#555;margin:6px 0 0}
+  .doc-firmas{display:flex;gap:40px;margin-top:34px;font-size:10px}
+  .doc-firmas div{flex:1}
+  .doc-firmas span{display:block;border-top:1px solid #333;margin-bottom:4px}
   .no-print{display:none !important}
 }
 </style>
@@ -1709,28 +1739,48 @@ class IndexedDBAdapter extends StorageAdapter {
 /* ==========================================================================
    §4  ESQUEMA DE DOMINIO — enums, fábricas y validadores
    ========================================================================== */
+/* Tres pasos, que son los que ocurren de verdad:
+     PENDIENTE   → la caja está lista, pero todavía nadie ha consignado.
+     CONSIGNADA  → ya giraron el dinero; falta devolvérselo a quien lo puso.
+     REEMBOLSADA → a quien consignó ya le devolvieron su dinero.
+   Se conservan BORRADOR (aún se está armando) y ANULADA (se dejó sin efecto y
+   conserva su número, §): no son pasos del recorrido sino situaciones aparte. */
 const EstadoCaja = Object.freeze({
   BORRADOR: 'BORRADOR',
-  PENDIENTE_PAGO: 'PENDIENTE_PAGO',
-  PAGADA: 'PAGADA',
-  PENDIENTE_REPOSICION: 'PENDIENTE_REPOSICION',
-  REPUESTA: 'REPUESTA',
+  PENDIENTE: 'PENDIENTE',
+  CONSIGNADA: 'CONSIGNADA',
+  REEMBOLSADA: 'REEMBOLSADA',
   ANULADA: 'ANULADA'
 });
 const ESTADO_CAJA_META = {
-  BORRADOR:             { label: 'Borrador',               pill: 'p-gray',   orden: 1 },
-  PENDIENTE_PAGO:       { label: 'Pendiente de pago',      pill: 'p-amber',  orden: 2 },
-  PAGADA:               { label: 'Pagada',                 pill: 'p-blue',   orden: 3 },
-  PENDIENTE_REPOSICION: { label: 'Pendiente de reposición',pill: 'p-violet', orden: 4 },
-  REPUESTA:             { label: 'Repuesta',               pill: 'p-green',  orden: 5 },
-  ANULADA:              { label: 'Anulada',                pill: 'p-red',    orden: 6 }
+  BORRADOR:    { label: 'Borrador',    pill: 'p-gray',  orden: 1,
+                 ayuda: 'Todavía se está armando.' },
+  PENDIENTE:   { label: 'Pendiente',   pill: 'p-amber', orden: 2,
+                 ayuda: 'La caja está lista, pero todavía no le han consignado.' },
+  CONSIGNADA:  { label: 'Consignada',  pill: 'p-blue',  orden: 3,
+                 ayuda: 'Ya giraron el dinero. Falta reembolsárselo a quien consignó.' },
+  REEMBOLSADA: { label: 'Reembolsada', pill: 'p-green', orden: 4,
+                 ayuda: 'A quien consignó ya le devolvieron su dinero.' },
+  ANULADA:     { label: 'Anulada',     pill: 'p-red',   orden: 5,
+                 ayuda: 'Se dejó sin efecto. Conserva su número y su histórico.' }
 };
 /** Estados que representan dinero realmente comprometido (entran en el gasto) */
-const ESTADOS_VIVOS = [EstadoCaja.BORRADOR, EstadoCaja.PENDIENTE_PAGO, EstadoCaja.PAGADA,
-                       EstadoCaja.PENDIENTE_REPOSICION, EstadoCaja.REPUESTA];
+const ESTADOS_VIVOS = [EstadoCaja.BORRADOR, EstadoCaja.PENDIENTE,
+                       EstadoCaja.CONSIGNADA, EstadoCaja.REEMBOLSADA];
 /** Estados que pueden recibir reposición */
-const ESTADOS_REPONIBLES = [EstadoCaja.PAGADA, EstadoCaja.PENDIENTE_REPOSICION, EstadoCaja.REPUESTA,
-                            EstadoCaja.PENDIENTE_PAGO];
+const ESTADOS_REPONIBLES = [EstadoCaja.PENDIENTE, EstadoCaja.CONSIGNADA, EstadoCaja.REEMBOLSADA];
+/** Alguien puso el dinero y todavía no se le ha devuelto: es lo que se le debe */
+const ESTADOS_POR_REEMBOLSAR = [EstadoCaja.CONSIGNADA];
+/** Cajas que aún no están cerradas: se resaltan en el listado */
+const ESTADOS_ABIERTOS = [EstadoCaja.PENDIENTE, EstadoCaja.CONSIGNADA];
+
+/** Estados de antes del cambio → estado equivalente de ahora */
+const ESTADOS_ANTIGUOS = {
+  PENDIENTE_PAGO: EstadoCaja.PENDIENTE,
+  PAGADA: EstadoCaja.CONSIGNADA,
+  PENDIENTE_REPOSICION: EstadoCaja.CONSIGNADA,
+  REPUESTA: EstadoCaja.REEMBOLSADA
+};
 
 const Estado = Object.freeze({ ACTIVO: 'ACTIVO', INACTIVO: 'INACTIVO' });
 const Origen = Object.freeze({ MANUAL: 'MANUAL', IMPORT: 'IMPORT', SISTEMA: 'SISTEMA' });
@@ -1760,6 +1810,8 @@ const TIPO_DOC_META = {
 const RolEstadistico = Object.freeze({ GASOLINA: 'GASOLINA', ACEITE: 'ACEITE' });
 
 const TIPOS_CUENTA = ['Ahorros', 'Corriente', 'Nequi', 'Daviplata', 'Otro', 'No disponible'];
+/** No todos los trabajadores tienen cédula: algunos presentan pasaporte */
+const TIPOS_DOCUMENTO = ['Cédula', 'Cédula de extranjería', 'Pasaporte', 'PEP', 'NIT'];
 const VALOR_NO_DISPONIBLE = 'No disponible';
 const VALOR_NO_APLICA = 'No aplica';
 
@@ -1855,6 +1907,9 @@ const Modelo = {
       id: p.id || ID.persona(),
       nombre,
       nombreNorm: Txt.norm(nombre),
+      /* El número va en `cedula` desde el primer día; renombrarlo rompería el
+         histórico. Lo que se añade es de QUÉ documento es ese número. */
+      tipoDocumento: p.tipoDocumento || TIPOS_DOCUMENTO[0],
       cedula: String(p.cedula || '').trim(),
       banco: String(p.banco || '').trim(),
       tipoCuenta: p.tipoCuenta || '',
@@ -1919,6 +1974,7 @@ const Modelo = {
     return {
       personaId: persona.id,
       nombre: persona.nombre,
+      tipoDocumento: persona.tipoDocumento || TIPOS_DOCUMENTO[0],
       cedula: persona.cedula || '',
       banco: persona.banco || '',
       tipoCuenta: persona.tipoCuenta || '',
@@ -1956,6 +2012,8 @@ const Modelo = {
       gasolina: p.gasolina || 0,       // centavos — SUBCOMPONENTE, no se suma al total
       aceite: p.aceite || 0,           // centavos — SUBCOMPONENTE
       totalDetalles: p.totalDetalles || 0,
+      /** nota corta; se ve en el listado al pasar el cursor por encima */
+      comentario: String(p.comentario || '').trim(),
       observaciones: p.observaciones || '',
       requiereRevision: p.requiereRevision ? 1 : 0,
       motivoRevision: p.motivoRevision || '',
@@ -1982,6 +2040,10 @@ const Modelo = {
       categoriaId: p.categoriaId || null,
       /** texto libre preservado tal cual lo escribió el usuario o venía del Excel */
       categoriaNombre: String(p.categoriaNombre || '').trim(),
+      /* Qué se compró: la lima, el machete, el rastrillo. Antes esto se escribía
+         en la categoría y cada compra acababa creando una categoría propia,
+         cuando todas pertenecen a la misma (normalmente «Caja menor»). */
+      elemento: String(p.elemento || '').trim(),
       descripcion: String(p.descripcion || '').trim(),
       cantidad: p.cantidad === undefined || p.cantidad === null || p.cantidad === '' ? null : Number(p.cantidad),
       valorUnitario: p.valorUnitario || 0,
@@ -2080,7 +2142,10 @@ const Validar = {
     const e = [];
     if (Txt.vacio(p.nombre)) e.push('El nombre es obligatorio.');
     if (p.nombre && p.nombre.trim().length < 3) e.push('El nombre debe tener al menos 3 caracteres.');
-    if (p.cedula && !/^[\dA-Za-z.\-\s]{4,20}$/.test(p.cedula)) e.push('La cédula tiene un formato no válido.');
+    if (p.cedula && !/^[\dA-Za-z.\-\s]{4,20}$/.test(p.cedula))
+      e.push('El número de documento tiene un formato no válido.');
+    if (p.tipoDocumento && !TIPOS_DOCUMENTO.includes(p.tipoDocumento))
+      e.push('Tipo de documento no válido.');
     if (p.correo && !/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(p.correo)) e.push('El correo no es válido.');
     if (p.numeroCuenta && !/^[\d\-\s]{4,30}$/.test(p.numeroCuenta)) e.push('El número de cuenta sólo admite dígitos.');
     if (![Estado.ACTIVO, Estado.INACTIVO].includes(p.estado)) e.push('Estado no válido.');
@@ -3266,7 +3331,7 @@ const Finanzas = {
   pendienteDe(caja, repuesto) {
     if (!caja) return 0;
     if (caja.estado === EstadoCaja.ANULADA || caja.estado === EstadoCaja.BORRADOR) return 0;
-    if (caja.estado === EstadoCaja.REPUESTA) return 0;
+    if (caja.estado === EstadoCaja.REEMBOLSADA) return 0;
     return Math.max(0, (caja.total || 0) - (repuesto || 0));
   },
   pendiente(caja, aplicaciones) {
@@ -3285,11 +3350,11 @@ const Finanzas = {
     if (caja.estado === EstadoCaja.ANULADA || caja.estado === EstadoCaja.BORRADOR) return caja.estado;
     const total = caja.total || 0;
     if (repuesto <= 0) {
-      if (caja.estado !== EstadoCaja.REPUESTA) return caja.estado;
-      return caja.reposicionManual ? EstadoCaja.REPUESTA : EstadoCaja.PENDIENTE_REPOSICION;
+      if (caja.estado !== EstadoCaja.REEMBOLSADA) return caja.estado;
+      return caja.reposicionManual ? EstadoCaja.REEMBOLSADA : EstadoCaja.CONSIGNADA;
     }
-    if (repuesto >= total) return EstadoCaja.REPUESTA;
-    return EstadoCaja.PENDIENTE_REPOSICION;
+    if (repuesto >= total) return EstadoCaja.REEMBOLSADA;
+    return EstadoCaja.CONSIGNADA;
   },
 
   /**
@@ -3366,6 +3431,7 @@ const CajaService = {
       id: d.id, cajaId: contexto.cajaId, contratoId: contexto.contratoId || null, orden: orden,
       categoriaId: cat ? cat.id : null,
       categoriaNombre: nombreCat,
+      elemento: d.elemento,
       descripcion: d.descripcion,
       cantidad: d.cantidad,
       valorUnitario: d.valorUnitario || 0,
@@ -3420,13 +3486,14 @@ const CajaService = {
       direccion: entrada.direccion || '',
       estado: ctx.estado,
       observaciones: entrada.observaciones || '',
+      comentario: entrada.comentario || '',
       retencion: entrada.retencion || 0,
       origen: entrada.origen || Origen.MANUAL,
       legacy: entrada.legacy || null,
       requiereRevision: entrada.requiereRevision || 0,
       motivoRevision: entrada.motivoRevision || '',
       /* nace como REPUESTA sin consignación → es una declaración, no un registro */
-      reposicionManual: ctx.estado === EstadoCaja.REPUESTA ? 1 : 0
+      reposicionManual: ctx.estado === EstadoCaja.REEMBOLSADA ? 1 : 0
     });
     const errores = Validar.caja(Object.assign({}, borrador, { retencion: entrada.retencion || 0 }), detalles);
     if (errores.length && !entrada.omitirValidacion) throw new ErrorValidacion(errores);
@@ -3480,6 +3547,7 @@ const CajaService = {
       direccion: entrada.direccion !== undefined ? entrada.direccion : previa.direccion,
       estado,
       observaciones: entrada.observaciones !== undefined ? entrada.observaciones : previa.observaciones,
+      comentario: entrada.comentario !== undefined ? entrada.comentario : previa.comentario,
       subtotal: calc.subtotal, retencion: calc.retencion, total: calc.total,
       gasolina: calc.gasolina, aceite: calc.aceite, totalDetalles: detalles.length,
       requiereRevision: entrada.requiereRevision !== undefined ? (entrada.requiereRevision ? 1 : 0) : previa.requiereRevision,
@@ -3511,7 +3579,7 @@ const CajaService = {
     const apls = await CajaRepo.aplicaciones(cajaId);
     const repuesto = Finanzas.repuesto(apls);
     // Marcar REPUESTA sin consignación registrada es una DECLARACIÓN explícita
-    caja.reposicionManual = (estado === EstadoCaja.REPUESTA && repuesto < caja.total) ? 1 : 0;
+    caja.reposicionManual = (estado === EstadoCaja.REEMBOLSADA && repuesto < caja.total) ? 1 : 0;
     caja.estado = estado;
     caja.actualizadoEn = Modelo.ahora();
     await db.put('cajas', caja);
@@ -5687,6 +5755,11 @@ const VistaDashboard = {
    VISTA · CAJAS MENORES (listado)
    ========================================================================== */
 const VistaCajas = {
+  /* Qué cajas están marcadas. Vive fuera de los filtros porque sobrevive a
+     repintados y a cambios de página: se puede marcar en la página 1, pasar a
+     la 2, seguir marcando y ver el total de todas juntas. */
+  seleccion: new Set(),
+
   /**
    * Fila desplegable con el desglose de una caja.
    *
@@ -5705,7 +5778,7 @@ const VistaCajas = {
   filaDetalle(c, dets) {
     const haySub = dets.some(d => d.rol === RolEstadistico.GASOLINA || d.rol === RolEstadistico.ACEITE);
     const suma = U.sumBy(dets, d => d.valor);
-    return '<tr class="det-fila hidden" data-det="' + attr(c.id) + '"><td colspan="13">' +
+    return '<tr class="det-fila hidden" data-det="' + attr(c.id) + '"><td colspan="14">' +
       '<div class="det-caja">' +
       (dets.length
         ? '<table class="tbl-mini"><thead><tr><th>Desglose del total</th><th>Descripción</th>' +
@@ -5734,6 +5807,32 @@ const VistaCajas = {
       (String(c.observaciones || '').trim()
         ? '<div class="fs12 mt8"><b>Observaciones:</b> ' + esc(c.observaciones) + '</div>' : '') +
       '</div></td></tr>';
+  },
+
+  /**
+   * Barra flotante con lo que está marcado. Aparece sola al marcar la primera
+   * caja y suma sobre la marcha: sirve para escoger a ojo las que faltan por
+   * reembolsar y ver de una vez cuánto suman, sin sacar la calculadora.
+   */
+  barraSeleccion(todas, repuesto) {
+    const sel = todas.filter(c => VistaCajas.seleccion.has(c.id));
+    if (!sel.length) return '';
+    const total = U.sumBy(sel, c => c.total);
+    const pend = U.sumBy(sel, c => Finanzas.pendienteDe(c, repuesto.get(c.id) || 0));
+    return '<div class="selbar">' +
+      '<div class="selbar-in">' +
+        '<b>' + sel.length + '</b> caja(s) marcada(s)' +
+        '<span class="selbar-sep"></span>' +
+        'Total <b>' + Money.format(total) + '</b>' +
+        (pend ? '<span class="selbar-sep"></span>Pendiente <b>' + Money.format(pend) + '</b>' : '') +
+        '<span style="flex:1"></span>' +
+        '<button class="btn btn-sm" data-act="resumenSeleccion">' + Icon('doc', '', 13) +
+          'Resumen para quien consignó</button>' +
+        '<button class="btn btn-sm btn-primary" data-act="pdfSeleccion">' + Icon('print', '', 13) +
+          'PDF con comprobantes</button>' +
+        '<button class="btn btn-sm btn-ghost btn-icon" data-act="selLimpiar" title="Quitar la selección">' +
+          Icon('x', '', 13) + '</button>' +
+      '</div></div>';
   },
 
   async render(cont) {
@@ -5819,6 +5918,8 @@ const VistaCajas = {
     if (f.pagina > totalPags) f.pagina = totalPags;
     const pagina = todas.slice((f.pagina - 1) * tam, f.pagina * tam);
 
+    /* la casilla del encabezado marca o desmarca la página que se está viendo */
+    const todasMarcadas = pagina.length > 0 && pagina.every(c => VistaCajas.seleccion.has(c.id));
     const vivas = todas.filter(c => c.estado !== EstadoCaja.ANULADA);
     const sumTotal = U.sumBy(vivas, c => c.total);
     const sumPend = U.sumBy(vivas, c => Finanzas.pendienteDe(c, repuesto.get(c.id) || 0));
@@ -5840,6 +5941,8 @@ const VistaCajas = {
       '<div class="ph-sub">' + todas.length.toLocaleString('es-CO') + ' registro(s) · Total ' + Money.format(sumTotal) +
       ' · Pendiente ' + Money.format(sumPend) + '</div></div>' +
       '<div class="ph-actions">' +
+      '<button class="btn" data-act="selPorReembolsar" title="Marca las cajas ya consignadas que todavía no se han reembolsado">' +
+        Icon('check', '', 14) + 'Marcar por reembolsar</button>' +
       '<button class="btn" data-act="exportarExcel">' + Icon('download', '', 14) + 'Excel</button>' +
       '<button class="btn" data-act="exportarCsv">' + Icon('download', '', 14) + 'CSV</button>' +
       '<button class="btn btn-primary" data-ir="caja-nueva">' + Icon('plus', '', 14) + 'Nueva caja</button>' +
@@ -5883,7 +5986,10 @@ const VistaCajas = {
       '</div></div>' +
 
       '<div class="card"><div class="card-b flush"><div class="tbl-wrap"><table class="tbl compacta">' +
-      '<thead><tr><th style="width:30px"></th>' +
+      '<thead><tr>' +
+      '<th style="width:30px" title="Marcar todas las de esta página">' +
+        '<input type="checkbox" data-act="selPagina"' + (todasMarcadas ? ' checked' : '') + '></th>' +
+      '<th style="width:30px"></th>' +
       th('numero', 'Número') + th('fecha', 'Fecha') + th('categoria', 'Categoría') +
       th('solicitante', 'Concepto', '', 'Como en el Excel. Es la persona que solicita el dinero.') +
       '<th title="Como en el Excel. Es el municipio de la operación.">Ubicación</th>' +
@@ -5898,13 +6004,20 @@ const VistaCajas = {
         const cats = catsDe(c);
         const dets = (detsPorCaja.get(c.id) || []).slice().sort(U.by('orden'));
         const hayTexto = dets.some(d => String(d.descripcion || '').trim()) || String(c.observaciones || '').trim();
-        return '<tr class="row-click" data-ir="caja/' + attr(c.id) + '">' +
+        const marcada = VistaCajas.seleccion.has(c.id);
+        return '<tr class="row-click est-' + attr(c.estado) + (marcada ? ' marcada' : '') +
+          '" data-ir="caja/' + attr(c.id) + '">' +
+          '<td class="col-sel"><input type="checkbox" data-act="selUna" data-id="' + attr(c.id) + '"' +
+            (marcada ? ' checked' : '') + '></td>' +
           '<td class="col-exp">' + (hayTexto
             ? '<button class="btn btn-sm btn-ghost btn-icon" data-act="verTexto" data-id="' + attr(c.id) +
               '" title="Ver la descripción">' + Icon('chevR', '', 13) + '</button>'
             : '') + '</td>' +
           '<td class="mono nowrap">' + esc(c.numero) +
-            (c.requiereRevision ? ' <span title="Requiere revisión" style="color:var(--warn-500)">⚠</span>' : '') + '</td>' +
+            (c.requiereRevision ? ' <span title="Requiere revisión" style="color:var(--warn-500)">⚠</span>' : '') +
+            (String(c.comentario || '').trim()
+              ? ' <span class="nota" title="' + attr(c.comentario) + '">' + Icon('doc', '', 11) + '</span>' : '') +
+            '</td>' +
           '<td class="nowrap">' + Fecha.corta(c.fecha) + '</td>' +
           '<td class="trunc" style="max-width:126px" title="' + attr(cats.join(' · ')) + '">' +
             (cats.length ? esc(cats[0]) + (cats.length > 1
@@ -5934,18 +6047,19 @@ const VistaCajas = {
              los detalles de la caja y su texto completo. */
           (hayTexto ? VistaCajas.filaDetalle(c, dets) : '');
       }).join('')
-        : '<tr><td colspan="13">' + Comp.vacio({ icono: 'caja', titulo: 'Sin resultados',
+        : '<tr><td colspan="14">' + Comp.vacio({ icono: 'caja', titulo: 'Sin resultados',
             texto: todas.length === 0 ? 'Aún no hay cajas menores registradas o los filtros no coinciden.' : 'Ajuste los filtros.',
             accion: 'nueva', textoAccion: 'Crear la primera caja', iconoAccion: 'plus' }) + '</td></tr>') +
       '</tbody>' +
-      (pagina.length ? '<tfoot><tr><td colspan="7">Subtotal de la página</td>' +
+      (pagina.length ? '<tfoot><tr><td colspan="8">Subtotal de la página</td>' +
         '<td class="num">' + Money.format(U.sumBy(pagina.filter(c => c.estado !== EstadoCaja.ANULADA), c => c.total)) + '</td>' +
         '<td class="num">' + Money.format(U.sumBy(pagina, c => c.gasolina)) + '</td>' +
         '<td class="num">' + Money.format(U.sumBy(pagina, c => c.aceite)) + '</td>' +
         '<td colspan="3"></td></tr></tfoot>' : '') +
       '</table></div>' +
       Comp.pager({ total: todas.length, tam, pagina: f.pagina, actPag: 'irPagina', actTam: 'cambiarTam' }) +
-      '</div></div>';
+      '</div></div>' +
+      VistaCajas.barraSeleccion(todas, repuesto);
 
     const recargar = () => { f.pagina = 1; VistaCajas.render(cont); };
     const sugerencias = [];
@@ -5982,6 +6096,34 @@ const VistaCajas = {
       irPagina: el => { f.pagina = U.clamp(Number(el.dataset.pagina), 1, totalPags); VistaCajas.render(cont); },
       cambiarTam: el => { Prefs.set('paginaTam', Number(el.value)); f.pagina = 1; VistaCajas.render(cont); },
       nueva: () => Router.ir('caja-nueva'),
+      selUna: el => {
+        const id = el.dataset.id;
+        if (el.checked) VistaCajas.seleccion.add(id); else VistaCajas.seleccion.delete(id);
+        VistaCajas.render(cont);
+      },
+      selPagina: el => {
+        pagina.forEach(c => el.checked ? VistaCajas.seleccion.add(c.id) : VistaCajas.seleccion.delete(c.id));
+        VistaCajas.render(cont);
+      },
+      selLimpiar: () => { VistaCajas.seleccion.clear(); VistaCajas.render(cont); },
+      /* Atajo para lo que se pide cada semana: las que ya se consignaron y
+         todavía no se han reembolsado. */
+      selPorReembolsar: () => {
+        VistaCajas.seleccion.clear();
+        todas.filter(c => ESTADOS_POR_REEMBOLSAR.includes(c.estado) &&
+          Finanzas.pendienteDe(c, repuesto.get(c.id) || 0) > 0)
+          .forEach(c => VistaCajas.seleccion.add(c.id));
+        if (!VistaCajas.seleccion.size) Toast.warn('No hay cajas consignadas pendientes de reembolso.');
+        VistaCajas.render(cont);
+      },
+      resumenSeleccion: () => {
+        const sel = todas.filter(c => VistaCajas.seleccion.has(c.id));
+        Documento.resumenReembolso(sel, repuesto);
+      },
+      pdfSeleccion: async () => {
+        const sel = todas.filter(c => VistaCajas.seleccion.has(c.id));
+        await Documento.pdfConComprobantes(sel);
+      },
       verTexto: el => {
         const fila = cont.querySelector('tr.det-fila[data-det="' + el.dataset.id + '"]');
         if (!fila) return;
@@ -6008,7 +6150,7 @@ const VistaCajas = {
           const actualizada = await CajaService.cambiarEstado(id, nuevo);
           let aviso = 'Caja ' + caja.numero + ': ' + (ESTADO_CAJA_META[anterior] || {}).label +
                       ' → ' + (ESTADO_CAJA_META[nuevo] || {}).label + '.';
-          if (nuevo === EstadoCaja.REPUESTA && repuestoCaja < caja.total) {
+          if (nuevo === EstadoCaja.REEMBOLSADA && repuestoCaja < caja.total) {
             aviso += ' Se marcó como saldada sin consignación registrada: deja de contar como pendiente.';
             Toast.warn(aviso, 7000);
           } else Toast.ok(aviso);
@@ -6354,6 +6496,18 @@ const VistaCaja = {
    COMPONENTE · EXPEDIENTE DOCUMENTAL (§25, §26, §27)
    Reutilizado por caja menor y por consignación.
    ========================================================================== */
+/* Casi todo lo que se compra con caja menor pertenece a esa misma categoría.
+   Antes se escribía el artículo en la casilla de categoría, y cada lima o cada
+   machete acababa creando una categoría propia. Ahora la categoría viene
+   puesta y el artículo va en su columna. */
+const CATEGORIA_POR_DEFECTO = 'Caja menor';
+function detalleNuevo() {
+  const cat = CategoriaRepo.porNombre(CATEGORIA_POR_DEFECTO);
+  return { categoriaId: cat ? cat.id : null,
+           categoriaNombre: cat ? cat.nombre : CATEGORIA_POR_DEFECTO,
+           elemento: '', descripcion: '', valor: 0, rol: null };
+}
+
 const Expediente = {
   async montar(el, cfg) {
     if (!el) return;
@@ -6528,6 +6682,7 @@ const VistaCajaForm = {
         direccion: caja.direccion, estado: caja.estado, observaciones: caja.observaciones,
         retencion: caja.retencion,
         detalles: dets.map(d => ({ id: d.id, categoriaId: d.categoriaId, categoriaNombre: d.categoriaNombre,
+          elemento: d.elemento,
           descripcion: d.descripcion, cantidad: d.cantidad, valorUnitario: d.valorUnitario, valor: d.valor, rol: d.rol }))
       };
       Shell.titulo('Editar ' + caja.numero, 'Modificación de caja menor');
@@ -6592,17 +6747,22 @@ const VistaCajaForm = {
           '<div class="ch-act"><button class="btn btn-sm" data-act="addDetalle">' + Icon('plus', '', 12) + 'Agregar detalle</button></div>' +
         '</div><div class="card-b flush">' +
           '<div class="tbl-wrap"><table class="tbl" id="tblDetalles">' +
-          '<thead><tr><th style="width:30px"></th><th style="min-width:190px">Categoría / concepto</th>' +
-          '<th style="min-width:200px">Descripción</th><th style="width:120px">Estadística</th>' +
+          '<thead><tr><th style="width:30px"></th><th style="min-width:150px">Categoría</th>' +
+          '<th style="min-width:150px">Elemento</th>' +
+          '<th style="min-width:180px">Descripción</th><th style="width:120px">Estadística</th>' +
           '<th class="num" style="width:130px">Valor</th><th style="width:34px"></th></tr></thead>' +
           '<tbody id="tbDetalles"></tbody></table></div>' +
           '<div style="padding:10px 14px;border-top:1px solid var(--border)">' +
           '<button class="btn btn-sm" data-act="addDetalle">' + Icon('plus', '', 12) + 'Agregar detalle</button>' +
-          '<span class="fs11 txt-3" style="margin-left:10px">La categoría admite texto libre: escriba cualquier concepto aunque no esté en el catálogo.</span>' +
+          '<span class="fs11 txt-3" style="margin-left:10px">La <b>categoría</b> agrupa (Caja menor, Viáticos…) ' +
+          'y el <b>elemento</b> es lo que se compró (una lima, un machete). Ambas admiten texto libre.</span>' +
           '</div>' +
         '</div></div>' +
 
         '<div class="card"><div class="card-h"><h3>Observaciones</h3></div><div class="card-b">' +
+        '<div class="field"><label>Comentario corto</label>' +
+        '<input class="inp" id="fComent" maxlength="140" value="' + attr(base.comentario || '') + '" ' +
+        'placeholder="Una línea; se ve en el listado al pasar el cursor"></div>' +
         '<textarea class="inp" id="fObs" placeholder="Notas internas sobre esta caja menor…">' + esc(base.observaciones || '') + '</textarea>' +
         '</div></div>' +
       '</div>' +
@@ -6666,11 +6826,11 @@ const VistaCajaForm = {
     this.pintarSolicitante();
 
     setAcciones({
-      addDetalle: () => { this.estado.detalles.push({ categoriaId: null, categoriaNombre: '', descripcion: '', valor: 0, rol: null });
+      addDetalle: () => { this.estado.detalles.push(detalleNuevo());
         this.pintarDetalles(); setTimeout(() => { const f = $$('#tbDetalles tr'); const u = f[f.length - 1];
           if (u) { const i = u.querySelector('input'); if (i) i.focus(); } }, 20); },
       delDetalle: el => { this.estado.detalles.splice(Number(el.dataset.i), 1);
-        if (!this.estado.detalles.length) this.estado.detalles.push({ categoriaId: null, categoriaNombre: '', descripcion: '', valor: 0, rol: null });
+        if (!this.estado.detalles.length) this.estado.detalles.push(detalleNuevo());
         this.pintarDetalles(); },
       cambiarRol: el => { this.estado.detalles[Number(el.dataset.i)].rol = el.value || null; this.pintarTotales(); },
       cancelar: () => Router.ir(editandoId ? 'caja/' + editandoId : 'cajas'),
@@ -6682,6 +6842,7 @@ const VistaCajaForm = {
     $('#fDireccion').addEventListener('input', e => { this.estado.direccion = e.target.value; });
     $('#fEstado').addEventListener('change', e => { this.estado.estado = e.target.value; });
     $('#fObs').addEventListener('input', e => { this.estado.observaciones = e.target.value; });
+    $('#fComent').addEventListener('input', e => { this.estado.comentario = e.target.value; });
     setTimeout(() => { if (!editandoId && !base.solicitanteId) inSol.focus(); }, 80);
   },
 
@@ -6701,6 +6862,8 @@ const VistaCajaForm = {
       '<td class="txt-3 tc">' + (i + 1) + '</td>' +
       '<td><div class="combo"><input class="inp" data-cat="' + i + '" placeholder="Ej.: Gasolina, Nailón…" autocomplete="off" value="' +
         attr(d.categoriaNombre || '') + '"' + (d.categoriaId ? ' data-id="' + attr(d.categoriaId) + '"' : '') + '></div></td>' +
+      '<td><input class="inp" data-elem="' + i + '" placeholder="Ej.: lima, machete, nailón" value="' +
+        attr(d.elemento || '') + '"></td>' +
       '<td><input class="inp" data-desc="' + i + '" placeholder="Descripción del gasto" value="' + attr(d.descripcion || '') + '"></td>' +
       '<td><select class="inp" data-act="cambiarRol" data-i="' + i + '" style="font-size:11.5px">' +
         '<option value="">— ninguna —</option>' +
@@ -6726,6 +6889,11 @@ const VistaCajaForm = {
           this.pintarDetalles(); this.pintarTotales();
         },
         alEscribir: v => { d.categoriaNombre = v; d.categoriaId = null; }
+      });
+      const inElem = tb.querySelector('[data-elem="' + i + '"]');
+      inElem.addEventListener('input', e => { d.elemento = e.target.value; });
+      inElem.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); tb.querySelector('[data-desc="' + i + '"]').focus(); }
       });
       const inDesc = tb.querySelector('[data-desc="' + i + '"]');
       inDesc.addEventListener('input', e => { d.descripcion = e.target.value; });
@@ -7336,7 +7504,7 @@ const VistaPersonas = {
       '</div></div></div>' +
 
       '<div class="card"><div class="card-b flush"><div class="tbl-wrap"><table class="tbl">' +
-      '<thead><tr><th>Nombre</th><th>Cédula</th><th>Municipio</th><th>Banco</th><th>Cuenta</th>' +
+      '<thead><tr><th>Nombre</th><th>Documento</th><th>Municipio</th><th>Banco</th><th>Cuenta</th>' +
       '<th>Cargo</th><th class="num">Cajas</th><th class="num">Gasto histórico</th><th>Rol</th><th>Estado</th><th></th></tr></thead><tbody>' +
       (lista.length ? lista.map(p =>
         '<tr class="row-click" data-ir="persona/' + attr(p.id) + '">' +
@@ -7393,7 +7561,13 @@ const VistaPersonas = {
         '<div class="row">' +
         '<div class="field" style="flex:2 1 260px"><label>Nombre completo <span class="req">*</span></label>' +
         '<input class="inp" id="pNombre" value="' + attr(p.nombre) + '" autofocus></div>' +
-        '<div class="field"><label>Cédula</label><input class="inp" id="pCedula" value="' + attr(p.cedula) + '" placeholder="Sin puntos"></div>' +
+        '<div class="field" style="flex:0 0 150px"><label>Documento</label>' +
+        '<select class="inp" id="pTipoDoc">' + TIPOS_DOCUMENTO.map(t =>
+          '<option value="' + attr(t) + '"' +
+          ((p.tipoDocumento || TIPOS_DOCUMENTO[0]) === t ? ' selected' : '') + '>' + esc(t) + '</option>').join('') +
+        '</select></div>' +
+        '<div class="field"><label>Número</label><input class="inp" id="pCedula" value="' + attr(p.cedula) +
+        '" placeholder="Sin puntos"></div>' +
         '</div>' +
         '<div class="row">' +
         '<div class="field"><label>Banco</label><input class="inp" id="pBanco" value="' + attr(p.banco) + '" placeholder="Ej.: Bancolombia"></div>' +
@@ -7462,6 +7636,7 @@ const VistaPersonas = {
             const datos = {
               id: persona ? persona.id : undefined,
               nombre: m.querySelector('#pNombre').value.trim(),
+              tipoDocumento: m.querySelector('#pTipoDoc').value,
               cedula: m.querySelector('#pCedula').value.trim(),
               banco: m.querySelector('#pBanco').value.trim(),
               tipoCuenta: m.querySelector('#pTipoCta').value,
@@ -7570,7 +7745,8 @@ const VistaPersona = {
       '<div class="card"><div class="card-h"><h3>Ficha maestra actual</h3>' +
       '<div class="ch-act"><span class="link fs12" data-act="revelar">Mostrar cuenta</span></div></div>' +
       '<div class="card-b"><dl class="dl">' +
-      '<dt>Cédula</dt><dd class="mono">' + esc(p.cedula ? Txt.cedulaFmt(p.cedula) : VALOR_NO_DISPONIBLE) + '</dd>' +
+      '<dt>' + esc(p.tipoDocumento || 'Documento') + '</dt><dd class="mono">' +
+      esc(p.cedula ? Txt.cedulaFmt(p.cedula) : VALOR_NO_DISPONIBLE) + '</dd>' +
       '<dt>Banco</dt><dd>' + esc(p.banco || VALOR_NO_DISPONIBLE) + '</dd>' +
       '<dt>Tipo cuenta</dt><dd>' + esc(p.tipoCuenta || VALOR_NO_DISPONIBLE) + '</dd>' +
       '<dt>N.° cuenta</dt><dd class="mono" id="pfCta">' + esc(Txt.mascaraCuenta(p.numeroCuenta) || VALOR_NO_DISPONIBLE) + '</dd>' +
@@ -9598,6 +9774,141 @@ const Documento = {
     });
   },
 
+
+  /* =======================================================================
+     RESUMEN DE REEMBOLSO
+     Lo que cada semana pide quien consignó: la lista de cajas que puso de su
+     bolsillo y todavía no le han devuelto, para poder cotejar que lo que le
+     reembolsan es exactamente lo que giró.
+     ======================================================================= */
+  resumenReembolso(cajas, repuesto) {
+    if (!cajas || !cajas.length) { Toast.warn('No hay cajas marcadas.'); return; }
+    const cfg = ConfigRepo.get() || {};
+    const ctr = ContratoRepo.activo() || {};
+    const orden = cajas.slice().sort((a, b) => (a.fecha + a.numero).localeCompare(b.fecha + b.numero));
+    /* Se agrupa por quien puso el dinero: si en la semana consignaron dos
+       personas distintas, cada una recibe su propio corte. */
+    const grupos = new Map();
+    for (const c of orden) {
+      const k = Comp.nombreConsigno(c) || 'Sin registrar';
+      if (!grupos.has(k)) grupos.set(k, []);
+      grupos.get(k).push(c);
+    }
+    const pendDe = c => Finanzas.pendienteDe(c, (repuesto && repuesto.get(c.id)) || 0);
+    const totalGeneral = U.sumBy(orden, c => c.total);
+    const pendGeneral = U.sumBy(orden, c => pendDe(c));
+
+    const bloque = (quien, lista) =>
+      '<div class="dp-sec"><div class="dp-sec-t">Consignó: ' + esc(quien) + '</div></div>' +
+      '<table class="dp-tbl"><thead><tr>' +
+        '<th>Número</th><th>Fecha</th><th>Concepto</th><th>Ubicación</th>' +
+        '<th>Total</th><th>Pendiente</th></tr></thead><tbody>' +
+      lista.map(c => '<tr>' +
+        '<td>' + esc(c.numero) + '</td>' +
+        '<td class="c">' + Fecha.corta(c.fecha) + '</td>' +
+        '<td>' + esc(Comp.nombreSolicitante(c)) + '</td>' +
+        '<td>' + esc(c.municipioNombre || '') + '</td>' +
+        '<td class="n">' + Money.format(c.total) + '</td>' +
+        '<td class="n">' + Money.format(pendDe(c)) + '</td></tr>').join('') +
+      '<tr><td colspan="4"><b>Subtotal de ' + esc(quien) + '</b></td>' +
+        '<td class="n"><b>' + Money.format(U.sumBy(lista, c => c.total)) + '</b></td>' +
+        '<td class="n"><b>' + Money.format(U.sumBy(lista, c => pendDe(c))) + '</b></td></tr>' +
+      '</tbody></table>';
+
+    const html =
+      '<div class="doc-page">' +
+      '<div class="dp-head">' +
+        '<div class="dp-logo">' + (Shell.marca(cfg)
+          ? '<img src="' + attr(Shell.marca(cfg)) + '" alt="">' : '') + '</div>' +
+        '<div class="dp-hc"><h1>RELACIÓN DE CAJAS POR REEMBOLSAR</h1>' +
+          '<div class="dp-co">' + esc(cfg.empresa || APP.empresa) +
+            (cfg.nit ? ' · NIT ' + esc(cfg.nit) : '') + '</div>' +
+          '<div class="dp-meta"><b>Contrato:</b> ' + esc(ctr.nombre || '') + '</div>' +
+          '<div class="dp-meta">Elaborada el ' + Fecha.larga(Fecha.hoy()) + '</div>' +
+        '</div>' +
+        '<div class="dp-num"><div>CAJAS<b>' + orden.length + '</b></div></div>' +
+      '</div>' +
+      [...grupos.entries()].map(([k, l]) => bloque(k, l)).join('') +
+      '<table class="dp-tbl"><tbody>' +
+        '<tr><td><b>TOTAL DE ' + orden.length + ' CAJA(S)</b></td>' +
+          '<td class="n"><b>' + Money.format(totalGeneral) + '</b></td></tr>' +
+        '<tr><td><b>TOTAL PENDIENTE POR REEMBOLSAR</b></td>' +
+          '<td class="n"><b>' + Money.format(pendGeneral) + '</b></td></tr>' +
+      '</tbody></table>' +
+      '<p class="doc-nota">Los valores son los mismos que constan en cada caja menor: ' +
+        'esta relación no recalcula ni ajusta nada.</p>' +
+      '<div class="doc-firmas"><div><span></span>Elaboró</div>' +
+        '<div><span></span>Recibió conforme</div></div>' +
+      '</div>';
+
+    Modal.abrir({
+      titulo: 'Relación de cajas por reembolsar',
+      subtitulo: orden.length + ' caja(s) · ' + Money.format(pendGeneral) + ' pendiente',
+      ancho: 'xwide',
+      cuerpo: '<div class="doc-vista">' + html + '</div>',
+      pie: '<button class="btn mf-left" data-cerrar>Cerrar</button>' +
+           '<button class="btn btn-primary" id="impResumen">' + Icon('print', '', 14) + 'Imprimir / PDF</button>',
+      alMontar(m) {
+        m.querySelector('#impResumen').onclick = () => {
+          const root = $('#printRoot');
+          root.innerHTML = html;
+          const limpiar = () => { root.innerHTML = ''; window.removeEventListener('afterprint', limpiar); };
+          window.addEventListener('afterprint', limpiar);
+          setTimeout(() => { window.print(); setTimeout(limpiar, 1500); }, 60);
+        };
+      }
+    });
+  },
+
+  /* =======================================================================
+     CAJA + COMPROBANTE, TODO EN UN SOLO TRABAJO DE IMPRESIÓN
+     De la consignación más antigua a la más reciente: cada caja con su
+     formato y, detrás, la imagen del comprobante con que se giró el dinero.
+     ======================================================================= */
+  async pdfConComprobantes(cajas) {
+    if (!cajas || !cajas.length) { Toast.warn('No hay cajas marcadas.'); return; }
+    Cargando.iniciar();
+    try {
+      const orden = cajas.slice().sort((a, b) => (a.fecha + a.numero).localeCompare(b.fecha + b.numero));
+      const partes = [];
+      let conComprobante = 0;
+      for (const c of orden) {
+        partes.push(await this.construir(c));
+        /* El comprobante puede estar colgado de la caja o de la consignación
+           que la repone: se buscan los dos sitios, igual que en su detalle. */
+        const apls = await CajaRepo.aplicaciones(c.id);
+        const ids = U.uniq(apls.map(a => a.consignacionId));
+        let docs = await CajaRepo.documentos(c.id);
+        for (const i of ids) docs = docs.concat(await ConsignacionRepo.documentos(i));
+        const comp = docs.filter(d => d.tipo === TipoDocumento.COMPROBANTE_CONSIGNACION);
+        if (!comp.length) continue;
+        conComprobante++;
+        const imgs = [];
+        for (const d of comp) {
+          const url = await DocumentoService.url(d.id);
+          if (!url) continue;
+          imgs.push(U.esImagen(d.mime)
+            ? '<figure class="doc-comp"><img src="' + attr(url) + '" alt="">' +
+              '<figcaption>' + esc(d.nombre) + '</figcaption></figure>'
+            : '<div class="doc-comp-otro">' + esc(d.nombre) +
+              ' — no es una imagen, se conserva en el expediente.</div>');
+        }
+        if (!imgs.length) continue;
+        partes.push('<div class="doc-page"><div class="doc-cab-min">Comprobante de ' + esc(c.numero) +
+          ' · ' + Fecha.corta(c.fecha) + ' · ' + esc(Comp.nombreSolicitante(c)) +
+          ' · ' + Money.format(c.total) + '</div>' + imgs.join('') + '</div>');
+      }
+      const root = $('#printRoot');
+      root.innerHTML = partes.join('');
+      const limpiar = () => { root.innerHTML = ''; window.removeEventListener('afterprint', limpiar); };
+      window.addEventListener('afterprint', limpiar);
+      if (conComprobante < orden.length)
+        Toast.warn((orden.length - conComprobante) + ' caja(s) van sin comprobante: todavía no se les ha adjuntado.', 7000);
+      setTimeout(() => { window.print(); setTimeout(limpiar, 3000); }, 400);
+    } catch (e) { manejarError(e); }
+    finally { Cargando.terminar(); }
+  },
+
   async imprimir(caja) {
     const html = await this.construir(caja);
     const root = $('#printRoot');
@@ -9722,7 +10033,7 @@ const Importador = {
       mapPersonas: new Map(),      // texto CONCEPTO → {accion:'persona'|'texto'|'ignorar', personaId, nombre}
       mapConsigno: new Map(),      // texto CONSIGNÓ → personaId | null
       mapMunicipios: new Map(),    // texto UBICACIÓN → municipioId | 'crear' | 'ignorar'
-      opciones: { estadoDestino: EstadoCaja.REPUESTA, crearPersonas: true, crearMunicipios: true,
+      opciones: { estadoDestino: EstadoCaja.REEMBOLSADA, crearPersonas: true, crearMunicipios: true,
                   omitirDuplicados: true, umbralAtipico: 2000000000 },   // $ 20.000.000 en centavos
       decisiones: new Map(),       // fila → 'importar' | 'omitir'
       resultado: null
@@ -10040,11 +10351,10 @@ const Importador = {
       '<div class="card mb16"><div class="card-h"><h3>3.4 Opciones de importación</h3></div><div class="card-b">' +
       '<div class="field"><label>Estado de las cajas importadas</label>' +
       '<select class="inp" data-act="impEstado" style="max-width:420px">' +
-      '<option value="REPUESTA"' + (s.opciones.estadoDestino === 'REPUESTA' ? ' selected' : '') + '>' +
+      '<option value="REEMBOLSADA"' + (s.opciones.estadoDestino === 'REEMBOLSADA' ? ' selected' : '') + '>' +
       'Repuesta — el histórico ya fue liquidado (recomendado)</option>' +
-      '<option value="PENDIENTE_REPOSICION"' + (s.opciones.estadoDestino === 'PENDIENTE_REPOSICION' ? ' selected' : '') + '>' +
-      'Pendiente de reposición — generará saldo pendiente</option>' +
-      '<option value="PAGADA"' + (s.opciones.estadoDestino === 'PAGADA' ? ' selected' : '') + '>Pagada</option>' +
+      '<option value="PENDIENTE"' + (s.opciones.estadoDestino === 'PENDIENTE' ? ' selected' : '') + '>Pendiente</option>' +
+      '<option value="CONSIGNADA"' + (s.opciones.estadoDestino === 'CONSIGNADA' ? ' selected' : '') + '>Consignada</option>' +
       '</select>' +
       '<div class="hint">El archivo histórico <b>no registra</b> qué cajas fueron repuestas. Si las marca como ' +
       '«pendiente de reposición», el dashboard mostrará todo el histórico como saldo por reponer. ' +
@@ -11007,6 +11317,7 @@ const Migracion = {
     T('');
     T('create table if not exists personas (');
     T('  id text primary key, nombre text not null, nombre_norm text, cedula text,');
+    T("  tipo_documento text default 'Cédula',");
     T('  banco text, tipo_cuenta text, numero_cuenta text,');
     T('  municipio_id text references municipios(id) on delete set null,');
     T('  cargo text, telefono text, correo text, observaciones text,');
@@ -11039,7 +11350,7 @@ const Migracion = {
     T('  total bigint not null default 0,');
     T('  gasolina bigint not null default 0,   -- SUBCOMPONENTE del total');
     T('  aceite bigint not null default 0,     -- SUBCOMPONENTE del total');
-    T('  total_detalles int default 0, observaciones text,');
+    T('  total_detalles int default 0, observaciones text, comentario text,');
     T('  requiere_revision boolean default false, motivo_revision text,');
     T('  reposicion_manual boolean default false,');
     T("  origen text default 'MANUAL', legacy jsonb,");
@@ -11060,7 +11371,7 @@ const Migracion = {
     T('  caja_id text not null references cajas(id) on delete cascade,');
     T('  contrato_id text references contratos(id) on delete restrict,');
     T('  orden int default 0, categoria_id text references categorias(id) on delete set null,');
-    T('  categoria_nombre text, descripcion text, cantidad numeric,');
+    T('  categoria_nombre text, elemento text, descripcion text, cantidad numeric,');
     T('  valor_unitario bigint default 0, valor bigint not null default 0, rol text,');
     T('  es_gasolina boolean default false, es_aceite boolean default false,');
     T('  -- columnas desnormalizadas: caché de consulta, se reescriben con la caja');
@@ -11133,7 +11444,7 @@ const Migracion = {
     T('create or replace view v_caja_saldo as');
     T('select c.id, c.contrato_id, c.numero, c.fecha, c.total, c.estado,');
     T('       coalesce(sum(a.monto), 0) as repuesto,');
-    T("       case when c.estado in ('ANULADA','BORRADOR','REPUESTA') then 0");
+    T("       case when c.estado in ('ANULADA','BORRADOR','REEMBOLSADA') then 0");
     T('            else greatest(0, c.total - coalesce(sum(a.monto), 0)) end as pendiente');
     T('from cajas c left join aplicaciones a on a.caja_id = c.id');
     T('group by c.id;');
@@ -11910,12 +12221,12 @@ const Pruebas = {
             const lider = PersonaRepo.porNombre('Piloto de Contratos') ||
               await PersonaRepo.guardar({ nombre: 'Piloto de Contratos', esSolicitante: 1 });
             await ContratoRepo.cambiarActivo(ctx.ctrA.id);
-            const a1 = await CajaService.crear({ fecha: '2026-05-02', solicitanteId: lider.id, estado: EstadoCaja.PAGADA,
+            const a1 = await CajaService.crear({ fecha: '2026-05-02', solicitanteId: lider.id, estado: EstadoCaja.CONSIGNADA,
               detalles: [{ categoriaNombre: 'X', descripcion: 'contrato A', valor: Money.parse('100.000') }] });
             await ContratoRepo.cambiarActivo(ctx.ctrB.id);
-            const b1 = await CajaService.crear({ fecha: '2026-05-02', solicitanteId: lider.id, estado: EstadoCaja.PAGADA,
+            const b1 = await CajaService.crear({ fecha: '2026-05-02', solicitanteId: lider.id, estado: EstadoCaja.CONSIGNADA,
               detalles: [{ categoriaNombre: 'X', descripcion: 'contrato B', valor: Money.parse('200.000') }] });
-            const b2 = await CajaService.crear({ fecha: '2026-05-03', solicitanteId: lider.id, estado: EstadoCaja.PAGADA,
+            const b2 = await CajaService.crear({ fecha: '2026-05-03', solicitanteId: lider.id, estado: EstadoCaja.CONSIGNADA,
               detalles: [{ categoriaNombre: 'X', descripcion: 'contrato B', valor: Money.parse('300.000') }] });
             Pruebas.ok(/^AP-2026-\d{5}$/.test(b1.numero), 'El contrato B usa su prefijo: ' + b1.numero);
             Pruebas.igual(b1.numero, 'AP-2026-00001', 'El contrato B empieza en 1');
@@ -11952,10 +12263,10 @@ const Pruebas = {
                              { cajaId: ctx.cajaB2.id, monto: ctx.cajaB2.total }]
             });
             Pruebas.ok(/^APC-2026-\d{4}$/.test(con.numero), 'Prefijo propio de consignación: ' + con.numero);
-            Pruebas.igual((await CajaRepo.get(ctx.cajaB1.id)).estado, EstadoCaja.REPUESTA);
-            Pruebas.igual((await CajaRepo.get(ctx.cajaB2.id)).estado, EstadoCaja.REPUESTA);
+            Pruebas.igual((await CajaRepo.get(ctx.cajaB1.id)).estado, EstadoCaja.REEMBOLSADA);
+            Pruebas.igual((await CajaRepo.get(ctx.cajaB2.id)).estado, EstadoCaja.REEMBOLSADA);
             const cajaA = await CajaRepo.get(ctx.cajaA.id);
-            Pruebas.ok(cajaA.estado !== EstadoCaja.REPUESTA, 'La caja del otro contrato no se tocó');
+            Pruebas.ok(cajaA.estado !== EstadoCaja.REEMBOLSADA, 'La caja del otro contrato no se tocó');
           } },
         { nombre: 'Un contrato con movimientos no se puede eliminar', fn: async ctx => {
             await Pruebas.lanza(() => ContratoRepo.eliminar(ctx.ctrB.id), 'Debe impedir borrar dinero');
@@ -12086,7 +12397,7 @@ const Pruebas = {
         { nombre: 'Crear caja con un solo detalle', fn: async ctx => {
             const caja = await CajaService.crear({
               fecha: '2026-03-10', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
-              estado: EstadoCaja.PAGADA,
+              estado: EstadoCaja.CONSIGNADA,
               detalles: [{ categoriaNombre: 'Recolección', descripcion: 'Recogida de residuos', valor: Money.parse('80.000') }]
             });
             Pruebas.igual(caja.total, 8000000, 'Total = 80.000');
@@ -12113,7 +12424,7 @@ const Pruebas = {
             const caja = await CajaService.crear({
               fecha: '2026-03-12', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
               consignoId: ctx.fabian ? ctx.fabian.id : (PersonaRepo.financiadores()[0] || {}).id,
-              estado: EstadoCaja.PAGADA,
+              estado: EstadoCaja.CONSIGNADA,
               detalles: [
                 { categoriaId: gas.id, descripcion: 'Gasolina guadañas', valor: Money.parse('100.000'), rol: RolEstadistico.GASOLINA },
                 { categoriaId: ace.id, descripcion: 'Aceite 2T', valor: Money.parse('40.000'), rol: RolEstadistico.ACEITE },
@@ -12192,6 +12503,91 @@ const Pruebas = {
       ]
     },
     {
+      nombre: 'Estados, elemento y reembolso',
+      casos: [
+        { nombre: 'CRÍTICO · los estados viejos tienen equivalente y no se pierde ninguno', fn: () => {
+            /* Al resumir seis estados en tres, cada caja que ya existe tiene que
+               saber a cuál pasa. Si algún nombre viejo se quedara sin traducción,
+               esas cajas quedarían con un estado que ya no significa nada. */
+            const viejos = ['PENDIENTE_PAGO', 'PAGADA', 'PENDIENTE_REPOSICION', 'REPUESTA'];
+            for (const v of viejos)
+              Pruebas.ok(ESTADOS_ANTIGUOS[v], 'El estado ' + v + ' sabe a cuál pasa');
+            for (const v of viejos)
+              Pruebas.ok(ESTADO_CAJA_META[ESTADOS_ANTIGUOS[v]],
+                v + ' → ' + ESTADOS_ANTIGUOS[v] + ', que sí existe hoy');
+            Pruebas.igual(ESTADOS_ANTIGUOS.PAGADA, EstadoCaja.CONSIGNADA, 'Pagada era: ya consignaron');
+            Pruebas.igual(ESTADOS_ANTIGUOS.PENDIENTE_REPOSICION, EstadoCaja.CONSIGNADA,
+              'Pendiente de reposición era lo mismo: consignada y sin reembolsar');
+            Pruebas.igual(ESTADOS_ANTIGUOS.REPUESTA, EstadoCaja.REEMBOLSADA, 'Repuesta = reembolsada');
+            Pruebas.ok(!ESTADOS_ANTIGUOS.BORRADOR && !ESTADOS_ANTIGUOS.ANULADA,
+              'Borrador y anulada no son pasos del recorrido: se quedan como estaban');
+            const src = Semillas.aplicar.toString();
+            Pruebas.ok(/ESTADOS_ANTIGUOS\[c\.estado\]/.test(src),
+              'El arranque reescribe sólo las que llevan un nombre viejo');
+          } },
+        { nombre: 'CRÍTICO · el elemento no se convierte en categoría', fn: async ctx => {
+            /* Antes, escribir «Lima» en la casilla de categoría creaba una
+               categoría llamada Lima. El artículo va en su propia columna y la
+               categoría los agrupa a todos. */
+            const cat = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const antes = CategoriaRepo.todas().length;
+            const caja = await CajaService.crear({
+              fecha: '2026-06-01', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
+              comentario: 'Compra de herramienta menor',
+              detalles: [
+                { categoriaId: cat.id, elemento: 'Lima', descripcion: 'Para la guadaña', valor: 1800000 },
+                { categoriaId: cat.id, elemento: 'Machete', descripcion: '', valor: 2000000 }
+              ]
+            });
+            Pruebas.igual(CategoriaRepo.todas().length, antes,
+              'Dos artículos distintos NO crean dos categorías');
+            const dets = (await db.getAll('detalles')).filter(d => d.cajaId === caja.id);
+            Pruebas.igual(dets.length, 2, 'Se guardan los dos gastos');
+            Pruebas.ok(dets.every(d => d.categoriaNombre === 'Caja menor'),
+              'Ambos bajo la misma categoría');
+            Pruebas.igual(dets.map(d => d.elemento).sort().join(','), 'Lima,Machete',
+              'Y cada uno conserva su artículo');
+            Pruebas.igual(caja.comentario, 'Compra de herramienta menor',
+              'El comentario corto se guarda con la caja');
+            ctx.cajaElem = caja;
+          } },
+        { nombre: 'El formulario trae la categoría puesta y el artículo aparte', fn: () => {
+            const d = detalleNuevo();
+            Pruebas.igual(d.categoriaNombre, 'Caja menor', 'Categoría por defecto');
+            Pruebas.igual(d.elemento, '', 'Artículo vacío, listo para escribir');
+            Pruebas.ok(/>Elemento</.test(VistaCajaForm.render.toString()),
+              'La tabla tiene columna propia para el artículo');
+            Pruebas.ok(/data-elem=/.test(VistaCajaForm.pintarDetalles.toString()),
+              'Con su casilla en cada fila');
+            Pruebas.ok(/d.elemento = e.target.value/.test(VistaCajaForm.pintarDetalles.toString()),
+              'Y lo que se escriba ahí va al artículo, no a la categoría');
+          } },
+        { nombre: 'El documento de la persona puede no ser cédula', fn: async () => {
+            Pruebas.ok(TIPOS_DOCUMENTO.includes('Pasaporte'), 'El pasaporte es una opción');
+            const p = await PersonaRepo.guardar({ nombre: 'Trabajador Con Pasaporte',
+              tipoDocumento: 'Pasaporte', cedula: 'AP998877', esSolicitante: 1 });
+            Pruebas.igual(p.tipoDocumento, 'Pasaporte', 'Se guarda el tipo');
+            Pruebas.igual(p.cedula, 'AP998877', 'Y el número, con letras incluidas');
+            const malo = Validar.persona(Modelo.persona({ nombre: 'Otro', tipoDocumento: 'Carné del club' }));
+            Pruebas.ok(malo.some(x => /Tipo de documento/.test(x)), 'Un tipo inventado se rechaza');
+          } },
+        { nombre: 'CRÍTICO · la relación de reembolso ordena y suma lo marcado', fn: async ctx => {
+            const src = Documento.pdfConComprobantes.toString();
+            Pruebas.ok(/\(a\.fecha \+ a\.numero\)\.localeCompare/.test(src),
+              'El PDF va de la más antigua a la más reciente');
+            Pruebas.ok(/COMPROBANTE_CONSIGNACION/.test(src),
+              'Y detrás de cada caja pone su comprobante');
+            Pruebas.ok(/ConsignacionRepo\.documentos/.test(src),
+              'Buscándolo también en la consignación que la repone');
+            const res = Documento.resumenReembolso.toString();
+            Pruebas.ok(/nombreConsigno/.test(res),
+              'La relación agrupa por quien puso el dinero');
+            Pruebas.ok(/pendienteDe/.test(res),
+              'Y usa el pendiente que ya calcula el dominio, sin recalcular nada');
+          } }
+      ]
+    },
+    {
       nombre: 'Consignaciones y reposición',
       casos: [
         { nombre: 'Crear 4 cajas para reponer', fn: async ctx => {
@@ -12200,7 +12596,7 @@ const Pruebas = {
             for (let i = 0; i < 4; i++) {
               ctx.cuatro.push(await CajaService.crear({
                 fecha: '2026-04-0' + (i + 1), solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
-                consignoId: (PersonaRepo.financiadores()[0] || {}).id, estado: EstadoCaja.PAGADA,
+                consignoId: (PersonaRepo.financiadores()[0] || {}).id, estado: EstadoCaja.CONSIGNADA,
                 detalles: [{ categoriaNombre: 'Operación', descripcion: 'Caja ' + (i + 1), valor: Money.parse(valores[i]) }]
               }));
             }
@@ -12221,7 +12617,7 @@ const Pruebas = {
         { nombre: 'Las cajas quedan en estado Repuesta', fn: async ctx => {
             for (const c of ctx.cuatro) {
               const actual = await CajaRepo.get(c.id);
-              Pruebas.igual(actual.estado, EstadoCaja.REPUESTA, 'Caja ' + actual.numero);
+              Pruebas.igual(actual.estado, EstadoCaja.REEMBOLSADA, 'Caja ' + actual.numero);
               const apls = await CajaRepo.aplicaciones(c.id);
               Pruebas.igual(Finanzas.pendiente(actual, apls), 0, 'Sin saldo pendiente');
             }
@@ -12236,7 +12632,7 @@ const Pruebas = {
           } },
         { nombre: 'Reposición parcial deja saldo pendiente', fn: async ctx => {
             const caja = await CajaService.crear({
-              fecha: '2026-05-02', solicitanteId: ctx.fernando.id, estado: EstadoCaja.PAGADA,
+              fecha: '2026-05-02', solicitanteId: ctx.fernando.id, estado: EstadoCaja.CONSIGNADA,
               consignoId: (PersonaRepo.financiadores()[0] || {}).id,
               detalles: [{ categoriaNombre: 'Trabajo especial', descripcion: 'Poda', valor: Money.parse('500.000') }]
             });
@@ -12248,7 +12644,7 @@ const Pruebas = {
             const apls = await CajaRepo.aplicaciones(caja.id);
             Pruebas.igual(Finanzas.repuesto(apls), 30000000, 'Repuesto 300.000');
             Pruebas.igual(Finanzas.pendiente(actual, apls), 20000000, 'Pendiente 200.000');
-            Pruebas.igual(actual.estado, EstadoCaja.PENDIENTE_REPOSICION, 'Estado parcial');
+            Pruebas.igual(actual.estado, EstadoCaja.CONSIGNADA, 'Estado parcial');
             ctx.cajaParcial = caja;
           } },
         { nombre: 'No se permite sobre-reponer una caja', fn: async ctx => {
@@ -12262,7 +12658,7 @@ const Pruebas = {
             await ConsignacionService.eliminar(ctx.consignacion.id);
             for (const c of ctx.cuatro) {
               const actual = await CajaRepo.get(c.id);
-              Pruebas.ok(actual.estado !== EstadoCaja.REPUESTA, 'La caja ' + actual.numero + ' no debe seguir repuesta');
+              Pruebas.ok(actual.estado !== EstadoCaja.REEMBOLSADA, 'La caja ' + actual.numero + ' no debe seguir repuesta');
               const apls = await CajaRepo.aplicaciones(c.id);
               Pruebas.igual(Finanzas.pendiente(actual, apls), actual.total, 'Vuelve a deber el total');
             }
@@ -13060,6 +13456,25 @@ const Semillas = {
       }
       if (nC || nK) console.info('[migración v2] contrato «' + inicial.nombre + '»: ' +
         nC + ' cajas, ' + nD + ' detalles, ' + nK + ' consignaciones adoptadas.');
+    }
+
+    /* --- migración v3: estados resumidos ---------------------------------
+       Los seis estados anteriores se reducen a los tres pasos que ocurren de
+       verdad. Se reescriben los que quedaron con el nombre viejo; los que ya
+       están al día no se tocan, así que arrancar dos veces no cambia nada. */
+    {
+      const cajas = await db.getAll('cajas');
+      const aCambiar = cajas.filter(c => ESTADOS_ANTIGUOS[c.estado]);
+      if (aCambiar.length) {
+        await db.putMany('cajas', aCambiar.map(c =>
+          Object.assign({}, c, { estado: ESTADOS_ANTIGUOS[c.estado] })));
+        const cuenta = {};
+        for (const c of aCambiar) {
+          const k = c.estado + ' → ' + ESTADOS_ANTIGUOS[c.estado];
+          cuenta[k] = (cuenta[k] || 0) + 1;
+        }
+        console.info('[migración v3] estados actualizados:', cuenta);
+      }
     }
 
     /* auto-reparación: si no hay financiador por defecto, proponer el primero
