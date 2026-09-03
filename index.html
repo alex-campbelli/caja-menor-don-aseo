@@ -6041,15 +6041,24 @@ const VistaCajas = {
       detsPorCaja.get(d.cajaId).push(d);
     }
     /* Gasolina y aceite ya tienen columna propia: como «categoría» de la caja
-       interesa el concepto del gasto, no sus subcomponentes. */
+       interesa el concepto del gasto, no sus subcomponentes.
+     *
+     * Pero si la caja NO tiene ninguna otra cosa —dos conceptos, gasolina y
+     * aceite, y nada más— saltárselos dejaba la columna en «—» aunque ambos
+     * dijeran «Caja menor». Venía de cuando gasolina y aceite ERAN la
+     * categoría; hoy son un papel aparte y la categoría de esas filas es tan
+     * buena como cualquiera. Es el mismo resguardo que ya usa la relación de
+     * reembolso. */
     const catsDe = c => {
-      const out = [];
+      const propias = [], subs = [];
       for (const d of (detsPorCaja.get(c.id) || [])) {
-        if (d.rol === RolEstadistico.GASOLINA || d.rol === RolEstadistico.ACEITE) continue;
         const n = String(d.categoriaNombre || '').trim();
-        if (n && out.indexOf(n) < 0) out.push(n);
+        if (!n) continue;
+        const esSub = d.rol === RolEstadistico.GASOLINA || d.rol === RolEstadistico.ACEITE;
+        const donde = esSub ? subs : propias;
+        if (donde.indexOf(n) < 0) donde.push(n);
       }
-      return out;
+      return propias.length ? propias : subs;
     };
 
     /* Las sugerencias tienen que salir de lo que de verdad hay, y sin que el
@@ -6192,16 +6201,22 @@ const VistaCajas = {
         const pend = Finanzas.pendienteDe(c, rep);
         const cats = catsDe(c);
         const dets = (detsPorCaja.get(c.id) || []).slice().sort(U.by('orden'));
-        const hayTexto = dets.some(d => String(d.descripcion || '').trim()) || String(c.observaciones || '').trim();
+        /* La flechita salía sólo si algún detalle tenía descripción escrita:
+           venía de cuando la fila desplegable era nada más eso. Hoy enseña el
+           desglose entero —categoría, elemento, valor y el cuadre del total—,
+           así que sobra con que haya algo que desglosar. Los detalles ya están
+           cargados para toda la página, de modo que esto no pide nada más a la
+           base. */
+        const hayDesglose = dets.length > 0 || String(c.observaciones || '').trim();
         const marcada = VistaCajas.seleccion.has(c.id);
         return '<tr class="row-click est-' + attr(c.estado) + (marcada ? ' marcada' : '') +
           '" data-ir="caja/' + attr(c.id) + '">' +
           '<td class="col-sel" onclick="event.stopPropagation()">' +
             '<input type="checkbox" data-act="selUna" data-id="' + attr(c.id) + '"' +
             (marcada ? ' checked' : '') + '></td>' +
-          '<td class="col-exp">' + (hayTexto
+          '<td class="col-exp">' + (hayDesglose
             ? '<button class="btn btn-sm btn-ghost btn-icon" data-act="verTexto" data-id="' + attr(c.id) +
-              '" title="Ver la descripción">' + Icon('chevR', '', 13) + '</button>'
+              '" title="Ver el desglose de la caja">' + Icon('chevR', '', 13) + '</button>'
             : '') + '</td>' +
           '<td class="col-marcas">' +
             (String(c.comentario || '').trim()
@@ -6248,7 +6263,7 @@ const VistaCajas = {
           /* La descripción es texto largo: en una columna quedaría cortada y
              sin poder copiarse. Va en su propia fila, desplegable, con TODOS
              los detalles de la caja y su texto completo. */
-          (hayTexto ? VistaCajas.filaDetalle(c, dets) : '');
+          (hayDesglose ? VistaCajas.filaDetalle(c, dets) : '');
       }).join('')
         : '<tr><td colspan="15">' + Comp.vacio({ icono: 'caja', titulo: 'Sin resultados',
             texto: todas.length === 0 ? 'Aún no hay cajas menores registradas o los filtros no coinciden.' : 'Ajuste los filtros.',
@@ -13300,6 +13315,98 @@ const Pruebas = {
               Pruebas.ok(!/f\.(desde|hasta) = el\.value/.test(src),
                 nombre + ': la fecha pasa por el filtro con espera');
             }
+          } },
+        { nombre: 'CRÍTICO · una caja de sólo gasolina y aceite sí dice su categoría', fn: async ctx => {
+            /* Caso real: una caja con dos conceptos, gasolina $200.000 y aceite
+               $100.000, ambos bajo «Caja menor». La columna CATEGORÍA del
+               listado los saltaba por ser subcomponentes y se quedaba en «—»
+               aunque la caja sí tuviera categoría. */
+            const cat = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const caja = await CajaService.crear({
+              fecha: '2026-09-03', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
+              detalles: [
+                { categoriaId: cat.id, elemento: 'Gasolina', rol: RolEstadistico.GASOLINA,
+                  descripcion: '', valor: 20000000 },
+                { categoriaId: cat.id, elemento: 'Aceite', rol: RolEstadistico.ACEITE,
+                  descripcion: '', valor: 10000000 }
+              ]
+            });
+            Pruebas.igual(caja.total, 30000000, 'El total es la suma, no el doble');
+            Pruebas.igual(caja.gasolina, 20000000, 'Con su gasolina aparte');
+            Pruebas.igual(caja.aceite, 10000000, 'Y su aceite');
+
+            const dets = await CajaRepo.detalles(caja.id);
+            const catsDe = c => {
+              const propias = [], subs = [];
+              for (const d of dets) {
+                const n = String(d.categoriaNombre || '').trim();
+                if (!n) continue;
+                const esSub = d.rol === RolEstadistico.GASOLINA || d.rol === RolEstadistico.ACEITE;
+                const donde = esSub ? subs : propias;
+                if (donde.indexOf(n) < 0) donde.push(n);
+              }
+              return propias.length ? propias : subs;
+            };
+            Pruebas.igual(catsDe(caja).join(' · '), 'Caja menor',
+              'La columna dice la categoría, no un guion');
+
+            /* Y el listado de verdad usa esa misma regla, no la vieja. */
+            const src = VistaCajas.render.toString();
+            Pruebas.ok(/return propias\.length \? propias : subs;/.test(src),
+              'El listado usa el resguardo, igual que la relación de reembolso');
+            Pruebas.ok(!/GASOLINA \|\| d\.rol === RolEstadistico\.ACEITE\) continue;/.test(src),
+              'Ya no se saltan sin más');
+
+            /* Cuando SÍ hay otro concepto, los subcomponentes no ensucian la
+               columna: manda el gasto de verdad. */
+            const caja2 = await CajaService.crear({
+              fecha: '2026-09-03', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
+              detalles: [
+                { categoriaId: cat.id, elemento: 'Gasolina', rol: RolEstadistico.GASOLINA,
+                  descripcion: '', valor: 5000000 },
+                { categoriaId: (await CategoriaRepo.obtenerOCrear('Viáticos')).id,
+                  elemento: 'Almuerzo', descripcion: '', valor: 3000000 }
+              ]
+            });
+            const dets2 = await CajaRepo.detalles(caja2.id);
+            const propias2 = [], subs2 = [];
+            for (const d of dets2) {
+              const esSub = d.rol === RolEstadistico.GASOLINA || d.rol === RolEstadistico.ACEITE;
+              (esSub ? subs2 : propias2).push(d.categoriaNombre);
+            }
+            Pruebas.igual((propias2.length ? propias2 : subs2).join(' · '), 'Viáticos',
+              'Con otro concepto presente, ése es el que manda');
+          } },
+        { nombre: 'CRÍTICO · toda caja con detalles ofrece su desglose', fn: async ctx => {
+            /* (se usa CajaService.crear, la misma puerta que el formulario) */
+            /* La flechita sólo salía si algún detalle traía descripción escrita:
+               una caja con elemento y valor pero sin anotación no se podía
+               desplegar, aunque tuviera de sobra qué enseñar. */
+            const cat = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const caja = await CajaService.crear({
+              fecha: '2026-09-03', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
+              detalles: [
+                { categoriaId: cat.id, elemento: 'Gasolina', rol: RolEstadistico.GASOLINA,
+                  descripcion: '', valor: 15000000 },
+                { categoriaId: cat.id, elemento: 'Botas', descripcion: '', valor: 12400000 }
+              ]
+            });
+            const dets = await CajaRepo.detalles(caja.id);
+            Pruebas.ok(dets.every(d => !String(d.descripcion || '').trim()),
+              'Ningún detalle tiene descripción escrita');
+            Pruebas.ok(!String(caja.observaciones || '').trim(), 'Ni la caja tiene observaciones');
+
+            const src = VistaCajas.render.toString();
+            Pruebas.ok(/dets\.length > 0/.test(src),
+              'La flechita depende de que haya detalles, no de que haya texto');
+            Pruebas.ok(!/hayTexto/.test(src), 'Ya no queda la condición vieja');
+
+            /* Y lo que se despliega dice algo: el desglose de esta caja lleva
+               los dos artículos y el cuadre del total. */
+            const html = VistaCajas.filaDetalle(caja, dets);
+            Pruebas.ok(/>Gasolina</.test(html) && /(>Botas<)/.test(html),
+              'El desglose enseña los artículos');
+            Pruebas.ok(/Total de la caja/.test(html), 'Y el cuadre con el total');
           } },
         { nombre: 'CRÍTICO · el desglose no hace parecer que la gasolina se cobra dos veces', fn: () => {
             /* Caso real del archivo: una fila con total 300.000, gasolina
