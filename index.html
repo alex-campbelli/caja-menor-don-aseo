@@ -1878,6 +1878,16 @@ const TIPO_DOC_META = {
 const DOCS_ANTICIPO = [TipoDocumento.FACTURA];
 const DOCS_DEL_GIRO = [TipoDocumento.COMPROBANTE_CONSIGNACION];
 const DOCS_GENERADOS = [TipoDocumento.FORMATO_CAJA];
+/* Los tres destinos, en el orden en que ocurren. De aquí salen tanto el
+   desplegable del formulario como las tarjetas de la caja. */
+const DESTINOS_DOC = [
+  { tipo: TipoDocumento.FACTURA, titulo: 'Soporte del anticipo',
+    cuando: 'Antes de girar · justifica el monto' },
+  { tipo: TipoDocumento.COMPROBANTE_CONSIGNACION, titulo: 'Comprobante de la transferencia',
+    cuando: 'El giro · prueba que el dinero se envió' },
+  { tipo: TipoDocumento.SOPORTE_COMPRA, titulo: 'Legalización del gasto',
+    cuando: 'Después de gastar · en qué se usó la plata' }
+];
 const esDocAnticipo = d => DOCS_ANTICIPO.includes(d.tipo);
 const esDocDelGiro = d => DOCS_DEL_GIRO.includes(d.tipo);
 const esDocLegalizacion = d => !esDocAnticipo(d) && !esDocDelGiro(d) &&
@@ -6916,7 +6926,14 @@ const VistaCaja = {
 
       '<div class="card" id="expedienteCaja"></div>';
 
-    await Expediente.montar($('#expedienteCaja'), { cajaId: caja.id, docs, titulo: 'Expediente documental de ' + caja.numero });
+    /* Aquí se sueltan varios archivos de golpe —las facturas que manda el
+       líder cuando ya gastó— así que se parte de la legalización: si alguien
+       arrastra ocho sin mirar el desplegable, ése es el caso que acierta. */
+    await Expediente.montar($('#expedienteCaja'), {
+      cajaId: caja.id, docs, titulo: 'Expediente documental de ' + caja.numero,
+      opciones: DESTINOS_DOC.map(d => ({ tipo: d.tipo, titulo: d.titulo })),
+      tipoPorDefecto: TipoDocumento.SOPORTE_COMPRA
+    });
 
     setAcciones({
       previsualizar: () => Documento.previsualizar(caja),
@@ -7152,15 +7169,22 @@ const Expediente = {
     if (!el) return;
     const docs = cfg.docs || (cfg.cajaId ? await CajaRepo.documentos(cfg.cajaId) : await ConsignacionRepo.documentos(cfg.consignacionId));
     const porTipo = U.groupBy(docs, 'tipo');
-    const tipos = Object.keys(TIPO_DOC_META);
+    /* Quien monta el expediente decide qué se puede elegir. Dentro de una caja
+       la pregunta tiene TRES respuestas —de qué momento es este papel— y
+       ofrecer las siete etiquetas del archivo general sólo enreda. El archivo
+       general sí las necesita todas: ahí viven formatos y papeles sueltos que
+       no son de ninguna caja. */
+    const opciones = cfg.opciones ||
+      Object.keys(TIPO_DOC_META).map(t => ({ tipo: t, titulo: TIPO_DOC_META[t].label }));
     el.className = 'card';
     el.innerHTML =
       '<div class="card-h"><h3>' + esc(cfg.titulo || 'Expediente documental') + '</h3>' +
       '<span class="ch-sub">' + docs.length + ' documento(s) · ' + Txt.bytes(U.sumBy(docs, d => d.tamano)) + '</span>' +
       '<div class="ch-act">' +
       '<select class="inp" id="expTipo" style="height:28px;width:auto;font-size:12px">' +
-      tipos.map(t => '<option value="' + t + '"' + (t === (cfg.tipoPorDefecto || TipoDocumento.SOPORTE_COMPRA) ? ' selected' : '') + '>' +
-        TIPO_DOC_META[t].label + '</option>').join('') + '</select>' +
+      opciones.map(o => '<option value="' + attr(o.tipo) + '"' +
+        (o.tipo === (cfg.tipoPorDefecto || opciones[0].tipo) ? ' selected' : '') + '>' +
+        esc(o.titulo) + '</option>').join('') + '</select>' +
       '<button class="btn btn-sm btn-primary" data-act="expSubir">' + Icon('upload', '', 13) + 'Adjuntar</button>' +
       '</div></div>' +
       '<div class="card-b">' +
@@ -7412,17 +7436,25 @@ const VistaCajaForm = {
            guardar, entrar a la caja y volver a subirla: un rodeo por una razón
            técnica —el archivo necesita una caja a la que colgarse— que no tiene
            por qué notarse. Los archivos esperan aquí y suben solos al guardar. */
-        '<div class="card"><div class="card-h"><h3>Soporte del anticipo</h3>' +
-          '<span class="ch-sub">Opcional · la factura del taller o del proveedor</span>' +
-          '<div class="ch-act"><button class="btn btn-sm" data-act="elegirAdjuntos">' +
-            Icon('upload', '', 12) + 'Adjuntar</button>' +
+        /* Los tres papeles pueden existir YA cuando se escribe la caja: a veces
+           se registra después de que todo pasó —el taller cobró, Fabián giró y
+           el líder ya gastó—. Obligar a guardar y volver a entrar para cada uno
+           era el mismo rodeo de antes, sólo que tres veces. */
+        '<div class="card"><div class="card-h"><h3>Documentos de la caja</h3>' +
+          '<span class="ch-sub">Opcional · se guardan al pulsar Guardar</span>' +
+          '<div class="ch-act">' +
+            '<select class="inp" id="fTipoAdjunto" style="height:30px;font-size:12px;width:auto">' +
+              DESTINOS_DOC.map(d => '<option value="' + attr(d.tipo) + '">' +
+                esc(d.titulo) + '</option>').join('') + '</select>' +
+            '<button class="btn btn-sm" data-act="elegirAdjuntos">' +
+              Icon('upload', '', 12) + 'Adjuntar</button>' +
             '<input type="file" id="fAdjuntos" multiple hidden></div>' +
         '</div><div class="card-b">' +
           '<div class="dz mb12" id="dzCaja">' + Icon('upload') +
-          '<h4>Arrastre aquí la factura o haga clic para buscarla</h4>' +
-          '<p>Lo que justifica cuánto hay que consignar: la factura o la cotización del taller. ' +
-          'Los soportes de lo que compren <b>después</b> se adjuntan en la caja ya guardada. ' +
-          'Se guardan al pulsar Guardar.</p></div>' +
+          '<h4>Arrastre aquí los archivos o haga clic para buscarlos</h4>' +
+          '<p>Elija arriba a qué corresponde cada uno: la <b>factura del taller</b> que justifica el ' +
+          'monto, el <b>comprobante</b> si el dinero ya se giró, o la <b>legalización</b> si ya se ' +
+          'gastó. Puede mezclarlos: cada archivo se guarda donde le corresponde.</p></div>' +
           '<div id="listaAdjuntos"></div>' +
         '</div></div>' +
       '</div>' +
@@ -7503,9 +7535,12 @@ const VistaCajaForm = {
     /* Los archivos se quedan en memoria hasta que la caja exista. */
     if (!this.estado.adjuntos) this.estado.adjuntos = [];
     const sumar = files => {
+      /* El destino se fija al elegir el archivo, no al guardar: si luego se
+         cambia el desplegable para el siguiente, los ya puestos no se mueven. */
+      const tipo = ($('#fTipoAdjunto') || {}).value || TipoDocumento.FACTURA;
       for (const f of files) {
-        if (this.estado.adjuntos.some(x => x.name === f.name && x.size === f.size)) continue;
-        this.estado.adjuntos.push(f);
+        if (this.estado.adjuntos.some(x => x.file.name === f.name && x.file.size === f.size)) continue;
+        this.estado.adjuntos.push({ file: f, tipo: tipo });
       }
       this.pintarAdjuntos();
     };
@@ -7673,15 +7708,21 @@ const VistaCajaForm = {
     const cont = $('#listaAdjuntos'); if (!cont) return;
     const lista = this.estado.adjuntos || [];
     cont.innerHTML = lista.length
-      ? '<div class="comp-lista">' + lista.map((f, i) =>
-          '<div class="comp-item">' +
+      ? '<div class="comp-lista">' + lista.map((a, i) => {
+          const f = a.file;
+          const meta = TIPO_DOC_META[a.tipo] || TIPO_DOC_META.OTRO;
+          const dest = DESTINOS_DOC.find(x => x.tipo === a.tipo);
+          return '<div class="comp-item">' +
             '<span class="comp-ic">' + Icon(/^image\//.test(f.type) ? 'eye' : 'file', '', 13) + '</span>' +
             '<span class="fs12 trunc" style="flex:1" title="' + attr(f.name) + '">' + esc(f.name) + '</span>' +
             '<span class="txt-3 fs11 nowrap">' + Txt.bytes(f.size) + '</span>' +
+            '<span class="pill np ' + attr(meta.color) + '" data-tip="' +
+              attr(dest ? dest.cuando : '') + '">' + esc(dest ? dest.titulo : meta.label) + '</span>' +
             '<span class="pill np p-amber">al guardar</span>' +
             '<button class="btn btn-sm btn-ghost btn-icon" data-act="quitarAdjunto" data-i="' + i +
               '" data-tip="Quitar">' + Icon('trash', '', 12) + '</button>' +
-          '</div>').join('') + '</div>'
+          '</div>';
+        }).join('') + '</div>'
       : '<div class="fs12 txt-3">Sin archivos por ahora. Puede guardar la caja sin ellos y adjuntarlos después.</div>';
   },
 
@@ -7875,7 +7916,14 @@ const VistaCajaForm = {
       const adj = e.adjuntos || [];
       if (adj.length) {
         try {
-          await Expediente.subir(adj, { cajaId: caja.id, tipo: TipoDocumento.FACTURA });
+          /* Cada archivo va al destino que se le marcó, no todos al mismo. */
+          const porTipo = new Map();
+          for (const a of adj) {
+            if (!porTipo.has(a.tipo)) porTipo.set(a.tipo, []);
+            porTipo.get(a.tipo).push(a.file);
+          }
+          for (const [tipo, files] of porTipo.entries())
+            await Expediente.subir(files, { cajaId: caja.id, tipo: tipo });
           e.adjuntos = [];
         } catch (err2) {
           Toast.warn('La caja se guardó, pero no se pudieron adjuntar los archivos. ' +
@@ -8305,8 +8353,12 @@ const VistaConsignacion = {
 
       '<div class="card" id="expedienteCons"></div>';
 
+    /* De una consignación cuelga su comprobante; cualquier otra cosa es
+       excepcional y cabe en «Otro». */
     await Expediente.montar($('#expedienteCons'), {
       consignacionId: c.id, docs: d.documentos,
+      opciones: [{ tipo: TipoDocumento.COMPROBANTE_CONSIGNACION, titulo: 'Comprobante de la transferencia' },
+                 { tipo: TipoDocumento.OTRO, titulo: 'Otro documento' }],
       tipoPorDefecto: TipoDocumento.COMPROBANTE_CONSIGNACION,
       titulo: 'Comprobantes y soportes de ' + c.numero
     });
@@ -14604,6 +14656,174 @@ const Pruebas = {
             Pruebas.igual(docs[0].tipo, TipoDocumento.FACTURA, 'Ya clasificado como factura');
             Pruebas.igual((VistaCajaForm.estado.adjuntos || []).length, 0,
               'Y la lista de espera queda limpia, para no subirlo dos veces');
+          } },
+
+        { nombre: 'Dentro de una caja sólo se elige entre los tres momentos', fn: async ctx => {
+            /* El expediente ofrecia las siete etiquetas del archivo general.
+               Dentro de una caja la pregunta tiene TRES respuestas —de que
+               momento es este papel— y las otras cuatro solo enredan. */
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const caja = await CajaService.crear({
+              fecha: '2026-09-13', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
+              detalles: [{ categoriaId: cm.id, elemento: 'Varios', valor: 50500000 }]
+            });
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            let opciones = [], porDefecto = '';
+            try {
+              await VistaCaja.render(div, [caja.id]);
+              const sel = div.querySelector('#expTipo');
+              Pruebas.ok(Boolean(sel), 'El expediente de la caja tiene su desplegable');
+              opciones = [...sel.options].map(o => o.value);
+              porDefecto = sel.value;
+            } finally { div.remove(); }
+
+            Pruebas.igual(opciones.join(','), DESTINOS_DOC.map(d => d.tipo).join(','),
+              'Ofrece exactamente los tres momentos, en orden');
+            Pruebas.igual(opciones.length, 3, 'Ni uno más');
+            /* Ahi se sueltan varios archivos de golpe —las facturas del lider—
+               asi que se parte de la legalizacion: es el caso que acierta si
+               alguien arrastra ocho sin mirar. */
+            Pruebas.igual(porDefecto, TipoDocumento.SOPORTE_COMPRA,
+              'Y parte de la legalización, que es lo que más se sube ahí');
+
+            /* Los tres destinos salen de la MISMA lista que usa el formulario:
+               si mañana cambia uno, cambian los dos. */
+            Pruebas.igual(DESTINOS_DOC.map(d => d.titulo).join(' | '),
+              'Soporte del anticipo | Comprobante de la transferencia | Legalización del gasto',
+              'Los nombres son los mismos en todas partes');
+          } },
+
+        { nombre: 'CRÍTICO · los comprobantes de antes siguen en su sitio', fn: async ctx => {
+            /* Al separar los papeles en tres tarjetas, lo ya subido no se debe
+               mover ni duplicar. Un comprobante puede colgar de la caja o de la
+               consignacion que la repone, y los dos casos tienen que seguir
+               saliendo donde siempre. */
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const caja = await CajaService.crear({
+              fecha: '2026-09-12', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
+              estado: EstadoCaja.CONSIGNADA,
+              detalles: [{ categoriaId: cm.id, elemento: 'Machete', valor: 15600000 }]
+            });
+            let sem = 0;
+            const subir = (nom, tipo, extra) => Expediente.subir(
+              [new File([new Uint8Array([37, 80, 68, 70, ++sem])], nom, { type: 'application/pdf' })],
+              Object.assign({ tipo: tipo }, extra));
+
+            await subir('Comprobante en la caja.pdf', TipoDocumento.COMPROBANTE_CONSIGNACION,
+              { cajaId: caja.id });
+            /* Y los tipos que podian existir de antes colgados de una caja. */
+            await subir('Recibo antiguo.pdf', TipoDocumento.RECIBO, { cajaId: caja.id });
+            await subir('Formato archivado.pdf', TipoDocumento.FORMATO_CAJA, { cajaId: caja.id });
+            await subir('Algo suelto.pdf', TipoDocumento.OTRO, { cajaId: caja.id });
+
+            const docs = await CajaRepo.documentos(caja.id);
+            Pruebas.igual(docs.length, 4, 'Los cuatro siguen colgados de la caja');
+            const nom = f => docs.filter(f).map(d => d.nombre).sort().join(', ');
+            Pruebas.igual(nom(esDocDelGiro), 'Comprobante en la caja.pdf',
+              'El comprobante de antes sigue contando como del giro');
+            Pruebas.igual(nom(esDocAnticipo), '', 'No se cuela en el anticipo');
+            Pruebas.igual(nom(esDocLegalizacion), 'Algo suelto.pdf, Recibo antiguo.pdf',
+              'Los recibos viejos quedan en la legalización, que es donde corresponden');
+            /* El formato archivado no es de ninguno de los tres. */
+            const enAlguno = d => esDocAnticipo(d) || esDocDelGiro(d) || esDocLegalizacion(d);
+            Pruebas.ok(!enAlguno(docs.find(d => d.tipo === TipoDocumento.FORMATO_CAJA)),
+              'El formato archivado no ensucia ninguna tarjeta');
+
+            /* Y en pantalla se ve donde siempre. */
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            let tarjetas = {};
+            try {
+              await VistaCaja.render(div, [caja.id]);
+              /* Se mira TARJETA POR TARJETA, no el html entero: el nombre del
+                 archivo sale tambien en el titulo emergente y en el expediente
+                 del final, asi que contarlo suelto no diria nada. */
+              for (const c of div.querySelectorAll('.card')) {
+                const h = c.querySelector('h3');
+                if (h) tarjetas[h.textContent.trim()] = c.textContent;
+              }
+            } finally { div.remove(); }
+
+            const dentroDe = (titulo, archivo) =>
+              (tarjetas[titulo] || '').indexOf(archivo) >= 0;
+            Pruebas.ok(Boolean(tarjetas['Reposición']), 'La tarjeta de reposición sigue ahí');
+            Pruebas.ok(/Comprobante de la transferencia/.test(tarjetas['Reposición'] || ''),
+              'Con su sección del comprobante');
+            Pruebas.ok(dentroDe('Reposición', 'Comprobante en la caja.pdf'),
+              'El comprobante de antes se ve donde siempre');
+            Pruebas.ok(!dentroDe('Soporte del anticipo', 'Comprobante en la caja.pdf'),
+              'Y NO se cuela en el soporte del anticipo');
+            Pruebas.ok(!dentroDe('Legalización del gasto', 'Comprobante en la caja.pdf'),
+              'Ni en la legalización');
+            Pruebas.ok(dentroDe('Legalización del gasto', 'Recibo antiguo.pdf'),
+              'Los recibos viejos se siguen viendo, en la legalización');
+          } },
+
+        { nombre: 'CRÍTICO · los tres papeles se pueden adjuntar al crear la caja', fn: async ctx => {
+            /* A veces la caja se registra cuando TODO ya paso: el taller cobro,
+               Fabian giro y el lider ya gasto. Tener que guardar y volver a
+               entrar por cada papel era el rodeo de antes, multiplicado por
+               tres. Se eligen los tres de una vez y cada uno va a su sitio. */
+            const man = await CategoriaRepo.obtenerOCrear('Mantenimiento/Arreglo');
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            const irOriginal = Router.ir;
+            let cajaId = null;
+            try {
+              await VistaCajaForm.render(div, []);
+              const sel = div.querySelector('#fTipoAdjunto');
+              Pruebas.ok(Boolean(sel), 'El formulario deja elegir a qué corresponde el archivo');
+              Pruebas.igual([...sel.options].map(o => o.value).join(','),
+                DESTINOS_DOC.map(d => d.tipo).join(','),
+                'Ofrece los tres destinos, en el orden en que ocurren');
+
+              /* Cada archivo con contenido distinto: el programa descarta los
+                 duplicados por su huella. */
+              let sem = 0;
+              const poner = async (nombre, tipo) => {
+                sel.value = tipo;
+                const f = new File([new Uint8Array([37, 80, 68, 70, ++sem])], nombre,
+                  { type: 'application/pdf' });
+                const inp = div.querySelector('#fAdjuntos');
+                const dt = new DataTransfer(); dt.items.add(f); inp.files = dt.files;
+                inp.dispatchEvent(new Event('change', { bubbles: true }));
+                await new Promise(r => setTimeout(r, 40));
+              };
+              await poner('Factura taller 4821.pdf', TipoDocumento.FACTURA);
+              await poner('Comprobante Bancolombia.pdf', TipoDocumento.COMPROBANTE_CONSIGNACION);
+              await poner('Recibo repuestos.pdf', TipoDocumento.SOPORTE_COMPRA);
+
+              Pruebas.igual((VistaCajaForm.estado.adjuntos || []).length, 3, 'Los tres esperan');
+              /* Cambiar el desplegable no debe mover los que ya estaban. */
+              Pruebas.igual(VistaCajaForm.estado.adjuntos.map(x => x.tipo).join(','),
+                [TipoDocumento.FACTURA, TipoDocumento.COMPROBANTE_CONSIGNACION,
+                 TipoDocumento.SOPORTE_COMPRA].join(','),
+                'Cada uno conserva el destino con el que se eligió');
+              const vista = div.querySelector('#listaAdjuntos').innerHTML;
+              for (const d of DESTINOS_DOC)
+                Pruebas.ok(vista.indexOf(d.titulo) >= 0, 'La lista dice «' + d.titulo + '»');
+
+              VistaCajaForm.estado.solicitanteId = ctx.fernando.id;
+              VistaCajaForm.estado.municipioId = ctx.municipio.id;
+              div.querySelector('#fSolicitante').value = 'x';
+              const d0 = VistaCajaForm.estado.detalles[0];
+              d0.categoriaId = man.id; d0.categoriaNombre = man.nombre;
+              d0.elemento = 'Mantenimiento de guadaña'; d0.valor = 32000000;
+              Router.ir = ruta => { cajaId = String(ruta).replace('caja/', ''); };
+              await VistaCajaForm.guardar(null, div);
+              await new Promise(r => setTimeout(r, 150));
+            } finally { Router.ir = irOriginal; div.remove(); }
+
+            const docs = await CajaRepo.documentos(cajaId);
+            Pruebas.igual(docs.length, 3, 'Los tres llegan a la caja de una sola vez');
+            const nom = f => docs.filter(f).map(x => x.nombre).join(',');
+            Pruebas.igual(nom(esDocAnticipo), 'Factura taller 4821.pdf', 'La factura, al anticipo');
+            Pruebas.igual(nom(esDocDelGiro), 'Comprobante Bancolombia.pdf', 'El comprobante, al giro');
+            Pruebas.igual(nom(esDocLegalizacion), 'Recibo repuestos.pdf', 'El recibo, a la legalización');
           } },
 
         { nombre: 'CRÍTICO · lo que justifica el giro no se mezcla con lo que legaliza el gasto', fn: async ctx => {
