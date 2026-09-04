@@ -523,10 +523,16 @@ table.tbl tbody tr.marcada > td:first-child{box-shadow:inset 3px 0 0 var(--brand
   opacity:0;transform:translateY(3px);transition:opacity .1s,transform .1s;left:0;top:0}
 .tip.on{opacity:1;transform:translateY(0)}
 html[data-theme="dark"] .tip{background:#e6edf3;color:#0e1419}
-.col-marcas{width:36px;white-space:nowrap;padding-left:4px!important;padding-right:0!important}
+.col-marcas{width:58px;white-space:nowrap;padding-left:4px!important;padding-right:0!important}
 .marca{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;
   border-radius:4px;cursor:help;vertical-align:middle;outline-offset:1px}
 .marca+.marca{margin-left:2px}
+/* La legalización usa el mismo par ✓/⚠ que el comprobante, en otro color, para
+   que de un vistazo se distingan las dos cosas que hay que poder probar. */
+.marca.m-legal{background:var(--info-50);color:var(--info-600)}
+.marca.m-sinlegal{background:var(--warn-50);color:var(--warn-700)}
+html[data-theme="dark"] .marca.m-legal{background:rgba(56,132,255,.16);color:#8fbcff}
+html[data-theme="dark"] .marca.m-sinlegal{background:rgba(217,143,6,.18);color:#f0b942}
 .m-nota{color:var(--info-700);background:var(--info-50)}
 .m-comp{color:var(--ok-700);background:var(--ok-50)}
 .m-falta{color:var(--warn-700);background:var(--warn-50)}
@@ -1830,6 +1836,11 @@ const ESTADOS_REPONIBLES = [EstadoCaja.PENDIENTE, EstadoCaja.CONSIGNADA, EstadoC
 const ESTADOS_POR_REEMBOLSAR = [EstadoCaja.CONSIGNADA];
 /** Cajas que aún no están cerradas: se resaltan en el listado */
 const ESTADOS_ABIERTOS = [EstadoCaja.PENDIENTE, EstadoCaja.CONSIGNADA];
+/* A partir de CONSIGNADA el dinero ya salió: desde ahí tiene sentido exigir el
+   comprobante del giro y los soportes de lo que se compró. Antes el aviso de
+   «falta comprobante» sólo miraba CONSIGNADA, así que al pasar la caja a
+   REEMBOLSADA se esfumaba justo cuando ya se había pagado. */
+const ESTADOS_CON_DINERO_ENTREGADO = [EstadoCaja.CONSIGNADA, EstadoCaja.REEMBOLSADA];
 
 /** Estados de antes del cambio → estado equivalente de ahora */
 const ESTADOS_ANTIGUOS = {
@@ -1952,6 +1963,10 @@ const Modelo = {
         'Artículo 1.6.1.4.12 del Decreto 1625 de 2016 · Resolución DIAN 000167 de 2021 · Documento soporte en adquisiciones con no obligados a facturar',
       /* Persona propuesta por defecto en «Consignó». Editable; nunca fija en el código. */
       financiadorPorDefectoId: p.financiadorPorDefectoId || null,
+      /* Achicar las fotos al adjuntarlas. 1 = sí (por defecto), 0 = guardarlas
+         tal cual. El nivel decide cuánto se reduce el lado largo. */
+      comprimirAdjuntos: p.comprimirAdjuntos === 0 ? 0 : 1,
+      nivelCompresion: p.nivelCompresion || 'normal',
       prefijoCaja: p.prefijoCaja || 'CM',
       prefijoConsignacion: p.prefijoConsignacion || 'CON',
       infoAdicional: p.infoAdicional || '',
@@ -2213,6 +2228,10 @@ const Modelo = {
       tamano: p.tamano || 0,
       descripcion: p.descripcion || '',
       hash: p.hash || null,
+      /* 0 = se guardó tal cual. Si trae valor, es lo que pesaba antes de
+         achicarlo, para poder decir «de 3,7 MB a 216 KB». */
+      tamanoOriginal: p.tamanoOriginal || 0,
+      dimensiones: p.dimensiones || '',
       /** identificador de almacenamiento: hoy `archivos.docId`; mañana la ruta del bucket */
       storageKey: p.storageKey || null,
       estado: p.estado || Estado.ACTIVO,
@@ -4090,6 +4109,195 @@ const ConsignacionService = {
 /* --------------------------------------------------------------------------
    DocumentoService — expediente digital (§25, §26, §27)
    -------------------------------------------------------------------------- */
+/**
+ * Achica las fotos antes de guardarlas.
+ *
+ * Una foto de celular pesa ~3,7 MB; la misma factura a 2000 px de lado largo
+ * pesa 216 KB y se sigue leyendo el NIT y los renglones. A 400 cajas al año con
+ * cuatro papeles cada una, eso es la diferencia entre 6 GB y 350 MB anuales.
+ *
+ * Dos reglas hacen que esto NO pueda estropear nada:
+ *
+ *  1. Sólo imágenes. Los PDF se guardan tal cual: comprimirlos de verdad exige
+ *     una librería pesada y las facturas en PDF ya pesan poco.
+ *  2. Se guarda la MÁS PEQUEÑA de las dos. Las fotos que llegan por WhatsApp ya
+ *     vienen comprimidas y recomprimirlas las hace CRECER un 12-18%; en ese
+ *     caso se conserva la original y no se toca nada.
+ */
+const Compresor = {
+  /* Cuánto se permite de lado largo en cada nivel. Menos píxeles pesa menos,
+     pero la letra chica de una factura deja de leerse. */
+  NIVELES: {
+    alta:   { lado: 2400, calidad: 0.85 },
+    normal: { lado: 2000, calidad: 0.82 },
+    maxima: { lado: 1600, calidad: 0.80 }
+  },
+  /* Por debajo de esto no vale la pena intentarlo: ya es pequeño. */
+  MINIMO_BYTES: 400 * 1024,
+  /* Un PDF por debajo de esto se deja en paz. */
+  MINIMO_PDF: 600 * 1024,
+  /* Sólo se rearma un PDF cuando las fotos SON prácticamente todo el archivo.
+     Es la forma medible de saber que no hay texto ni nada más que perder: si
+     las imágenes ocupan el 90% de los bytes, lo demás es la envoltura. */
+  PROPORCION_FOTO: 0.90,
+
+  nivel(cfg) {
+    const c = cfg || ConfigRepo.get() || {};
+    if (c.comprimirAdjuntos === 0) return null;
+    return this.NIVELES[c.nivelCompresion] || this.NIVELES.normal;
+  },
+
+  aplica(file) {
+    return Boolean(file) && /^image\//.test(file.type || '') &&
+           !/svg/.test(file.type) && file.size > this.MINIMO_BYTES;
+  },
+
+  /* ---- PDF -------------------------------------------------------------
+     Un PDF de texto no se puede comprimir sin meter una librería enorme al
+     programa. Pero un PDF hecho con el celular es una foto (o varias) metida
+     en una envoltura de unos cientos de bytes, y eso sí: se saca la foto, se
+     achica y se vuelve a armar el PDF desde cero, con la estructura entera
+     bajo nuestro control. Si el archivo NO es sólo fotos, se deja intacto.
+     -------------------------------------------------------------------- */
+
+  /** Todas las fotos JPEG que lleva dentro un PDF, con sus medidas. */
+  fotosDePdf(bytes) {
+    const txt = new TextDecoder('latin1').decode(bytes);
+    const fotos = [];
+    let desde = 0;
+    for (;;) {
+      const i = txt.indexOf('/DCTDecode', desde);
+      if (i < 0) break;
+      desde = i + 10;
+      const s = txt.indexOf('stream', i);
+      if (s < 0) break;
+      let ini = s + 6;
+      if (txt[ini] === '\r') ini++;
+      if (txt[ini] === '\n') ini++;
+      /* Se comprueba que de verdad empieza y termina como un JPEG; no se da
+         por supuesto por lo que diga el diccionario del PDF. */
+      if (!(bytes[ini] === 0xFF && bytes[ini + 1] === 0xD8)) continue;
+      let fin = -1;
+      for (let k = ini + 2; k < bytes.length - 1; k++)
+        if (bytes[k] === 0xFF && bytes[k + 1] === 0xD9) { fin = k + 2; break; }
+      if (fin < 0) continue;
+      fotos.push(bytes.slice(ini, fin));
+      desde = fin;
+    }
+    return fotos;
+  },
+
+  /** Arma un PDF nuevo con una página por foto. */
+  armarPdf(paginas) {
+    const enc = new TextEncoder();
+    const trozos = [], off = [];
+    let pos = 0;
+    const push = u => { trozos.push(u); pos += u.length; };
+    const txt = s => push(enc.encode(s));
+    const obj = (n, cuerpo, stream) => {
+      off[n] = pos;
+      txt(n + ' 0 obj\n' + cuerpo + '\n');
+      if (stream) { txt('stream\n'); push(stream); txt('\nendstream\n'); }
+      txt('endobj\n');
+    };
+    txt('%PDF-1.4\n');
+    const nPag = paginas.length;
+    const idPagina = i => 3 + i * 3;          // página, imagen y contenido por hoja
+    obj(1, '<</Type/Catalog/Pages 2 0 R>>');
+    obj(2, '<</Type/Pages/Kids[' +
+      paginas.map((_, i) => idPagina(i) + ' 0 R').join(' ') + ']/Count ' + nPag + '>>');
+    paginas.forEach((p, i) => {
+      const idP = idPagina(i), idI = idP + 1, idC = idP + 2;
+      obj(idP, '<</Type/Page/Parent 2 0 R/MediaBox[0 0 ' + p.ancho + ' ' + p.alto + ']' +
+        '/Resources<</XObject<</I0 ' + idI + ' 0 R>>>>/Contents ' + idC + ' 0 R>>');
+      obj(idI, '<</Type/XObject/Subtype/Image/Width ' + p.ancho + '/Height ' + p.alto +
+        '/ColorSpace/DeviceRGB/BitsPerComponent 8/Filter/DCTDecode/Length ' + p.jpeg.length + '>>',
+        p.jpeg);
+      const c = enc.encode('q ' + p.ancho + ' 0 0 ' + p.alto + ' 0 0 cm /I0 Do Q');
+      obj(idC, '<</Length ' + c.length + '>>', c);
+    });
+    const total = 3 + nPag * 3;
+    const xref = pos;
+    txt('xref\n0 ' + total + '\n0000000000 65535 f \n');
+    for (let i = 1; i < total; i++)
+      txt(String(off[i] || 0).padStart(10, '0') + ' 00000 n \n');
+    txt('trailer\n<</Size ' + total + '/Root 1 0 R>>\nstartxref\n' + xref + '\n%%EOF\n');
+    let n = 0; trozos.forEach(t => { n += t.length; });
+    const out = new Uint8Array(n);
+    let k = 0; trozos.forEach(t => { out.set(t, k); k += t.length; });
+    return out;
+  },
+
+  async procesarPdf(file, nivel) {
+    if (file.size <= this.MINIMO_PDF) return { file, comprimido: false };
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const fotos = this.fotosDePdf(bytes);
+    if (!fotos.length) return { file, comprimido: false, motivo: 'sin fotos dentro' };
+    const bytesFoto = fotos.reduce((a, f) => a + f.length, 0);
+    if (bytesFoto / bytes.length < this.PROPORCION_FOTO)
+      return { file, comprimido: false, motivo: 'lleva texto u otras cosas además de las fotos' };
+
+    const paginas = [];
+    for (const f of fotos) {
+      const bmp = await createImageBitmap(new Blob([f], { type: 'image/jpeg' }));
+      const esc = Math.min(1, nivel.lado / Math.max(bmp.width, bmp.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(bmp.width * esc);
+      c.height = Math.round(bmp.height * esc);
+      c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+      if (bmp.close) bmp.close();
+      const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', nivel.calidad));
+      paginas.push({ jpeg: new Uint8Array(await blob.arrayBuffer()), ancho: c.width, alto: c.height });
+    }
+    const nuevo = this.armarPdf(paginas);
+    if (nuevo.length >= file.size) return { file, comprimido: false };
+    return {
+      file: new File([nuevo], file.name, { type: 'application/pdf', lastModified: file.lastModified }),
+      comprimido: true, tamanoOriginal: file.size,
+      ancho: paginas[0].ancho, alto: paginas[0].alto,
+      paginas: paginas.length
+    };
+  },
+
+  /**
+   * Devuelve el archivo que hay que guardar y qué pasó con él.
+   * Nunca lanza: si el navegador no puede con la imagen, se guarda la original.
+   */
+  async procesar(file, cfg) {
+    const n = this.nivel(cfg);
+    if (!n) return { file, comprimido: false };
+    if (file && /pdf/.test(file.type || '')) {
+      try { return await this.procesarPdf(file, n); }
+      catch (e) {
+        console.warn('[comprimir pdf] no se pudo, se guarda el original:', e && e.message);
+        return { file, comprimido: false };
+      }
+    }
+    if (!this.aplica(file)) return { file, comprimido: false };
+    try {
+      const bmp = await createImageBitmap(file);
+      const esc = Math.min(1, n.lado / Math.max(bmp.width, bmp.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(bmp.width * esc);
+      c.height = Math.round(bmp.height * esc);
+      c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+      if (bmp.close) bmp.close();
+      const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', n.calidad));
+      /* El candado: si no salió más pequeño, se queda la original. */
+      if (!blob || blob.size >= file.size) return { file, comprimido: false };
+      const nombre = file.name.replace(/\.[^.]+$/, '') + '.jpg';
+      return {
+        file: new File([blob], nombre, { type: 'image/jpeg', lastModified: file.lastModified }),
+        comprimido: true, tamanoOriginal: file.size,
+        ancho: c.width, alto: c.height
+      };
+    } catch (e) {
+      console.warn('[comprimir] no se pudo, se guarda la original:', e && e.message);
+      return { file, comprimido: false };
+    }
+  }
+};
+
 const DocumentoService = {
   MAX_BYTES: 40 * 1024 * 1024,
 
@@ -4097,6 +4305,11 @@ const DocumentoService = {
     if (!file) throw new ErrorDominio('No se recibió archivo.', 'SIN_ARCHIVO');
     if (file.size > this.MAX_BYTES)
       throw new ErrorDominio('El archivo "' + file.name + '" supera 40 MB.', 'MUY_GRANDE');
+    /* Se achica ANTES de calcular la huella, para que la huella sea la de lo
+       que de verdad se guarda y el aviso de duplicados siga funcionando. */
+    const original = file;
+    const comp = await Compresor.procesar(file, meta.config);
+    file = comp.file;
     let hash = null;
     if (file.size <= 12 * 1024 * 1024) {
       try { hash = await U.hashHex(await file.arrayBuffer()); } catch {}
@@ -4112,6 +4325,9 @@ const DocumentoService = {
       tamano: file.size,
       descripcion: meta.descripcion || '',
       hash,
+      /* Rastro de lo que se hizo: cuánto pesaba antes y a qué tamaño quedó. */
+      tamanoOriginal: comp.comprimido ? comp.tamanoOriginal : 0,
+      dimensiones: comp.comprimido ? (comp.ancho + '×' + comp.alto) : '',
       origen: meta.origen || Origen.MANUAL
     });
     doc.storageKey = doc.id;
@@ -6297,6 +6513,12 @@ const VistaCajas = {
       }
       for (const a of aplsTodas) if (consConComp.has(a.consignacionId)) conComprobante.add(a.cajaId);
     }
+    /* Y cuáles tienen ya los soportes de lo que se compró. Sólo cuentan los
+       colgados de la caja: la legalización es de la caja, no del giro. */
+    const conLegalizacion = new Set();
+    for (const d of docsTodos)
+      if (d.cajaId && d.estado !== Estado.INACTIVO && esDocLegalizacion(d)) conLegalizacion.add(d.cajaId);
+
     const detsPorCaja = new Map();
     for (const d of detsTodos) {
       if (!detsPorCaja.has(d.cajaId)) detsPorCaja.set(d.cajaId, []);
@@ -6496,12 +6718,23 @@ const VistaCajas = {
               ? '<span class="marca m-nota" tabindex="0" data-tip="' + attr(c.comentario) + '">' +
                 Icon('doc', '', 11) + '</span>'
               : '') +
+            /* Dos avisos simétricos, uno por cada cosa que hay que poder
+               probar: que el dinero se giró, y en qué se gastó. Los dos sólo
+               reclaman cuando el dinero YA salió. */
             (conComprobante.has(c.id)
               ? '<span class="marca m-comp" tabindex="0" ' +
-                'data-tip="Tiene adjunto el comprobante de la consignación">' + Icon('check', '', 11) + '</span>'
-              : (ESTADOS_POR_REEMBOLSAR.includes(c.estado)
+                'data-tip="Tiene adjunto el comprobante de la transferencia">' + Icon('check', '', 11) + '</span>'
+              : (ESTADOS_CON_DINERO_ENTREGADO.includes(c.estado)
                   ? '<span class="marca m-falta" tabindex="0" ' +
-                    'data-tip="Consignada, pero todavía sin comprobante adjunto">' +
+                    'data-tip="El dinero ya se giró, pero no hay comprobante de la transferencia adjunto">' +
+                    Icon('warn', '', 11) + '</span>'
+                  : '')) +
+            (conLegalizacion.has(c.id)
+              ? '<span class="marca m-legal" tabindex="0" ' +
+                'data-tip="Tiene adjuntos los soportes de en qué se gastó">' + Icon('file', '', 11) + '</span>'
+              : (ESTADOS_CON_DINERO_ENTREGADO.includes(c.estado)
+                  ? '<span class="marca m-sinlegal" tabindex="0" ' +
+                    'data-tip="Sin legalizar: no han enviado los soportes de en qué se gastó este dinero">' +
                     Icon('warn', '', 11) + '</span>'
                   : '')) +
             '</td>' +
@@ -7238,6 +7471,12 @@ const Expediente = {
       '<div class="doc-i"><div class="dn" title="' + attr(d.nombre) + '">' + esc(d.nombre) + '</div>' +
       '<div class="dm"><span class="pill np ' + meta.color + '">' + esc(meta.label) + '</span></div>' +
       '<div class="dm txt-3">' + Txt.bytes(d.tamano) + ' · ' + Fecha.corta(d.creadoEn.slice(0, 10)) + '</div>' +
+      /* Si se achicó, se dice: así nadie se pregunta por qué la foto pesa poco
+         ni si se perdió algo por el camino. */
+      (d.tamanoOriginal ? '<div class="dm txt-3" data-tip="Se achicó al adjuntarla para no llenar el ' +
+        'almacenamiento. El original pesaba ' + attr(Txt.bytes(d.tamanoOriginal)) + '">' +
+        Icon('layers', '', 10) + ' de ' + esc(Txt.bytes(d.tamanoOriginal)) +
+        (d.dimensiones ? ' · ' + esc(d.dimensiones) : '') + '</div>' : '') +
       (d.descripcion ? '<div class="dm txt-3 trunc" title="' + attr(d.descripcion) + '">' + esc(d.descripcion) + '</div>' : '') +
       '</div></div>';
   },
@@ -12338,6 +12577,7 @@ const Migracion = {
     T('  logo_data_url text, marca_data_url text, logo_propio boolean default false, logo_semilla int default 0,');
     T('  responsable text, cargo_responsable text, estado text,');
     T('  titulo_documento text, referencia_normativa text, leyenda_aceptacion text,');
+    T('  comprimir_adjuntos int default 1, nivel_compresion text,');
     T('  prefijo_caja text, prefijo_consignacion text, financiador_por_defecto_id text,');
     T('  info_adicional text, esquema_version int,');
     T('  creado_en timestamptz default now(), actualizado_en timestamptz default now()');
@@ -12466,6 +12706,8 @@ const Migracion = {
     T('  consignacion_id text references consignaciones(id) on delete cascade,');
     T('  tipo text not null, nombre text, nombre_archivo text, mime text, extension text,');
     T('  tamano bigint, descripcion text, hash text,');
+    T('  -- rastro de la compresion: lo que pesaba antes y a que tamano quedo');
+    T('  tamano_original bigint default 0, dimensiones text,');
     T("  storage_key text,   -- ruta dentro del bucket privado 'soportes'");
     T("  estado text default 'ACTIVO', snapshot_html boolean default false, origen text default 'MANUAL',");
     T('  creado_en timestamptz default now(), actualizado_en timestamptz default now()');
@@ -12722,6 +12964,25 @@ const VistaConfiguracion = {
         '<option value="' + n + '"' + (Prefs.get('paginaTam') === n ? ' selected' : '') + '>' + n + '</option>').join('') +
       '</select></div></div></div>' +
 
+      '<div class="card mb16"><div class="card-h"><h3>Fotos de los soportes</h3></div><div class="card-b">' +
+      '<p class="fs12 txt-2 mb12">Una foto tomada con el celular pesa unos <b>3,5 MB</b>; la misma factura ' +
+      'achicada pesa <b>alrededor de 200 KB</b> y se sigue leyendo. Sólo se tocan las imágenes grandes: ' +
+      'los PDF y las fotos que llegan por WhatsApp —que ya vienen comprimidas— se guardan tal cual.</p>' +
+      '<div class="field"><label>Achicar las fotos al adjuntarlas</label><div class="seg">' +
+      '<button data-act="compresion" data-v="1"' + (c.comprimirAdjuntos !== 0 ? ' class="on"' : '') + '>Sí</button>' +
+      '<button data-act="compresion" data-v="0"' + (c.comprimirAdjuntos === 0 ? ' class="on"' : '') + '>Guardar tal cual</button>' +
+      '</div></div>' +
+      '<div class="field"><label>Cuánto se achican</label>' +
+      '<select class="inp" id="cNivelCompresion"' + (c.comprimirAdjuntos === 0 ? ' disabled' : '') + '>' +
+      [['alta', 'Alta calidad · lado largo 2400 px (≈ 600 KB)'],
+       ['normal', 'Normal · lado largo 2000 px (≈ 200 KB)'],
+       ['maxima', 'Máximo ahorro · lado largo 1600 px (≈ 120 KB)']].map(o =>
+        '<option value="' + o[0] + '"' + ((c.nivelCompresion || 'normal') === o[0] ? ' selected' : '') + '>' +
+        o[1] + '</option>').join('') + '</select></div>' +
+      '<p class="fs11 txt-3">Esto sólo afecta a lo que se adjunte de aquí en adelante. ' +
+      'Lo ya guardado no se toca.</p>' +
+      '</div></div>' +
+
       '<div class="card mb16"><div class="card-h"><h3>Conceptos medibles estadísticamente</h3>' +
       '<div class="ch-act"><span class="link fs12" data-ir="categorias">Administrar</span></div></div><div class="card-b">' +
       '<p class="fs12 txt-2 mb12">Estos conceptos tienen serie propia en el dashboard y en las estadísticas. ' +
@@ -12751,7 +13012,13 @@ const VistaConfiguracion = {
     let logoTemp = c.logoDataUrl;
     let marcaTemp = c.marcaDataUrl;
     let propioTemp = c.logoPropio;
+    let comprimirTemp = c.comprimirAdjuntos === 0 ? 0 : 1;
     setAcciones({
+      compresion: el => {
+        comprimirTemp = Number(el.dataset.v);
+        $$('[data-act="compresion"]').forEach(b => b.classList.toggle('on', Number(b.dataset.v) === comprimirTemp));
+        const s = $('#cNivelCompresion'); if (s) s.disabled = comprimirTemp === 0;
+      },
       guardar: async () => {
         try {
           await ConfigRepo.guardar({
@@ -12762,7 +13029,9 @@ const VistaConfiguracion = {
             marcaDataUrl: marcaTemp,
             logoPropio: propioTemp,
             tituloDocumento: $('#cTitulo').value.trim(), referenciaNormativa: $('#cNorma').value.trim(),
-            logoDataUrl: logoTemp
+            logoDataUrl: logoTemp,
+            comprimirAdjuntos: comprimirTemp,
+            nivelCompresion: $('#cNivelCompresion').value
           });
           Toast.ok('Configuración guardada.');
           Shell.render(); Shell.aplicarFavicon(); await Shell.refrescarConteos();
