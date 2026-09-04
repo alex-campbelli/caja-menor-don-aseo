@@ -6663,6 +6663,21 @@ const VistaCaja = {
     const sol = caja.solicitante || {};
 
     const inconsistente = calc.total !== caja.total || calc.subtotal !== caja.subtotal;
+    /* Si algun gasto se cobro por varios municipios, la tabla saca columna
+       para decir cual es cada fila; si no, se ahorra el espacio. */
+    const hayReparto = detalles.some(d => d.repartoId);
+    /* «Cant.» y «Vr. unitario» casi nunca se usan: en el archivo histórico
+       están vacías en todas las filas. Ocupaban 154 px que, al entrar la
+       columna del municipio, empujaban el VR. TOTAL fuera de la pantalla. Si
+       ninguna fila las usa, no se dibujan. */
+    const hayMedidas = detalles.some(d => d.cantidad != null || d.valorUnitario);
+    const colsPie = 4 + (hayReparto ? 1 : 0) + (hayMedidas ? 2 : 0);
+    const repartos = [];
+    for (const d of detalles) {
+      if (!d.repartoId) continue;
+      const n = MunicipioRepo.nombre(d.municipioId);
+      if (n && repartos.indexOf(n) < 0) repartos.push(n);
+    }
 
     cont.innerHTML =
       '<div class="page-head">' +
@@ -6716,11 +6731,24 @@ const VistaCaja = {
       '</div>' +
 
       '<div class="grid g32 mb16">' +
+      /* Un gasto repartido son varias filas iguales salvo por el municipio.
+         Sin decir cuál es cada una, las tres se leen como el mismo cobro
+         repetido tres veces. La columna sólo sale cuando hay reparto: en una
+         caja normal repetiría la misma ubicación en todas las filas. */
       '<div class="card"><div class="card-h"><h3>Detalles del gasto</h3>' +
-        '<span class="ch-sub">Gasolina y aceite son subcomponentes del total, no se suman por encima</span></div>' +
+        '<span class="ch-sub">' + (hayReparto
+          ? 'Un gasto repartido entre varios municipios ocupa una fila por municipio'
+          : 'Gasolina y aceite son subcomponentes del total, no se suman por encima') + '</span></div>' +
         '<div class="card-b flush"><div class="tbl-wrap"><table class="tbl">' +
-        '<thead><tr><th style="width:34px">#</th><th>Categoría</th><th>Elemento</th><th>Descripción</th>' +
-        '<th class="num">Cant.</th><th class="num">Vr. unitario</th><th class="num">Vr. total</th></tr></thead><tbody>' +
+        /* Con la columna del municipio, «Elemento» se quedaba tan estrecho que
+           partía el texto palabra por palabra. Anchos mínimos: si aun así no
+           caben, la tarjeta se desplaza de lado. */
+        '<thead><tr><th style="width:30px">#</th><th style="min-width:100px">Categoría</th>' +
+        '<th style="min-width:180px">Elemento</th><th style="min-width:110px">Descripción</th>' +
+        (hayReparto ? '<th style="min-width:132px">Municipio</th>' : '') +
+        (hayMedidas ? '<th class="num" style="width:56px">Cant.</th>' +
+                      '<th class="num" style="width:92px">Vr. unitario</th>' : '') +
+        '<th class="num" style="width:100px">Vr. total</th></tr></thead><tbody>' +
         detalles.map((d, i) => '<tr>' +
           '<td class="txt-3">' + (i + 1) + '</td>' +
           '<td>' + esc(d.categoriaNombre || '—') +
@@ -6731,15 +6759,21 @@ const VistaCaja = {
             (!d.categoriaId && d.categoriaNombre ? ' <span class="co-tag" title="Concepto escrito libremente">libre</span>' : '') + '</td>' +
           '<td>' + esc(d.elemento || '—') + '</td>' +
           '<td>' + esc(d.descripcion || '—') + '</td>' +
-          '<td class="num txt-3">' + (d.cantidad != null ? d.cantidad : '') + '</td>' +
-          '<td class="num txt-3">' + (d.valorUnitario ? Money.format(d.valorUnitario) : '') + '</td>' +
+          (hayReparto ? '<td class="nowrap">' +
+            esc(MunicipioRepo.nombre(d.municipioId) || caja.municipioNombre || '—') +
+            (d.repartoId ? ' <span class="pill np p-blue">PARTE</span>' : '') + '</td>' : '') +
+          (hayMedidas ? '<td class="num txt-3">' + (d.cantidad != null ? d.cantidad : '') + '</td>' +
+            '<td class="num txt-3">' + (d.valorUnitario ? Money.format(d.valorUnitario) : '') + '</td>' : '') +
           '<td class="num"><b>' + Money.format(d.valor) + '</b></td></tr>').join('') +
         '</tbody><tfoot>' +
-        '<tr><td colspan="6">Subtotal</td><td class="num">' + Money.format(caja.subtotal) + '</td></tr>' +
-        '<tr><td colspan="6">Retención</td><td class="num">' + Money.format(caja.retencion) + '</td></tr>' +
-        '<tr><td colspan="6" style="font-size:13px">TOTAL</td><td class="num" style="font-size:14px">' +
+        '<tr><td colspan="' + colsPie + '">Subtotal</td><td class="num">' + Money.format(caja.subtotal) + '</td></tr>' +
+        '<tr><td colspan="' + colsPie + '">Retención</td><td class="num">' + Money.format(caja.retencion) + '</td></tr>' +
+        '<tr><td colspan="' + colsPie + '" style="font-size:13px">TOTAL</td><td class="num" style="font-size:14px">' +
           Money.format(caja.total) + '</td></tr>' +
         '</tfoot></table></div></div>' +
+        (hayReparto ? '<div class="card-f fs12 txt-2">' + Icon('pin', '', 12) +
+          ' Las filas marcadas <b>PARTE</b> son un mismo gasto cobrado por varios municipios: ' +
+          esc(repartos.join(' · ')) + '. El valor está repartido entre ellos, no se cobró en cada uno.</div>' : '') +
         (caja.observaciones ? '<div class="card-f"><b>Observaciones:</b> ' + esc(caja.observaciones) + '</div>' : '') +
       '</div>' +
 
@@ -14249,6 +14283,51 @@ const Pruebas = {
             Pruebas.igual(cajaDespues.total, caja.total, 'Y el total no se movió');
             Pruebas.igual(new Set(despues.filter(d => d.repartoId).map(d => d.repartoId)).size, 1,
               'El reparto sigue siendo uno solo');
+          } },
+
+        { nombre: 'CRÍTICO · la vista de la caja no enseña tres filas gemelas', fn: async ctx => {
+            /* Un gasto repartido son varias filas iguales salvo por el
+               municipio. Sin decirlo, se leen como el mismo cobro repetido. */
+            const caja = ctx.cajaReparto;
+            /* Se dibuja de verdad en un contenedor suelto: asi se comprueba lo
+               que se ve, no lo que dice el codigo fuente. */
+            const pintar = async c => {
+              const div = document.createElement('div');
+              await VistaCaja.render(div, [c.id]);
+              return div.innerHTML;
+            };
+            const html = await pintar(caja);
+            /* Anclado al ENCABEZADO de la tabla: «Municipio» tambien es la
+               etiqueta de la ficha del solicitante y colaba siempre. */
+            Pruebas.ok(/<th[^>]*>Municipio<\/th>/.test(html), 'La vista de la caja saca columna de municipio');
+            Pruebas.ok(/Apartadó/.test(html) && /Andes/.test(html) && /Caucasia/.test(html),
+              'Con el nombre de los tres');
+            /* Anclado a la MARCA de la fila: «PARTE» tambien sale en la nota
+               al pie, asi que buscarla suelta pasaba siempre. */
+            Pruebas.igual((html.match(/pill np p-blue">PARTE</g) || []).length, 3,
+              'Las tres filas del reparto van marcadas');
+            Pruebas.ok(/no se cobró en cada uno/.test(html), 'Y se explica al pie');
+
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const simple = await CajaService.crear({
+              fecha: '2026-09-06', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
+              detalles: [{ categoriaId: cm.id, elemento: 'Lima', valor: 3000000 }]
+            });
+            const htmlSimple = await pintar(simple);
+            Pruebas.ok(!/<th[^>]*>Municipio<\/th>/.test(htmlSimple),
+              'Sin reparto no se gasta esa columna');
+            /* Y las columnas que nadie usa tampoco se dibujan: sin ellas cabe
+               el municipio sin echar el VR. TOTAL fuera de la pantalla. */
+            Pruebas.ok(!/Vr\. unitario/.test(html),
+              'Con el reparto, las columnas vacias no gastan ancho');
+            const conCant = await CajaService.crear({
+              fecha: '2026-09-07', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
+              detalles: [{ categoriaId: cm.id, elemento: 'Limas', cantidad: 3,
+                valorUnitario: 1500000, valor: 4500000 }]
+            });
+            Pruebas.ok(/Vr\. unitario/.test(await pintar(conCant)),
+              'Pero donde si hay cantidad, siguen saliendo');
+            Pruebas.ok(!/pill np p-blue">PARTE</.test(htmlSimple), 'Ni la marca');
           } },
 
         { nombre: 'El desglose y el impreso dicen a dónde fue cada parte', fn: async ctx => {
