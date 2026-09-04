@@ -258,6 +258,25 @@ table.tbl.compacta .btn-sm.btn-icon{width:22px;height:22px;padding:0}
 /* Dentro de una tabla compacta los campos pegan al borde de la celda y usan
    todo el ancho disponible: es donde se escribe, no hay que regalarle sitio
    al relleno. */
+/* El reparto se enseña en una fila propia bajo su gasto: tres municipios con
+   su cifra no caben en una celda. */
+tr.fila-rep td{padding-top:0!important;padding-bottom:6px!important;font-size:11.5px;
+  color:var(--txt-2);border-top:none!important}
+tr.fila-rep svg{vertical-align:-2px;opacity:.65}
+.btn.rep-on{color:var(--info-500);background:var(--info-50)}
+.rep-lista{max-height:min(46vh,320px);overflow:auto;border:1px solid var(--bd-1);border-radius:8px}
+.rep-fila{display:flex;align-items:center;gap:9px;padding:6px 10px;cursor:pointer;
+  border-bottom:1px solid var(--bd-1)}
+.rep-fila:last-child{border-bottom:none}
+.rep-fila.on{background:var(--info-50)}
+.rep-nom{flex:1;min-width:0;font-size:12.5px}
+/* `.inp` crece hasta llenar la fila y aplastaba el nombre del municipio
+   hasta dejarlo en una letra: aqui el ancho es fijo. */
+.rep-monto{flex:0 0 122px;width:122px;height:28px;font-size:12px;text-align:right}
+.rep-pie{margin-top:10px;font-size:12.5px}
+.rep-ok{color:var(--ok-600);font-weight:650}
+.rep-mal{color:var(--dang-500);font-weight:650}
+html[data-theme="dark"] .rep-fila.on{background:var(--info-900,rgba(56,132,255,.14))}
 table.tbl.compacta .inp{padding-left:7px;padding-right:7px;height:30px;font-size:12px}
 table.tbl.compacta select.inp{padding-right:20px}
 table.tbl.compacta td{padding-top:4px;padding-bottom:4px}
@@ -965,6 +984,8 @@ const ID = Object.freeze({
   persona:      () => Ulid.withPrefix('per'),
   caja:         () => Ulid.withPrefix('cm'),
   detalle:      () => Ulid.withPrefix('det'),
+  /* une las filas de un mismo gasto repartido entre varios municipios */
+  reparto:      () => Ulid.withPrefix('rep'),
   consignacion: () => Ulid.withPrefix('con'),
   aplicacion:   () => Ulid.withPrefix('apl'),
   documento:    () => Ulid.withPrefix('doc'),
@@ -2087,6 +2108,14 @@ const Modelo = {
       personaId: p.personaId || null,
       municipioId: p.municipioId || null,
       estadoCaja: p.estadoCaja || null,
+      /* Un mismo gasto cobrado por varios municipios se guarda como VARIAS
+         filas, una por municipio, con su parte del dinero. Este identificador
+         las une para poder editarlas otra vez como una sola y para enseñarlas
+         juntas en el desglose. Vacío = el caso normal, una línea un municipio.
+         Se guardan filas reales y no una lista dentro de una fila para que
+         todo lo que ya suma detalles —subtotal, total, estadísticas, Excel,
+         PDF— siga saliendo bien sin enterarse de que el reparto existe. */
+      repartoId: p.repartoId || null,
       origen: p.origen || Origen.MANUAL,
       legacy: p.legacy || null,
       creadoEn: p.creadoEn || Modelo.ahora(),
@@ -3349,6 +3378,104 @@ const Finanzas = {
    * REGLA CRÍTICA (§13): gasolina y aceite son SUBCOMPONENTES del total,
    * NO se suman por encima de él. Se extraen de los detalles marcados con rol.
    */
+  /**
+   * Reparte el valor de una línea entre varios municipios.
+   *
+   * Por partes iguales salvo que se den importes a mano. `Money.split` coloca
+   * los centavos sobrantes uno a uno, así que las partes SIEMPRE suman el
+   * valor exacto: $100.000 entre 3 da 33.333,34 + 33.333,33 + 33.333,33 y no
+   * se pierde ni se inventa un peso.
+   */
+  repartirEntreMunicipios(valor, municipios) {
+    const lista = (municipios || []).filter(m => m && m.municipioId);
+    if (lista.length < 2) return [];
+    const ids = new Set(lista.map(m => m.municipioId));
+    if (ids.size !== lista.length)
+      throw new ErrorDominio('Un municipio no puede aparecer dos veces en el mismo reparto.', 'REPARTO');
+    const aMano = lista.every(m => Number.isInteger(m.monto) && m.monto >= 0) &&
+                  lista.some(m => m.monto > 0);
+    const partes = aMano ? lista.map(m => m.monto)
+                         : Money.split(valor, lista.map(() => 1));
+    /* Las partes SON el gasto: si no sumaran el valor de la línea, el total de
+       la caja cambiaría por la puerta de atrás. Antes que consentir eso, se
+       para. La ventana del reparto ya lo impide, esto es la última defensa. */
+    const suma = partes.reduce((a, b) => a + b, 0);
+    if (suma !== valor)
+      throw new ErrorDominio('El reparto suma ' + Money.format(suma) + ' y la línea vale ' +
+        Money.format(valor) + '. Las partes deben sumar exactamente el valor del gasto.', 'REPARTO');
+    return lista.map((m, i) => ({ municipioId: m.municipioId, monto: partes[i] }));
+  },
+
+  /**
+   * Cuánto dinero le toca a cada municipio.
+   *
+   * Antes esto se daba por hecho: la caja entera contaba para el municipio de
+   * la caja. Con el reparto eso dejaría de ser cierto, así que se calcula
+   * sumando lo que dice cada línea, y cuando una línea no dice nada se usa el
+   * municipio de la caja — que es exactamente lo que valía antes. Comprobado
+   * sobre el archivo histórico completo: mismo resultado al peso en los 13
+   * municipios mientras nadie use el reparto.
+   */
+  porMunicipio(cajas, detallesPorCaja, repuestoPorCaja) {
+    const m = new Map();
+    const cajon = (clave, ref, etiqueta) => {
+      if (!m.has(clave)) m.set(clave, { clave, ref, etiqueta, total: 0, gasolina: 0,
+        aceite: 0, repuesto: 0, pendiente: 0, _cajas: new Set() });
+      return m.get(clave);
+    };
+    for (const c of cajas || []) {
+      const dets = (detallesPorCaja && detallesPorCaja.get(c.id)) || [];
+      const claveCaja = c.municipioId || ('txt:' + Txt.norm(c.municipioNombre || 'Sin municipio'));
+      const etiqCaja = (c.municipioId && MunicipioRepo.nombre(c.municipioId)) ||
+                       c.municipioNombre || 'Sin municipio';
+      const refCaja = Boolean(c.municipioId);
+
+      /* Primero lo que le toca a cada municipio DENTRO de esta caja. */
+      const partes = new Map();
+      const parte = (clave, ref, etiqueta) => {
+        if (!partes.has(clave)) partes.set(clave, { ref, etiqueta, total: 0, gasolina: 0, aceite: 0 });
+        return partes.get(clave);
+      };
+      if (!dets.length) {
+        /* Una caja sin detalles no puede repartirse: va entera a su municipio,
+           que es como se contaba antes de que existiera el reparto. */
+        const o = parte(claveCaja, refCaja, etiqCaja);
+        o.total += c.total; o.gasolina += c.gasolina || 0; o.aceite += c.aceite || 0;
+      } else {
+        for (const d of dets) {
+          const mid = d.municipioId || c.municipioId;
+          const o = parte(mid || claveCaja, Boolean(mid), (mid && MunicipioRepo.nombre(mid)) || etiqCaja);
+          o.total += d.valor || 0;
+          if (d.rol === RolEstadistico.GASOLINA) o.gasolina += d.valor || 0;
+          if (d.rol === RolEstadistico.ACEITE) o.aceite += d.valor || 0;
+        }
+        /* La retención no sale de ninguna línea: se le descuenta al municipio
+           principal, que es de donde salía el total de la caja. */
+        if (c.retencion) parte(claveCaja, refCaja, etiqCaja).total -= c.retencion;
+      }
+
+      /* Lo repuesto y lo pendiente son de la caja entera. Se reparten a
+         prorrata de lo que le toca a cada municipio, con `Money.split` para
+         que las partes sumen exactamente lo mismo que antes. */
+      const claves = [...partes.keys()];
+      const pesos = claves.map(k => Math.max(0, partes.get(k).total));
+      const rep = (repuestoPorCaja && repuestoPorCaja.get(c.id)) || 0;
+      const repPartes = Money.split(rep, pesos);
+      const pendPartes = Money.split(this.pendienteDe(c, rep), pesos);
+
+      claves.forEach((k, i) => {
+        const p = partes.get(k);
+        const o = cajon(k, p.ref, p.etiqueta);
+        o.total += p.total; o.gasolina += p.gasolina; o.aceite += p.aceite;
+        o.repuesto += repPartes[i]; o.pendiente += pendPartes[i];
+        o._cajas.add(c.id);
+      });
+    }
+    return [...m.values()].map(o => ({ clave: o.clave, ref: o.ref, etiqueta: o.etiqueta,
+      total: o.total, gasolina: o.gasolina, aceite: o.aceite, n: o._cajas.size,
+      repuesto: o.repuesto, pendiente: o.pendiente })).sort(U.by('total', 'desc'));
+  },
+
   calcular(detalles, retencion) {
     const ds = detalles || [];
     const subtotal = U.sumBy(ds, d => d.valor || 0);
@@ -3465,6 +3592,31 @@ const CajaService = {
     };
   },
 
+  /**
+   * Convierte UNA línea del formulario en las filas que se guardan.
+   *
+   * Sin reparto es una fila, como siempre. Con reparto son tantas como
+   * municipios, cada una con su parte y todas con el mismo `repartoId`, para
+   * poder volver a editarlas como una sola.
+   */
+  expandirDetalle(d, contexto, orden) {
+    const partes = Finanzas.repartirEntreMunicipios(d.valor || 0, d.municipios);
+    if (!partes.length) return [this.normalizarDetalle(d, contexto, orden)];
+    const repartoId = d.repartoId || ID.reparto();
+    return partes.map((p, i) => {
+      /* La cantidad y el valor unitario describen la compra entera; repetirlos
+         en cada parte haría creer que se compró tres veces. Se quedan en la
+         primera fila, que es la que conserva el id original. */
+      const fila = this.normalizarDetalle(
+        Object.assign({}, d, { id: i === 0 ? d.id : null, valor: p.monto,
+                               cantidad: i === 0 ? d.cantidad : null,
+                               valorUnitario: i === 0 ? d.valorUnitario : 0 }),
+        Object.assign({}, contexto, { municipioId: p.municipioId }), orden);
+      fila.repartoId = repartoId;
+      return fila;
+    });
+  },
+
   /** Normaliza un detalle de formulario: resuelve categoría (texto libre o catálogo) y rol */
   normalizarDetalle(d, contexto, orden) {
     /* Si se escribió a mano un nombre que ya está en el catálogo, se enlaza con
@@ -3518,7 +3670,8 @@ const CajaService = {
       cajaId, contratoId, fecha: entrada.fecha, solicitanteId: entrada.solicitanteId || null,
       municipioId: entrada.municipioId || null, estado: entrada.estado || EstadoCaja.BORRADOR
     };
-    const detalles = (entrada.detalles || []).map((d, i) => this.normalizarDetalle(d, ctx, i));
+    const detalles = (entrada.detalles || [])
+      .flatMap((d, i) => this.expandirDetalle(d, ctx, i));
     const calc = Finanzas.calcular(detalles, entrada.retencion || 0);
 
     const borrador = Modelo.caja({
@@ -3581,7 +3734,8 @@ const CajaService = {
     const municipioId = entrada.municipioId !== undefined ? entrada.municipioId : previa.municipioId;
     const solicitanteId = entrada.solicitanteId !== undefined ? entrada.solicitanteId : previa.solicitanteId;
     const ctx = { cajaId, contratoId: previa.contratoId, fecha, solicitanteId, municipioId, estado };
-    const detalles = (entrada.detalles || []).map((d, i) => this.normalizarDetalle(d, ctx, i));
+    const detalles = (entrada.detalles || [])
+      .flatMap((d, i) => this.expandirDetalle(d, ctx, i));
     const calc = Finanzas.calcular(detalles, entrada.retencion !== undefined ? entrada.retencion : previa.retencion);
 
     const caja = Modelo.caja(Object.assign({}, previa, {
@@ -4081,9 +4235,16 @@ const Analitica = (() => {
       const porPersona = agr(cajas, c => c.solicitanteId || null,
         c => c.solicitanteId ? etiquetaPersona(c.solicitanteId, v.cajas)
                              : (c.solicitanteTexto || 'Sin solicitante identificado'));
-      const porMunicipio = agr(cajas, c => c.municipioId || null,
-        c => c.municipioId ? (MunicipioRepo.nombre(c.municipioId) || c.municipioNombre || 'Sin municipio')
-                           : (c.municipioNombre || 'Sin municipio'));
+      /* Los municipios NO se agrupan por caja como los demás: una caja puede
+         repartirse entre varios y cargársela entera a uno solo sería falso.
+         El reparto se calcula en Finanzas, que es donde se calcula el dinero. */
+      const detsDeCaja = new Map();
+      for (const d of v.detalles) {
+        if (!ids.has(d.cajaId)) continue;
+        if (!detsDeCaja.has(d.cajaId)) detsDeCaja.set(d.cajaId, []);
+        detsDeCaja.get(d.cajaId).push(d);
+      }
+      const porMunicipio = Finanzas.porMunicipio(cajas, detsDeCaja, v.repuestoPorCaja);
       const porConsigno = agr(cajas, c => c.consignoId || null,
         c => c.consignoId ? etiquetaPersona(c.consignoId, v.cajas) : (c.consignoTexto || 'No registrado'));
 
@@ -4159,13 +4320,12 @@ const Analitica = (() => {
       }
       const porCategoria = [...mCat.entries()].map(([etiqueta, total]) => ({ etiqueta, total })).sort(U.by('total', 'desc'));
 
-      const mMun = new Map();
-      for (const c of cajas) {
-        const k = c.municipioNombre || MunicipioRepo.nombre(c.municipioId) || 'Sin municipio';
-        if (!mMun.has(k)) mMun.set(k, { etiqueta: k, total: 0, n: 0 });
-        const o = mMun.get(k); o.total += c.total; o.n++;
+      const detsMun = new Map();
+      for (const d of detalles) {
+        if (!detsMun.has(d.cajaId)) detsMun.set(d.cajaId, []);
+        detsMun.get(d.cajaId).push(d);
       }
-      const porMunicipio = [...mMun.values()].sort(U.by('total', 'desc'));
+      const porMunicipio = Finanzas.porMunicipio(cajas, detsMun, v.repuestoPorCaja);
 
       const repuesto = U.sumBy(cajas, c => v.repuestoPorCaja.get(c.id) || 0);
       const totalHist = U.sumBy(cajas, c => c.total);
@@ -4194,20 +4354,52 @@ const Analitica = (() => {
     /** Perfil de municipio (§55) */
     async perfilMunicipio(municipioId) {
       const v = await obtener();
-      const cajas = v.cajas.filter(c => c.municipioId === municipioId && c.estado !== EstadoCaja.ANULADA);
+      /* Una caja «es» de este municipio si su ubicación lo es, o si alguna de
+         sus líneas quedó repartida aquí. Y de esas cajas sólo cuentan las
+         líneas de este municipio: si la recolección se repartió entre tres
+         sedes, aquí entra la parte de ésta, no el pago entero. */
+      const vivas = v.cajas.filter(c => c.estado !== EstadoCaja.ANULADA);
+      const detsVivas = new Map();
+      for (const d of v.detalles) {
+        if (!detsVivas.has(d.cajaId)) detsVivas.set(d.cajaId, []);
+        detsVivas.get(d.cajaId).push(d);
+      }
+      const esDeAqui = (d, c) => (d.municipioId || c.municipioId) === municipioId;
+      const cajas = vivas.filter(c => {
+        const ds = detsVivas.get(c.id) || [];
+        return ds.length ? ds.some(d => esDeAqui(d, c)) : c.municipioId === municipioId;
+      });
       const ids = new Set(cajas.map(c => c.id));
-      const detalles = v.detalles.filter(d => ids.has(d.cajaId));
+      const detalles = v.detalles.filter(d => {
+        const c = ids.has(d.cajaId) ? vivas.find(x => x.id === d.cajaId) : null;
+        return c ? esDeAqui(d, c) : false;
+      });
+      /* Cuánto de cada caja le corresponde a este municipio: es lo que hay que
+         sumar en vez de `caja.total`. */
+      const parteDe = c => {
+        const ds = detsVivas.get(c.id) || [];
+        if (!ds.length) return { total: c.total, gasolina: c.gasolina || 0, aceite: c.aceite || 0 };
+        let total = 0, gas = 0, ace = 0;
+        for (const d of ds) {
+          if (!esDeAqui(d, c)) continue;
+          total += d.valor || 0;
+          if (d.rol === RolEstadistico.GASOLINA) gas += d.valor || 0;
+          if (d.rol === RolEstadistico.ACEITE) ace += d.valor || 0;
+        }
+        if (c.retencion && c.municipioId === municipioId) total -= c.retencion;
+        return { total, gasolina: gas, aceite: ace };
+      };
       const mPer = new Map();
       for (const c of cajas) {
         const texto = c.solicitanteId ? etiquetaPersona(c.solicitanteId, v.cajas) : (c.solicitanteTexto || 'Sin solicitante');
         const k = c.solicitanteId || ('txt:' + Txt.norm(texto));
         if (!mPer.has(k)) mPer.set(k, { etiqueta: texto, total: 0, n: 0, clave: c.solicitanteId || k, ref: Boolean(c.solicitanteId) });
-        const o = mPer.get(k); o.total += c.total; o.n++;
+        const o = mPer.get(k); o.total += parteDe(c).total; o.n++;
       }
       const mMes = new Map();
       for (const c of cajas) {
         if (!mMes.has(c.mes)) mMes.set(c.mes, { clave: c.mes, etiqueta: Fecha.mesNombre(c.mes), total: 0, n: 0 });
-        const o = mMes.get(c.mes); o.total += c.total; o.n++;
+        const o = mMes.get(c.mes); o.total += parteDe(c).total; o.n++;
       }
       const mCat = new Map();
       for (const d of detalles) {
@@ -4217,9 +4409,9 @@ const Analitica = (() => {
       return {
         municipio: MunicipioRepo.get(municipioId),
         cajas: cajas.sort(U.by('fecha', 'desc')),
-        total: U.sumBy(cajas, c => c.total),
-        gasolina: U.sumBy(cajas, c => c.gasolina),
-        aceite: U.sumBy(cajas, c => c.aceite),
+        total: U.sumBy(cajas, c => parteDe(c).total),
+        gasolina: U.sumBy(cajas, c => parteDe(c).gasolina),
+        aceite: U.sumBy(cajas, c => parteDe(c).aceite),
         numeroCajas: cajas.length,
         porPersona: [...mPer.values()].sort(U.by('total', 'desc')),
         porMes: [...mMes.values()].sort(U.by('clave')),
@@ -5916,6 +6108,8 @@ const VistaCajas = {
    */
   filaDetalle(c, dets) {
     const haySub = dets.some(d => d.rol === RolEstadistico.GASOLINA || d.rol === RolEstadistico.ACEITE);
+    const hayReparto = dets.some(d => d.repartoId);
+    const cols = hayReparto ? 4 : 3;
     const suma = U.sumBy(dets, d => d.valor);
     return '<tr class="det-fila hidden" data-det="' + attr(c.id) + '"><td colspan="15">' +
       '<div class="det-caja">' +
@@ -5924,7 +6118,8 @@ const VistaCajas = {
            elemento, este desglose se quedó enseñando sólo la categoría y las
            doce filas de una caja menor decían todas «Caja menor». */
         ? '<table class="tbl-mini"><thead><tr><th>Categoría</th><th>Elemento</th>' +
-          '<th>Descripción</th><th class="num">Valor</th></tr></thead><tbody>' +
+          '<th>Descripción</th>' + (hayReparto ? '<th>Municipio</th>' : '') +
+          '<th class="num">Valor</th></tr></thead><tbody>' +
           dets.map(d => {
             const sub = d.rol === RolEstadistico.GASOLINA || d.rol === RolEstadistico.ACEITE;
             return '<tr><td class="nowrap">' + esc(d.categoriaNombre || '—') +
@@ -5933,21 +6128,28 @@ const VistaCajas = {
                 ? esc(d.elemento) : '<span class="txt-3">—</span>') + '</td>' +
               '<td>' + (String(d.descripcion || '').trim()
                 ? esc(d.descripcion) : '<span class="txt-3">—</span>') + '</td>' +
+              /* La columna del municipio sólo sale cuando hay algo repartido:
+                 en una caja normal repetiría la ubicación en todas las filas. */
+              (hayReparto ? '<td class="nowrap">' + esc(MunicipioRepo.nombre(d.municipioId) ||
+                c.municipioNombre || '—') + (d.repartoId ? ' <span class="txt-3 fs11">parte</span>' : '') +
+                '</td>' : '') +
               '<td class="num">' + Money.format(d.valor) + '</td></tr>';
           }).join('') +
           '</tbody><tfoot>' +
           (c.retencion
-            ? '<tr><td colspan="3">Suma de los conceptos</td>' +
+            ? '<tr><td colspan="' + cols + '">Suma de los conceptos</td>' +
               '<td class="num">' + Money.format(suma) + '</td></tr>' +
-              '<tr><td colspan="3">Retención</td>' +
+              '<tr><td colspan="' + cols + '">Retención</td>' +
               '<td class="num">− ' + Money.format(c.retencion) + '</td></tr>'
             : '') +
-          '<tr><td colspan="3">Total de la caja</td>' +
+          '<tr><td colspan="' + cols + '">Total de la caja</td>' +
           '<td class="num">' + Money.format(c.total) + '</td></tr>' +
           '</tfoot></table>'
         : '') +
       (haySub ? '<div class="fs11 txt-3 mt8">La gasolina y el aceite son parte del total de caja menor, ' +
                 'no se suman aparte.</div>' : '') +
+      (hayReparto ? '<div class="fs11 txt-3 mt8">Las filas marcadas «parte» son un mismo gasto cobrado por ' +
+                    'varios municipios: el valor está repartido entre ellos, no se cobró en cada uno.</div>' : '') +
       (String(c.observaciones || '').trim()
         ? '<div class="fs12 mt8"><b>Observaciones:</b> ' + esc(c.observaciones) + '</div>' : '') +
       '</div></td></tr>';
@@ -6049,6 +6251,17 @@ const VistaCajas = {
      * categoría; hoy son un papel aparte y la categoría de esas filas es tan
      * buena como cualquiera. Es el mismo resguardo que ya usa la relación de
      * reembolso. */
+    /* Los municipios que toca una caja: normalmente uno, pero si algún gasto
+       se repartió puede tocar varios. */
+    const munsDe = c => {
+      const out = [];
+      for (const d of (detsPorCaja.get(c.id) || [])) {
+        const n = d.municipioId ? MunicipioRepo.nombre(d.municipioId) : '';
+        if (n && out.indexOf(n) < 0) out.push(n);
+      }
+      return out;
+    };
+
     const catsDe = c => {
       const propias = [], subs = [];
       for (const d of (detsPorCaja.get(c.id) || [])) {
@@ -6243,8 +6456,15 @@ const VistaCajas = {
               : '<span class="txt-3">—</span>') + '</td>' +
           '<td class="trunc" style="max-width:148px" title="' + attr(Comp.nombreSolicitante(c)) + '">' +
             esc(Comp.nombreSolicitante(c)) + '</td>' +
-          '<td class="trunc" style="max-width:104px" title="' + attr(c.municipioNombre || '') + '">' +
-            esc(c.municipioNombre || '—') + '</td>' +
+          /* Cuando el gasto se repartió, la ubicación de la caja ya no lo
+             cuenta todo: se avisa de cuántos municipios más hay detrás. */
+          (() => {
+            const otros = munsDe(c).filter(n => n && n !== c.municipioNombre);
+            const tit = [c.municipioNombre || '—'].concat(otros).join(' · ');
+            return '<td class="trunc" style="max-width:104px" data-tip="' + attr(tit) + '">' +
+              esc(c.municipioNombre || '—') +
+              (otros.length ? ' <span class="txt-3 fs11">+' + otros.length + '</span>' : '') + '</td>';
+          })() +
           '<td class="trunc" style="max-width:92px" title="' + attr(Comp.nombreConsigno(c)) + '">' +
             esc(Comp.nombreConsigno(c)) + '</td>' +
           '<td class="num"><b>' + Money.format(c.total) + '</b></td>' +
@@ -6949,9 +7169,11 @@ const VistaCajaForm = {
         consignoId: caja.consignoId, municipioId: caja.municipioId,
         direccion: caja.direccion, estado: caja.estado, observaciones: caja.observaciones,
         retencion: caja.retencion,
-        detalles: dets.map(d => ({ id: d.id, categoriaId: d.categoriaId, categoriaNombre: d.categoriaNombre,
+        detalles: VistaCajaForm.agruparRepartos(dets).map(d => ({ id: d.id,
+          categoriaId: d.categoriaId, categoriaNombre: d.categoriaNombre,
           elemento: d.elemento,
-          descripcion: d.descripcion, cantidad: d.cantidad, valorUnitario: d.valorUnitario, valor: d.valor, rol: d.rol }))
+          descripcion: d.descripcion, cantidad: d.cantidad, valorUnitario: d.valorUnitario, valor: d.valor, rol: d.rol,
+          repartoId: d.repartoId || null, municipios: d.municipios || null }))
       };
       Shell.titulo('Editar ' + caja.numero, 'Modificación de caja menor');
     } else {
@@ -7021,7 +7243,7 @@ const VistaCajaForm = {
           '<thead><tr><th style="width:22px"></th><th style="min-width:118px">Categoría</th>' +
           '<th style="min-width:112px">Elemento</th>' +
           '<th style="min-width:110px">Descripción</th><th style="width:86px">Estadística</th>' +
-          '<th class="num" style="width:92px">Valor</th><th style="width:26px"></th></tr></thead>' +
+          '<th class="num" style="width:92px">Valor</th><th style="width:48px"></th></tr></thead>' +
           '<tbody id="tbDetalles"></tbody></table></div>' +
           '<div style="padding:10px 14px;border-top:1px solid var(--border)">' +
           '<button class="btn btn-sm" data-act="addDetalle">' + Icon('plus', '', 12) + 'Agregar detalle</button>' +
@@ -7102,6 +7324,7 @@ const VistaCajaForm = {
         if (!this.estado.detalles.length) this.estado.detalles.push(detalleNuevo());
         this.pintarDetalles(); },
       cambiarRol: el => { this.estado.detalles[Number(el.dataset.i)].rol = el.value || null; this.pintarTotales(); },
+      repartir: el => this.abrirReparto(Number(el.dataset.i)),
       cancelar: () => Router.ir(editandoId ? 'caja/' + editandoId : 'cajas'),
       guardar: () => this.guardar(editandoId, cont)
     });
@@ -7112,6 +7335,141 @@ const VistaCajaForm = {
     $('#fEstado').addEventListener('change', e => { this.estado.estado = e.target.value; });
     $('#fObs').addEventListener('input', e => { this.estado.observaciones = e.target.value; });
     setTimeout(() => { if (!editandoId && !base.solicitanteId) inSol.focus(); }, 80);
+  },
+
+  /**
+   * Reparte un gasto entre varios municipios.
+   *
+   * El caso que lo pidio: una recoleccion que se cobra de una vez por tres
+   * sedes y no hay forma de saber cuanto correspondio a cada una. Se reparte
+   * por partes iguales -que es lo justo cuando no se sabe- y se deja corregir
+   * a mano por si algun dia si se sabe. La suma tiene que dar el valor de la
+   * linea: si no, el total de la caja cambiaria sin que nadie lo pidiera.
+   */
+  abrirReparto(i) {
+    const d = this.estado.detalles[i];
+    const valor = d.valor || 0;
+    if (valor <= 0) { Toast.warn('Escriba primero cuanto costo este gasto.'); return; }
+    const municipios = MunicipioRepo.todos().slice().sort(U.by('nombre'));
+    if (municipios.length < 2) { Toast.warn('Hace falta tener al menos dos municipios registrados.'); return; }
+
+    /* Se trabaja sobre una copia: si se cierra sin aplicar, la linea queda
+       exactamente como estaba. */
+    let sel = (d.municipios || []).map(m => ({ municipioId: m.municipioId, monto: m.monto }));
+    let aMano = sel.length > 1 && !VistaCajaForm.repartoEsIgual(sel, valor);
+
+    const igualar = () => {
+      if (aMano || sel.length < 2) return;
+      const partes = Money.split(valor, sel.map(() => 1));
+      sel.forEach((m, k) => { m.monto = partes[k]; });
+    };
+
+    Modal.abrir({
+      titulo: 'Repartir entre municipios',
+      subtitulo: (d.categoriaNombre || 'Gasto') + (d.elemento ? ' \u00b7 ' + d.elemento : ''),
+      cuerpo:
+        '<p class="fs12 txt-2 mb12">Este gasto de <b>' + Money.format(valor) + '</b> se cobro por varios ' +
+        'municipios a la vez. Marque cuales y el sistema lo reparte por partes iguales. ' +
+        'Si conoce la cifra exacta de alguno, puede corregirla.</p>' +
+        '<div class="rep-lista" id="repLista"></div>' +
+        '<div class="rep-pie" id="repPie"></div>',
+      pie: '<button class="btn" data-cerrar>Cancelar</button>' +
+           '<button class="btn btn-primary" id="repOk">Aplicar reparto</button>',
+      alMontar: el => {
+        const lista = el.querySelector('#repLista');
+        const pie = el.querySelector('#repPie');
+        const btnOk = el.querySelector('#repOk');
+
+        const pintarPie = () => {
+          const suma = U.sumBy(sel, x => x.monto || 0);
+          const cuadra = sel.length > 1 && suma === valor;
+          pie.innerHTML = sel.length < 2
+            ? '<span class="txt-3">Marque al menos dos municipios.</span>'
+            : 'Suma del reparto: <b class="' + (cuadra ? 'rep-ok' : 'rep-mal') + '">' + Money.format(suma) +
+              '</b> de ' + Money.format(valor) +
+              (cuadra ? ' <span class="rep-ok">\u2713</span>'
+                      : ' <span class="rep-mal">' +
+                        (suma < valor ? 'faltan ' + Money.format(valor - suma)
+                                      : 'sobran ' + Money.format(suma - valor)) + '</span>');
+          btnOk.disabled = !cuadra;
+        };
+
+        const pintar = () => {
+          igualar();
+          lista.innerHTML = municipios.map(m => {
+            const p = sel.find(x => x.municipioId === m.id);
+            return '<label class="rep-fila' + (p ? ' on' : '') + '">' +
+              '<input type="checkbox" data-mun="' + attr(m.id) + '"' + (p ? ' checked' : '') + '>' +
+              '<span class="rep-nom">' + esc(m.nombre) + '</span>' +
+              (p ? '<input class="inp inp-money rep-monto" data-mon="' + attr(m.id) + '" value="' +
+                   attr(Money.formatInput(p.monto || 0)) + '">'
+                 : '<span class="txt-3 fs11">\u2014</span>') +
+              '</label>';
+          }).join('');
+          pintarPie();
+
+          lista.querySelectorAll('[data-mun]').forEach(chk => {
+            chk.onchange = () => {
+              const id = chk.dataset.mun;
+              if (chk.checked) { if (!sel.some(x => x.municipioId === id)) sel.push({ municipioId: id, monto: 0 }); }
+              else sel = sel.filter(x => x.municipioId !== id);
+              /* Al cambiar quienes son, se vuelve a repartir por igual: los
+                 importes anteriores ya no querrian decir nada. */
+              aMano = false;
+              pintar();
+            };
+          });
+          lista.querySelectorAll('[data-mon]').forEach(inp => {
+            MoneyInput.montar(inp, v => {
+              const p = sel.find(x => x.municipioId === inp.dataset.mon);
+              if (!p) return;
+              aMano = true; p.monto = v;
+              /* Solo se repinta el pie: repintar la lista entera le quitaria
+                 el foco a quien esta escribiendo la cifra. */
+              pintarPie();
+            });
+          });
+        };
+
+        pintar();
+        btnOk.onclick = () => {
+          if (btnOk.disabled) return;
+          d.municipios = sel.slice();
+          Modal.cerrar(el);
+          this.pintarDetalles(); this.pintarTotales();
+          Toast.ok('Gasto repartido entre ' + sel.length + ' municipios.');
+        };
+      }
+    });
+  },
+
+  /** el reparto guardado, es el reparto por partes iguales? */
+  repartoEsIgual(sel, valor) {
+    const partes = Money.split(valor, sel.map(() => 1));
+    return sel.every((m, k) => (m.monto || 0) === partes[k]);
+  },
+
+  /**
+   * Vuelve a juntar las filas de un mismo reparto en una sola linea.
+   *
+   * En la base se guardan por separado -una por municipio, con su parte- para
+   * que todo lo que suma detalles siga saliendo bien. Pero al editar hay que
+   * enseñar el gasto como se escribio: una linea de $900.000 repartida entre
+   * tres, no tres gastos sueltos de $300.000.
+   */
+  agruparRepartos(dets) {
+    const fuera = [], porReparto = new Map();
+    for (const d of dets) {
+      if (!d.repartoId) { fuera.push(d); continue; }
+      if (!porReparto.has(d.repartoId)) {
+        porReparto.set(d.repartoId, Object.assign({}, d, { valor: 0, municipios: [] }));
+        fuera.push(porReparto.get(d.repartoId));
+      }
+      const g = porReparto.get(d.repartoId);
+      g.valor += d.valor || 0;
+      g.municipios.push({ municipioId: d.municipioId, monto: d.valor || 0 });
+    }
+    return fuera;
   },
 
   rolesDisponibles() {
@@ -7138,9 +7496,22 @@ const VistaCajaForm = {
         roles.map(r => '<option value="' + attr(r.v) + '"' + (d.rol === r.v ? ' selected' : '') + '>' + esc(r.t) + '</option>').join('') +
         '</select></td>' +
       '<td><input class="inp inp-money" data-val="' + i + '" value="' + attr(Money.formatInput(d.valor || 0)) + '" placeholder="0"></td>' +
-      '<td><button class="btn btn-sm btn-ghost btn-icon" data-act="delDetalle" data-i="' + i + '" title="Quitar">' +
-        Icon('trash', '', 13) + '</button></td>' +
-      '</tr>').join('');
+      '<td class="nowrap">' +
+        '<button class="btn btn-sm btn-ghost btn-icon' + (d.municipios && d.municipios.length > 1 ? ' rep-on' : '') +
+          '" data-act="repartir" data-i="' + i + '" data-tip="Repartir este gasto entre varios municipios">' +
+          Icon('pin', '', 13) + '</button>' +
+        '<button class="btn btn-sm btn-ghost btn-icon" data-act="delDetalle" data-i="' + i + '" data-tip="Quitar">' +
+          Icon('trash', '', 13) + '</button></td>' +
+      '</tr>' +
+      /* El reparto se enseña debajo de su linea, no en una columna: son tres o
+         cuatro municipios con su cifra y en una celda no cabrian. */
+      (d.municipios && d.municipios.length > 1
+        ? '<tr class="fila-rep"><td></td><td colspan="6">' + Icon('pin', '', 11) +
+          ' <b>Repartido entre ' + d.municipios.length + ' municipios:</b> ' +
+          d.municipios.map(m => esc(MunicipioRepo.nombre(m.municipioId) || '?') +
+            ' <span class="mono">' + Money.format(m.monto) + '</span>').join(' &middot; ') +
+          '</td></tr>'
+        : '')).join('');
 
     // montar combos y money inputs de cada fila
     this.estado.detalles.forEach((d, i) => {
@@ -9743,12 +10114,21 @@ const Documento = {
         '</div>' +
       '</div>' +
 
-      '<table class="dp-tbl">' +
+      /* Cuando un gasto se cobró por varios municipios a la vez, el impreso
+         tiene que decir cuánto fue de cada uno: es justo lo que hay que poder
+         justificar después. En una caja normal esa columna sobraría —repetiría
+         la misma ubicación en todas las filas—, así que sólo aparece cuando
+         hace falta. */
+      (() => {
+        const hayReparto = detalles.some(d => d.repartoId);
+        const nCols = hayReparto ? 7 : 6;
+        return '<table class="dp-tbl">' +
         '<thead><tr>' +
           '<th style="width:8mm">#</th>' +
           '<th style="width:34mm">CATEGORÍA</th>' +
           '<th style="width:34mm">ELEMENTO</th>' +
           '<th>DETALLE</th>' +
+          (hayReparto ? '<th style="width:30mm">MUNICIPIO</th>' : '') +
           '<th style="width:26mm">VR. UNITARIO</th>' +
           '<th style="width:28mm">VR. TOTAL</th>' +
         '</tr></thead><tbody>' +
@@ -9757,13 +10137,19 @@ const Documento = {
           '<td>' + esc(d.categoriaNombre || '') + '</td>' +
           '<td>' + esc(d.elemento || '') + '</td>' +
           '<td>' + esc(d.descripcion || '') + '</td>' +
+          (hayReparto ? '<td>' + esc(MunicipioRepo.nombre(d.municipioId) || caja.municipioNombre || '') +
+            (d.repartoId ? ' <i>(parte)</i>' : '') + '</td>' : '') +
           '<td class="n">' + (d.valorUnitario ? Money.format(d.valorUnitario) : '') + '</td>' +
           '<td class="n">' + Money.format(d.valor) + '</td>' +
         '</tr>').join('') +
         Array.from({ length: vacias }, () => '<tr class="empty-r">' +
-          '<td></td><td></td><td></td><td></td><td></td><td></td></tr>').join('') +
+          Array.from({ length: nCols }, () => '<td></td>').join('') + '</tr>').join('') +
         '</tbody>' +
       '</table>' +
+      (hayReparto ? '<div class="dp-obs" style="border-top:none"><b>Gasto repartido</b>' +
+        'Las filas marcadas «parte» son un mismo cobro dividido entre varios municipios. ' +
+        'El valor está repartido entre ellos: no se cobró esa cantidad en cada uno.</div>' : '');
+      })() +
 
       '<div class="dp-tot"><table>' +
         '<tr><td>Subtotal</td><td>' + Money.format(caja.subtotal) + '</td></tr>' +
@@ -11730,10 +12116,13 @@ const Migracion = {
     T('  es_gasolina boolean default false, es_aceite boolean default false,');
     T('  -- columnas desnormalizadas: caché de consulta, se reescriben con la caja');
     T('  fecha date, mes text, persona_id text, municipio_id text, estado_caja text,');
+    T('  -- une las filas de un mismo gasto repartido entre varios municipios');
+    T('  reparto_id text,');
     T("  origen text default 'MANUAL', legacy jsonb,");
     T('  creado_en timestamptz default now(), actualizado_en timestamptz default now(),');
     T('  constraint ck_detalles_valor check (valor >= 0)');
     T(');');
+    T('create index if not exists detalles_reparto_id_idx on detalles (reparto_id);');
     T('create index if not exists ix_detalles_caja on detalles (caja_id);');
     T('create index if not exists ix_detalles_contrato on detalles (contrato_id);');
     T('create index if not exists ix_detalles_rol on detalles (rol);');
@@ -13645,6 +14034,201 @@ const Pruebas = {
               'La descripción se conserva completa, sin recortar');
             Pruebas.igual(caja.gasolina, 2000000, 'La gasolina sigue siendo subcomponente del total');
             Pruebas.igual(caja.total, 10000000, 'Y el total no se altera');
+          } }
+      ]
+    },
+    {
+      nombre: 'Reparto de un gasto entre varios municipios',
+      casos: [
+        { nombre: 'CRÍTICO · el reparto no cambia ni un peso del total', fn: async ctx => {
+            /* El caso que lo pidió: una recolección que se cobra de una vez por
+               tres sedes. Se guarda como tres filas, pero la caja sigue valiendo
+               lo mismo: si el reparto pudiera mover el total, sería un agujero. */
+            const rec = await CategoriaRepo.obtenerOCrear('Recolección');
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const m1 = await MunicipioRepo.obtenerOCrear('Apartadó');
+            const m2 = await MunicipioRepo.obtenerOCrear('Andes');
+            const m3 = await MunicipioRepo.obtenerOCrear('Caucasia');
+            const caja = await CajaService.crear({
+              fecha: '2026-09-03', solicitanteId: ctx.fernando.id, municipioId: m1.id,
+              estado: EstadoCaja.PENDIENTE,
+              detalles: [
+                { categoriaId: rec.id, elemento: 'Recolección semanal', valor: 90000000,
+                  municipios: [{ municipioId: m1.id }, { municipioId: m2.id }, { municipioId: m3.id }] },
+                { categoriaId: cm.id, elemento: 'Gasolina', rol: RolEstadistico.GASOLINA, valor: 12000000 }
+              ]
+            });
+            Pruebas.igual(caja.total, 102000000, 'La caja vale la suma, no una vez por municipio');
+            const dets = await CajaRepo.detalles(caja.id);
+            Pruebas.igual(dets.length, 4, 'Tres filas del reparto más la gasolina');
+            Pruebas.igual(U.sumBy(dets, d => d.valor), caja.total, 'Las filas suman el total exacto');
+            const rep = dets.filter(d => d.repartoId);
+            Pruebas.igual(rep.length, 3, 'Las tres partes van marcadas');
+            Pruebas.igual(new Set(rep.map(d => d.repartoId)).size, 1, 'Y unidas por el mismo reparto');
+            Pruebas.igual(rep.map(d => d.valor).join(','), '30000000,30000000,30000000', 'Por partes iguales');
+            Pruebas.igual(new Set(rep.map(d => d.municipioId)).size, 3, 'Cada parte en su municipio');
+            /* La gasolina no se repartió: es de una sola sede. */
+            const gas = dets.find(d => !d.repartoId);
+            Pruebas.igual(gas.municipioId, m1.id, 'Lo que no se repartió queda donde la caja');
+            Pruebas.igual(caja.gasolina, 12000000, 'Y sigue contando como gasolina');
+            ctx.cajaReparto = caja;
+          } },
+
+        { nombre: 'CRÍTICO · el dinero llega a cada municipio, no entero a uno', fn: async ctx => {
+            /* Sin esto la función sería de adorno: el reparto se vería en la
+               pantalla pero el ranking le seguiría cargando todo a uno.
+               Se mide LO QUE APORTA esta caja: en la base de pruebas hay más
+               cajas de otros grupos y los totales absolutos no dirían nada. */
+            const caja = ctx.cajaReparto;
+            const dets = new Map([[caja.id, await CajaRepo.detalles(caja.id)]]);
+            const aporte = Finanzas.porMunicipio([caja], dets, new Map());
+            const de = n => (aporte.find(m => m.etiqueta === n) || { total: 0 }).total;
+            Pruebas.igual(de('Apartadó'), 42000000, 'Apartadó: su parte más la gasolina');
+            Pruebas.igual(de('Andes'), 30000000, 'Andes: sólo su parte');
+            Pruebas.igual(de('Caucasia'), 30000000, 'Caucasia: sólo su parte');
+            Pruebas.igual(U.sumBy(aporte, m => m.total), caja.total,
+              'Lo repartido suma exactamente la caja, ni más ni menos');
+            const ap = aporte.find(m => m.etiqueta === 'Apartadó');
+            Pruebas.igual(ap.gasolina, 12000000, 'La gasolina cuenta sólo donde fue');
+
+            /* Y en el ranking de verdad, con todo dentro, el reparto no crea ni
+               destruye dinero. */
+            Analitica.invalidar();
+            const r = await Analitica.consultar({});
+            Pruebas.igual(U.sumBy(r.porMunicipio, m => m.total), r.resumen.gastoOperativo,
+              'El ranking completo sigue sumando el gasto entero');
+            Pruebas.ok(r.porMunicipio.some(m => m.etiqueta === 'Andes'),
+              'Y Andes aparece, aunque ninguna caja tenga esa ubicación');
+          } },
+
+        { nombre: 'El perfil del municipio cuenta su parte, no la caja entera', fn: async ctx => {
+            const m2 = MunicipioRepo.porNombre('Andes');
+            const p = await Analitica.perfilMunicipio(m2.id);
+            Pruebas.ok(p.cajas.some(c => c.id === ctx.cajaReparto.id),
+              'La caja aparece aunque su ubicación sea otra');
+            /* Lo importante: entra su PARTE, no el millón entero. Andes sólo
+               recibe dinero por este reparto, así que su total es la parte. */
+            Pruebas.igual(p.total, 30000000, 'Andes ve $300.000, no $1.020.000');
+            Pruebas.ok(p.total < ctx.cajaReparto.total,
+              'Y desde luego menos que la caja completa');
+          } },
+
+        { nombre: 'CRÍTICO · los centavos del reparto no se pierden', fn: () => {
+            /* $100.000 entre 3 no es exacto. Money.split coloca el sobrante. */
+            const partes = Finanzas.repartirEntreMunicipios(10000000,
+              [{ municipioId: 'a' }, { municipioId: 'b' }, { municipioId: 'c' }]);
+            Pruebas.igual(U.sumBy(partes, p => p.monto), 10000000, 'Las partes suman el valor exacto');
+            Pruebas.igual(partes.map(p => p.monto).join(','), '3333334,3333333,3333333',
+              'El centavo sobrante va a la primera, no se tira');
+            for (let n = 2; n <= 9; n++) {
+              const ms = Array.from({ length: n }, (_, k) => ({ municipioId: 'm' + k }));
+              const ps = Finanzas.repartirEntreMunicipios(10000001, ms);
+              Pruebas.igual(U.sumBy(ps, p => p.monto), 10000001, 'Exacto también entre ' + n);
+            }
+          } },
+
+        { nombre: 'CRÍTICO · un reparto que no cuadra se rechaza', fn: () => {
+            /* Última defensa: si las partes no sumaran el valor de la línea, el
+               total de la caja cambiaría por la puerta de atrás. */
+            Pruebas.lanza(() => Finanzas.repartirEntreMunicipios(10000000,
+              [{ municipioId: 'a', monto: 5000000 }, { municipioId: 'b', monto: 1000000 }]),
+              'Un reparto que no suma el valor se rechaza');
+            Pruebas.lanza(() => Finanzas.repartirEntreMunicipios(10000000,
+              [{ municipioId: 'a' }, { municipioId: 'a' }]),
+              'El mismo municipio dos veces se rechaza');
+            /* Con importes a mano que SÍ cuadran, se respetan tal cual. */
+            const ok = Finanzas.repartirEntreMunicipios(10000000,
+              [{ municipioId: 'a', monto: 7000000 }, { municipioId: 'b', monto: 3000000 }]);
+            Pruebas.igual(ok.map(p => p.monto).join(','), '7000000,3000000',
+              'Una cifra sabida se respeta, no se reparte por igual');
+          } },
+
+        { nombre: 'CRÍTICO · editar y volver a guardar no duplica ni descuadra', fn: async ctx => {
+            const caja = ctx.cajaReparto;
+            const antes = await CajaRepo.detalles(caja.id);
+            /* Así lo ve el formulario: UNA línea de $900.000, no tres gastos. */
+            const agr = VistaCajaForm.agruparRepartos(antes);
+            Pruebas.igual(agr.length, 2, 'El formulario ve dos líneas, no cuatro');
+            const linea = agr.find(d => d.municipios);
+            Pruebas.igual(linea.valor, 90000000, 'La línea vale lo que se escribió');
+            Pruebas.igual(linea.municipios.length, 3, 'Con sus tres municipios');
+
+            await CajaService.actualizar(caja.id, {
+              fecha: caja.fecha, solicitanteId: caja.solicitanteId, consignoId: caja.consignoId,
+              municipioId: caja.municipioId, direccion: caja.direccion, estado: caja.estado,
+              observaciones: caja.observaciones, retencion: caja.retencion,
+              detalles: agr.map(d => ({ id: d.id, categoriaId: d.categoriaId,
+                categoriaNombre: d.categoriaNombre, elemento: d.elemento, descripcion: d.descripcion,
+                cantidad: d.cantidad, valorUnitario: d.valorUnitario, valor: d.valor, rol: d.rol,
+                repartoId: d.repartoId || null, municipios: d.municipios || null }))
+            });
+            const despues = await CajaRepo.detalles(caja.id);
+            const cajaDespues = await CajaRepo.get(caja.id);
+            Pruebas.igual(despues.length, 4, 'Siguen siendo cuatro filas, no siete');
+            Pruebas.igual(cajaDespues.total, caja.total, 'Y el total no se movió');
+            Pruebas.igual(new Set(despues.filter(d => d.repartoId).map(d => d.repartoId)).size, 1,
+              'El reparto sigue siendo uno solo');
+          } },
+
+        { nombre: 'El desglose y el impreso dicen a dónde fue cada parte', fn: async ctx => {
+            const caja = ctx.cajaReparto;
+            const dets = await CajaRepo.detalles(caja.id);
+            const html = VistaCajas.filaDetalle(caja, dets);
+            Pruebas.ok(/>Municipio</.test(html), 'El desglose saca columna de municipio');
+            Pruebas.ok(/Andes/.test(html) && /Caucasia/.test(html), 'Con los municipios del reparto');
+            Pruebas.ok(/no se cobró en cada uno/.test(html), 'Y explica que no es un cobro repetido');
+
+            const doc = await Documento.construir(caja);
+            Pruebas.ok(/MUNICIPIO/.test(doc), 'El impreso también');
+            Pruebas.ok(/Gasto repartido/.test(doc), 'Con su nota al pie');
+
+            /* En una caja normal esa columna NO debe salir: repetiría la misma
+               ubicación en todas las filas y quitaría sitio. */
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const simple = await CajaService.crear({
+              fecha: '2026-09-04', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
+              detalles: [{ categoriaId: cm.id, elemento: 'Machete', valor: 5000000 }]
+            });
+            const docSimple = await Documento.construir(simple);
+            Pruebas.ok(!/MUNICIPIO/.test(docSimple), 'Sin reparto, el impreso no gasta esa columna');
+            Pruebas.ok(!/>Municipio</.test(VistaCajas.filaDetalle(simple, await CajaRepo.detalles(simple.id))),
+              'Ni el desglose');
+          } },
+
+        { nombre: 'CRÍTICO · sin repartos, las cuentas por municipio no cambian', fn: async () => {
+            /* Comprobación de que meter el reparto no reescribió el pasado: con
+               cajas normales, repartir por línea da lo mismo que cargar la caja
+               entera a su municipio, que es como se contaba antes. */
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const mA = await MunicipioRepo.obtenerOCrear('Guarne');
+            const mB = await MunicipioRepo.obtenerOCrear('Envigado');
+            const per = await PersonaRepo.guardar({ nombre: 'Sin Reparto Alguno', esSolicitante: 1 });
+            const hechas = [];
+            for (const [mun, val] of [[mA, 12300000], [mB, 4500000], [mA, 7800000]]) {
+              hechas.push(await CajaService.crear({
+                fecha: '2026-09-05', solicitanteId: per.id, municipioId: mun.id,
+                detalles: [
+                  { categoriaId: cm.id, elemento: 'Gasolina', rol: RolEstadistico.GASOLINA,
+                    valor: Math.round(val / 3) },
+                  { categoriaId: cm.id, elemento: 'Varios', valor: val - Math.round(val / 3) }
+                ]
+              }));
+            }
+            const detsPorCaja = new Map();
+            for (const c of hechas) detsPorCaja.set(c.id, await CajaRepo.detalles(c.id));
+
+            // como se contaba antes: la caja entera a su municipio
+            const viejo = new Map();
+            for (const c of hechas) viejo.set(c.municipioId, (viejo.get(c.municipioId) || 0) + c.total);
+            // como se cuenta ahora
+            const nuevo = Finanzas.porMunicipio(hechas, detsPorCaja, new Map());
+            for (const [mid, total] of viejo.entries()) {
+              const fila = nuevo.find(x => x.clave === mid);
+              Pruebas.igual(fila ? fila.total : 0, total,
+                MunicipioRepo.nombre(mid) + ' cuenta exactamente lo mismo que antes');
+            }
+            Pruebas.igual(U.sumBy(nuevo, x => x.total), U.sumBy(hechas, c => c.total),
+              'Y el total general tampoco se mueve');
           } }
       ]
     },
