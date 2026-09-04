@@ -13144,7 +13144,9 @@ const VistaConfiguracion = {
           });
           Toast.ok('Configuración guardada.');
           Shell.render(); Shell.aplicarFavicon(); await Shell.refrescarConteos();
-          VistaConfiguracion.render(cont);
+          /* Redibujar la carcasa deja un contenedor nuevo: hay que volver a
+             resolver la ruta en vez de pintar en el de antes, que ya no existe. */
+          Router.resolver();
         } catch (e) { manejarError(e); }
       },
       subirLogo: () => {
@@ -13178,8 +13180,19 @@ const VistaConfiguracion = {
         $('#cMarcaPrev').innerHTML = '<img src="' + attr(marcaTemp) + '" style="width:100%;height:100%;object-fit:cover">';
         Toast.ok('Logotipo de Don Aseo restaurado. Recuerde guardar.');
       },
-      tema: el => { Prefs.set('tema', el.dataset.v); document.documentElement.setAttribute('data-theme', el.dataset.v);
-        Shell.render(); Shell.refrescarConteos(); VistaConfiguracion.render(cont); },
+      /* Los colores salen de variables de CSS colgadas de `data-theme`: basta
+         con cambiar ese atributo. Antes se redibujaba la carcasa entera, y eso
+         REEMPLAZA el contenedor de la vista; lo que se pintaba después caía en
+         un elemento ya desechado y la pantalla quedaba en blanco hasta salir y
+         volver. Se pone al día sólo lo que de verdad cambia. */
+      tema: el => {
+        const v = el.dataset.v;
+        Prefs.set('tema', v);
+        document.documentElement.setAttribute('data-theme', v);
+        $$('[data-act="tema"]').forEach(b => b.classList.toggle('on', b.dataset.v === v));
+        const b = $('[data-gact="tema"]');
+        if (b) b.innerHTML = Icon(v === 'dark' ? 'sun' : 'moon', '', 15);
+      },
       paginaTam: el => { Prefs.set('paginaTam', Number(el.value)); Toast.ok('Preferencia guardada.'); }
     });
   }
@@ -15082,6 +15095,49 @@ const Pruebas = {
             for (const d of DESTINOS_DOC)
               Pruebas.igual(d.titulo, TIPO_DOC_META[d.tipo].label,
                 'El desplegable y la etiqueta del archivo dicen lo mismo: ' + d.titulo);
+          } },
+
+        { nombre: 'CRÍTICO · cambiar el tema no deja la pantalla en blanco', fn: async () => {
+            /* Cambiar el tema desde Configuración redibujaba la carcasa entera,
+               y eso REEMPLAZA el contenedor de la vista: lo que se pintaba
+               después caía en un elemento ya desechado y la pantalla quedaba
+               vacía hasta salir y volver a entrar. */
+            const antes = Prefs.get('tema');
+            /* Se monta la carcasa dentro de la prueba: así el contenedor real
+               existe aunque la aplicación esté en otra pantalla, y se comprueba
+               justo lo que fallaba —que ese contenedor sobreviva—. */
+            Shell.render();
+            const cont = $('#vista');
+            Pruebas.ok(Boolean(cont), 'La carcasa deja su contenedor de vista');
+            await VistaConfiguracion.render(cont);
+            const tarjetas = cont.querySelectorAll('.card').length;
+            Pruebas.ok(tarjetas > 3, 'La configuración se dibujó');
+
+            for (const v of ['dark', 'light']) {
+              const b = cont.querySelector('[data-act="tema"][data-v="' + v + '"]');
+              Pruebas.ok(Boolean(b), 'Está el botón de tema ' + v);
+              Acciones.tema(b);
+              await new Promise(r => setTimeout(r, 30));
+              Pruebas.igual(document.documentElement.getAttribute('data-theme'), v,
+                'El tema cambia a ' + v);
+              /* Lo que importa: el MISMO contenedor sigue vivo y con contenido. */
+              Pruebas.ok(document.body.contains(cont),
+                'El contenedor sigue en la página tras cambiar a ' + v);
+              Pruebas.igual(cont.querySelectorAll('.card').length, tarjetas,
+                'Y la pantalla no se vacía en ' + v);
+              Pruebas.ok(b.classList.contains('on'), 'El botón elegido queda marcado');
+            }
+            Prefs.set('tema', antes);
+            document.documentElement.setAttribute('data-theme', antes);
+            Shell.render();   // se deja la pantalla como estaba
+
+            /* Guardar tenía el mismo defecto: redibujaba y pintaba en el
+               contenedor viejo. Ahora vuelve a resolver la ruta. */
+            const src = VistaConfiguracion.render.toString();
+            const iShell = src.indexOf('Shell.render();');
+            Pruebas.ok(iShell >= 0, 'Guardar sigue redibujando la carcasa');
+            Pruebas.ok(/Router\.resolver\(\)/.test(src.slice(iShell, iShell + 400)),
+              'Y después vuelve a resolver la ruta, no pinta en el contenedor viejo');
           } },
 
         { nombre: 'CRÍTICO · el perfil dice lo que la persona adelantó, no sólo lo que gastó', fn: async ctx => {
