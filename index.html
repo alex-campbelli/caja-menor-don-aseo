@@ -1855,8 +1855,8 @@ const TipoDocumento = Object.freeze({
 });
 const TIPO_DOC_META = {
   FORMATO_CAJA:             { label: 'Formato de caja menor', icono: 'doc',    color: 'p-blue' },
-  COMPROBANTE_CONSIGNACION: { label: 'Comprobante de consignación', icono: 'banco', color: 'p-green' },
-  SOPORTE_COMPRA:           { label: 'Soporte de compra',     icono: 'file',   color: 'p-amber' },
+  COMPROBANTE_CONSIGNACION: { label: 'Comprobante de la transferencia', icono: 'banco', color: 'p-green' },
+  SOPORTE_COMPRA:           { label: 'Legalización del gasto', icono: 'file',  color: 'p-amber' },
   FACTURA:                  { label: 'Factura del proveedor', icono: 'file',   color: 'p-violet' },
   RECIBO:                   { label: 'Recibo',                icono: 'file',   color: 'p-gray' },
   FORMATO_COMPRAS:          { label: 'Formato de compras',    icono: 'doc',    color: 'p-blue' },
@@ -1880,14 +1880,20 @@ const DOCS_DEL_GIRO = [TipoDocumento.COMPROBANTE_CONSIGNACION];
 const DOCS_GENERADOS = [TipoDocumento.FORMATO_CAJA];
 /* Los tres destinos, en el orden en que ocurren. De aquí salen tanto el
    desplegable del formulario como las tarjetas de la caja. */
+/* El NOMBRE de cada uno se escribe una sola vez, en TIPO_DOC_META, y de ahí
+   sale para todas partes: el desplegable al adjuntar, el título de la tarjeta
+   y la etiqueta del archivo ya subido. Antes el nombre estaba escrito dos
+   veces y se elegía «Soporte del anticipo» para que el archivo apareciera
+   luego como «Factura del proveedor»: dos nombres para la misma cosa.
+   Lo que cambia entre ellos es CUÁNDO ocurre, y eso va en el subtítulo. */
 const DESTINOS_DOC = [
-  { tipo: TipoDocumento.FACTURA, titulo: 'Soporte del anticipo',
+  { tipo: TipoDocumento.FACTURA,
     cuando: 'Antes de girar · justifica el monto' },
-  { tipo: TipoDocumento.COMPROBANTE_CONSIGNACION, titulo: 'Comprobante de la transferencia',
+  { tipo: TipoDocumento.COMPROBANTE_CONSIGNACION,
     cuando: 'El giro · prueba que el dinero se envió' },
-  { tipo: TipoDocumento.SOPORTE_COMPRA, titulo: 'Legalización del gasto',
+  { tipo: TipoDocumento.SOPORTE_COMPRA,
     cuando: 'Después de gastar · en qué se usó la plata' }
-];
+].map(d => Object.assign(d, { titulo: TIPO_DOC_META[d.tipo].label }));
 const esDocAnticipo = d => DOCS_ANTICIPO.includes(d.tipo);
 const esDocDelGiro = d => DOCS_DEL_GIRO.includes(d.tipo);
 const esDocLegalizacion = d => !esDocAnticipo(d) && !esDocDelGiro(d) &&
@@ -6890,16 +6896,16 @@ const VistaCaja = {
          justifica el monto; los soportes del gasto llegan DESPUÉS, cuando el
          líder ya usó la plata. Y ninguna de las dos es el comprobante de la
          transferencia, que vive junto a la reposición. */
+      /* Los títulos salen de la misma lista que el desplegable: así no pueden
+         volver a llamarse de dos maneras distintas. */
       VistaCaja.tarjetaDocs({
-        titulo: 'Soporte del anticipo',
-        sub: 'Antes de girar · justifica el monto',
+        destino: DESTINOS_DOC[0],
         vacio: 'Sin soporte todavía. Adjunte aquí la factura o la cotización que le entregó el ' +
                'taller o el proveedor: es lo que justifica cuánto hay que consignar.',
         docs: anticipo, accion: 'adjuntarAnticipo', input: 'inAnticipo'
       }) +
       VistaCaja.tarjetaDocs({
-        titulo: 'Legalización del gasto',
-        sub: 'Después de gastar · en qué se usó la plata',
+        destino: DESTINOS_DOC[2],
         vacio: 'Sin legalizar todavía. Aquí van las facturas y recibos que le envíe el líder ' +
                'cuando ya haya gastado el dinero de esta caja.',
         docs: legalizacion, accion: 'adjuntarLegalizacion', input: 'inLegalizacion'
@@ -6929,7 +6935,9 @@ const VistaCaja = {
     /* Aquí se sueltan varios archivos de golpe —las facturas que manda el
        líder cuando ya gastó— así que se parte de la legalización: si alguien
        arrastra ocho sin mirar el desplegable, ése es el caso que acierta. */
-    await Expediente.montar($('#expedienteCaja'), {
+    /* Acotado a SU contenedor: con un selector global, si hubiera otra caja
+       dibujada en la página el expediente se montaba en la que no era. */
+    await Expediente.montar($('#expedienteCaja', cont), {
       cajaId: caja.id, docs, titulo: 'Expediente documental de ' + caja.numero,
       opciones: DESTINOS_DOC.map(d => ({ tipo: d.tipo, titulo: d.titulo })),
       tipoPorDefecto: TipoDocumento.SOPORTE_COMPRA
@@ -7004,8 +7012,8 @@ const VistaCaja = {
    * evita que se separen con el tiempo.
    */
   tarjetaDocs(o) {
-    return '<div class="card mb16"><div class="card-h"><h3>' + esc(o.titulo) + '</h3>' +
-      '<span class="ch-sub">' + esc(o.sub) +
+    return '<div class="card mb16"><div class="card-h"><h3>' + esc(o.destino.titulo) + '</h3>' +
+      '<span class="ch-sub">' + esc(o.destino.cuando) +
         (o.docs.length ? ' · ' + o.docs.length + ' archivo(s)' : '') + '</span>' +
       '<div class="ch-act">' +
         '<button class="btn btn-sm" data-act="' + attr(o.accion) + '">' +
@@ -8355,10 +8363,10 @@ const VistaConsignacion = {
 
     /* De una consignación cuelga su comprobante; cualquier otra cosa es
        excepcional y cabe en «Otro». */
-    await Expediente.montar($('#expedienteCons'), {
+    await Expediente.montar($('#expedienteCons', cont), {
       consignacionId: c.id, docs: d.documentos,
-      opciones: [{ tipo: TipoDocumento.COMPROBANTE_CONSIGNACION, titulo: 'Comprobante de la transferencia' },
-                 { tipo: TipoDocumento.OTRO, titulo: 'Otro documento' }],
+      opciones: [TipoDocumento.COMPROBANTE_CONSIGNACION, TipoDocumento.OTRO]
+        .map(t => ({ tipo: t, titulo: TIPO_DOC_META[t].label })),
       tipoPorDefecto: TipoDocumento.COMPROBANTE_CONSIGNACION,
       titulo: 'Comprobantes y soportes de ' + c.numero
     });
@@ -14616,7 +14624,7 @@ const Pruebas = {
             const antes = (await db.getAll('documentos')).length;
             try {
               await VistaCajaForm.render(div, []);
-                Pruebas.ok(/Soporte del anticipo/.test(div.innerHTML),
+                Pruebas.ok(/Documentos de la caja/.test(div.innerHTML),
                 'El formulario tiene donde adjuntar antes de guardar');
               Pruebas.ok(/id="dzCaja"/.test(div.innerHTML), 'Con zona para arrastrar');
 
@@ -14690,9 +14698,12 @@ const Pruebas = {
 
             /* Los tres destinos salen de la MISMA lista que usa el formulario:
                si mañana cambia uno, cambian los dos. */
-            Pruebas.igual(DESTINOS_DOC.map(d => d.titulo).join(' | '),
-              'Soporte del anticipo | Comprobante de la transferencia | Legalización del gasto',
-              'Los nombres son los mismos en todas partes');
+            /* Lo que importa no es CUAL sea el nombre, sino que sea UNO SOLO:
+               antes se elegia «Soporte del anticipo» y el archivo aparecia
+               luego como «Factura del proveedor». */
+            for (const d of DESTINOS_DOC)
+              Pruebas.igual(d.titulo, TIPO_DOC_META[d.tipo].label,
+                'El desplegable y la etiqueta del archivo dicen lo mismo: ' + d.titulo);
           } },
 
         { nombre: 'CRÍTICO · los comprobantes de antes siguen en su sitio', fn: async ctx => {
@@ -14754,12 +14765,12 @@ const Pruebas = {
               'Con su sección del comprobante');
             Pruebas.ok(dentroDe('Reposición', 'Comprobante en la caja.pdf'),
               'El comprobante de antes se ve donde siempre');
-            Pruebas.ok(!dentroDe('Soporte del anticipo', 'Comprobante en la caja.pdf'),
-              'Y NO se cuela en el soporte del anticipo');
-            Pruebas.ok(!dentroDe('Legalización del gasto', 'Comprobante en la caja.pdf'),
-              'Ni en la legalización');
-            Pruebas.ok(dentroDe('Legalización del gasto', 'Recibo antiguo.pdf'),
-              'Los recibos viejos se siguen viendo, en la legalización');
+            Pruebas.ok(!dentroDe(DESTINOS_DOC[0].titulo, 'Comprobante en la caja.pdf'),
+              'Y NO se cuela en la tarjeta de la factura');
+            Pruebas.ok(!dentroDe(DESTINOS_DOC[2].titulo, 'Comprobante en la caja.pdf'),
+              'Ni en la del gasto');
+            Pruebas.ok(dentroDe(DESTINOS_DOC[2].titulo, 'Recibo antiguo.pdf'),
+              'Los recibos viejos se siguen viendo, con los soportes de compra');
           } },
 
         { nombre: 'CRÍTICO · los tres papeles se pueden adjuntar al crear la caja', fn: async ctx => {
@@ -14872,8 +14883,9 @@ const Pruebas = {
             let html = '';
             try { await VistaCaja.render(div, [caja.id]); html = div.innerHTML; }
             finally { div.remove(); }
-            Pruebas.ok(/Soporte del anticipo/.test(html), 'La caja tiene la tarjeta del anticipo');
-            Pruebas.ok(/Legalización del gasto/.test(html), 'Y la de la legalización');
+            Pruebas.ok(html.indexOf(DESTINOS_DOC[0].titulo) >= 0,
+              'La caja tiene la tarjeta de lo que justifica el giro');
+            Pruebas.ok(html.indexOf(DESTINOS_DOC[2].titulo) >= 0, 'Y la del gasto ya hecho');
             Pruebas.ok(/Antes de girar/.test(html) && /Después de gastar/.test(html),
               'Cada una dice de qué momento es');
           } },
@@ -14910,7 +14922,7 @@ const Pruebas = {
 
             const div = document.createElement('div');
             await VistaCaja.render(div, [caja.id]);
-            Pruebas.ok(/Soporte del anticipo/.test(div.innerHTML),
+            Pruebas.ok(div.innerHTML.indexOf(DESTINOS_DOC[0].titulo) >= 0,
               'La caja tiene su tarjeta para las facturas');
             Pruebas.ok(/Factura taller 4821\.pdf/.test(div.innerHTML), 'Con la factura dentro');
           } },
