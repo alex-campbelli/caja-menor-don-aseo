@@ -4608,8 +4608,37 @@ const Analitica = (() => {
       const repuesto = U.sumBy(cajas, c => v.repuestoPorCaja.get(c.id) || 0);
       const totalHist = U.sumBy(cajas, c => c.total);
 
+      /* Una persona puede estar en una caja de dos maneras muy distintas:
+         PIDIENDO el dinero (solicitante) o PONIÉNDOLO por adelantado
+         (consignó). Hasta ahora el perfil sólo miraba la primera, así que
+         quien adelanta el dinero —Fabián— salía casi vacío: no aparecía nada
+         de lo que había girado ni de lo que se le debe. */
+      const giradas = v.cajas.filter(c => c.consignoId === personaId && c.estado !== EstadoCaja.ANULADA);
+      const girado = U.sumBy(giradas, c => c.total);
+      const devuelto = U.sumBy(giradas, c => v.repuestoPorCaja.get(c.id) || 0);
+      const porCobrar = U.sumBy(giradas, c => Finanzas.pendienteDe(c, v.repuestoPorCaja.get(c.id) || 0));
+      const mGir = new Map();
+      for (const c of giradas) {
+        if (!mGir.has(c.mes)) mGir.set(c.mes, { clave: c.mes, etiqueta: Fecha.mesNombre(c.mes), total: 0, n: 0 });
+        const o = mGir.get(c.mes); o.total += c.total; o.n++;
+      }
+      /* Y las reposiciones que ha recibido: el dinero que ya volvió a su bolsillo. */
+      const reposiciones = v.consignaciones
+        .filter(x => x.beneficiarioId === personaId)
+        .sort(U.by('fecha', 'desc'));
+
+      const comoFinanciador = {
+        cajas: giradas.sort(U.by('fecha', 'desc')),
+        numeroCajas: giradas.length,
+        girado, devuelto, porCobrar,
+        porMes: [...mGir.values()].sort(U.by('clave')),
+        reposiciones,
+        totalReposiciones: U.sumBy(reposiciones, x => x.valor || 0)
+      };
+
       return {
         persona: PersonaRepo.get(personaId),
+        comoFinanciador,
         cajas: cajas.sort(U.by('fecha', 'desc')),
         cajasAnuladas: anuladas,
         detalles,
@@ -8939,6 +8968,43 @@ const VistaPersona = {
       '</dl>' + (p.observaciones ? '<div class="divider"></div><div class="fs12">' + esc(p.observaciones) + '</div>' : '') +
       '</div></div></div>' +
 
+      /* Sólo para quien de verdad adelanta dinero: a un operario que nunca ha
+         girado nada no le sobra una tarjeta vacía. */
+      (r.comoFinanciador.numeroCajas
+        ? '<div class="card mb16"><div class="card-h"><h3>Dinero que ha adelantado</h3>' +
+          '<span class="ch-sub">Cajas que ' + esc(p.nombre) + ' financió · no son gastos suyos</span>' +
+          '<div class="ch-act"><span class="link fs12" data-act="verGiradas">Ver las cajas</span></div>' +
+          '</div><div class="card-b">' +
+          '<div class="grid g4">' +
+          Comp.kpi({ label: 'Ha adelantado', valor: Money.format(r.comoFinanciador.girado),
+            color: 'var(--brand-500)', icono: 'banco',
+            meta: '<span>' + r.comoFinanciador.numeroCajas + ' caja(s) financiada(s)</span>' }) +
+          Comp.kpi({ label: 'Ya le repusieron', valor: Money.format(r.comoFinanciador.devuelto),
+            color: 'var(--ok-500)', icono: 'check',
+            meta: '<span>' + r.comoFinanciador.reposiciones.length + ' consignación(es) a su favor</span>' }) +
+          Comp.kpi({ label: 'Se le debe', valor: Money.format(r.comoFinanciador.porCobrar),
+            color: r.comoFinanciador.porCobrar > 0 ? 'var(--dang-500)' : 'var(--ok-500)', icono: 'clock',
+            meta: '<span>' + (r.comoFinanciador.porCobrar > 0
+              ? 'Pendiente por reembolsarle' : 'Está al día') + '</span>' }) +
+          Comp.kpi({ label: 'Gasto propio', valor: Money.format(r.totalHistorico),
+            color: 'var(--info-500)', icono: 'caja',
+            meta: '<span>Lo que pidió para sí, en ' + r.numeroCajas + ' caja(s)</span>' }) +
+          '</div>' +
+          (r.comoFinanciador.reposiciones.length
+            ? '<div class="divider"></div><div class="fs12 txt-2 mb8"><b>Reposiciones recibidas</b></div>' +
+              '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Consignación</th><th>Fecha</th>' +
+              '<th class="num">Valor</th><th></th></tr></thead><tbody>' +
+              r.comoFinanciador.reposiciones.slice(0, 12).map(x =>
+                '<tr class="row-click" data-ir="consignacion/' + attr(x.id) + '">' +
+                '<td class="mono">' + esc(x.numero) + '</td>' +
+                '<td class="nowrap">' + Fecha.corta(x.fecha) + '</td>' +
+                '<td class="num"><b>' + Money.format(x.valor) + '</b></td>' +
+                '<td class="txt-3">' + Icon('chevR', '', 13) + '</td></tr>').join('') +
+              '</tbody></table></div>'
+            : '<div class="divider"></div><div class="fs12 txt-3">Todavía no se le ha repuesto nada.</div>') +
+          '</div></div>'
+        : '') +
+
       '<div class="grid g2 mb16">' +
       '<div class="card"><div class="card-h"><h3>Gasto por categoría</h3></div><div class="card-b">' +
       Comp.ranking(r.porCategoria, { limite: 10, color: 'var(--warn-500)' }) + '</div></div>' +
@@ -8976,6 +9042,14 @@ const VistaPersona = {
     setAcciones({
       editar: () => VistaPersonas.modalPersona(p, () => VistaPersona.render(cont, params)),
       revelar: () => { $('#pfCta').textContent = p.numeroCuenta || VALOR_NO_DISPONIBLE; },
+      /* Lleva al listado ya filtrado por quien puso el dinero, que es la
+         pregunta que se acaba de hacer al mirar la tarjeta. */
+      verGiradas: () => {
+        Object.assign(Estado_App.filtrosCajas,
+          { texto: '', estado: '', solicitanteId: '', municipioId: '', categoriaId: '',
+            desde: '', hasta: '', pagina: 1, consignoId: p.id });
+        Router.ir('cajas');
+      },
       nuevaCaja: () => { Estado_App.borradorCaja = { fecha: Fecha.hoy(), solicitanteId: p.id,
         consignoId: (PersonaRepo.financiadorPorDefecto() || {}).id || '', municipioId: p.municipioId || '',
         direccion: '', estado: EstadoCaja.BORRADOR, observaciones: '', retencion: 0,
@@ -14975,6 +15049,79 @@ const Pruebas = {
             for (const d of DESTINOS_DOC)
               Pruebas.igual(d.titulo, TIPO_DOC_META[d.tipo].label,
                 'El desplegable y la etiqueta del archivo dicen lo mismo: ' + d.titulo);
+          } },
+
+        { nombre: 'CRÍTICO · el perfil dice lo que la persona adelantó, no sólo lo que gastó', fn: async ctx => {
+            /* Una persona puede estar en una caja PIDIENDO el dinero o
+               PONIENDOLO. El perfil solo miraba lo primero, asi que quien
+               adelanta —Fabian— salia casi vacio: de $650.000 girados se veian
+               $50.000, los de la unica caja donde el era el solicitante. */
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const fin = await PersonaRepo.guardar({ nombre: 'Financiador De Prueba',
+              esFinanciador: 1, esSolicitante: 1 });
+            const cajas = [];
+            for (let i = 0; i < 3; i++) {
+              const l = await PersonaRepo.guardar({ nombre: 'Líder de prueba ' + i, esSolicitante: 1 });
+              cajas.push(await CajaService.crear({
+                fecha: '2026-09-16', solicitanteId: l.id, consignoId: fin.id,
+                municipioId: ctx.municipio.id, estado: EstadoCaja.CONSIGNADA,
+                detalles: [{ categoriaId: cm.id, elemento: 'Varios', valor: 20000000 }]
+              }));
+            }
+            /* Y una caja que sí es gasto suyo. */
+            await CajaService.crear({
+              fecha: '2026-09-16', solicitanteId: fin.id, consignoId: fin.id,
+              municipioId: ctx.municipio.id, estado: EstadoCaja.CONSIGNADA,
+              detalles: [{ categoriaId: cm.id, elemento: 'Recolección', valor: 5000000 }]
+            });
+            await ConsignacionService.crear({ fecha: '2026-09-17', beneficiarioId: fin.id,
+              valor: 20000000, asignaciones: [{ cajaId: cajas[0].id, monto: 20000000 }] });
+
+            Analitica.invalidar();
+            const r = await Analitica.perfilPersona(fin.id);
+            Pruebas.igual(r.comoFinanciador.girado, 65000000,
+              'Se ve TODO lo que adelantó, no sólo sus propias cajas');
+            Pruebas.igual(r.comoFinanciador.numeroCajas, 4, 'Las cuatro cajas que financió');
+            Pruebas.igual(r.totalHistorico, 5000000, 'Y aparte, lo que gastó para sí');
+            Pruebas.igual(r.comoFinanciador.devuelto, 20000000, 'Lo que ya le repusieron');
+            Pruebas.igual(r.comoFinanciador.girado,
+              r.comoFinanciador.devuelto + r.comoFinanciador.porCobrar,
+              'Adelantado = repuesto + lo que se le debe, sin que sobre ni falte un peso');
+            Pruebas.igual(r.comoFinanciador.reposiciones.length, 1, 'Con su consignación a favor');
+
+            /* A quien nunca ha adelantado nada no le sale la tarjeta. */
+            const solo = await PersonaRepo.guardar({ nombre: 'Sólo Solicitante', esSolicitante: 1 });
+            await CajaService.crear({
+              fecha: '2026-09-16', solicitanteId: solo.id, consignoId: fin.id,
+              municipioId: ctx.municipio.id,
+              detalles: [{ categoriaId: cm.id, elemento: 'Lima', valor: 3000000 }]
+            });
+            Analitica.invalidar();
+            const r2 = await Analitica.perfilPersona(solo.id);
+            Pruebas.igual(r2.comoFinanciador.numeroCajas, 0, 'Un operario no ha financiado nada');
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            try {
+              await VistaPersona.render(div, [solo.id]);
+              Pruebas.ok(!/Dinero que ha adelantado/.test(div.innerHTML),
+                'Y no se le enseña una tarjeta vacía');
+              await VistaPersona.render(div, [fin.id]);
+              Pruebas.ok(/Dinero que ha adelantado/.test(div.innerHTML),
+                'Al financiador sí');
+              /* Se vuelve a preguntar en vez de comparar contra una cifra
+                 escrita a mano: entre medias se creó otra caja financiada por
+                 él y el número ya no era el mismo. */
+              Analitica.invalidar();
+              const r3 = await Analitica.perfilPersona(fin.id);
+              /* Se busca en el TEXTO, no en el código: el importe lleva un
+                 espacio duro para no partirse en dos líneas, y en el html sale
+                 escrito como una entidad. */
+              Pruebas.ok(div.textContent.indexOf(Money.format(r3.comoFinanciador.girado)) >= 0,
+                'Con la cifra de lo adelantado a la vista: ' + Money.format(r3.comoFinanciador.girado));
+              Pruebas.igual(r3.comoFinanciador.numeroCajas, 5,
+                'Y contando también la caja que financió para el operario');
+            } finally { div.remove(); }
           } },
 
         { nombre: 'CRÍTICO · lo subido desde el expediente aparece arriba en su tarjeta', fn: async ctx => {
