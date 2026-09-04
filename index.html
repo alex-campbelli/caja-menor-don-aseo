@@ -674,9 +674,14 @@ html[data-theme="dark"] .preview-shell{background:#0a0f13}
 @media print{
   @page{size:letter;margin:0}
   html,body{background:#fff !important;height:auto}
-  body *{visibility:hidden !important}
-  #printRoot,#printRoot *{visibility:visible !important}
-  #printRoot{display:block !important;position:absolute;inset:0 auto auto 0;width:100%}
+  /* Antes se ocultaba la aplicación con `visibility:hidden`. Eso esconde la
+     tinta pero NO el hueco: el cuerpo seguía midiendo sus 416 mm y la
+     impresora sacaba una hoja en blanco detrás de cada documento. Con
+     `display:none` sobre los hijos del <body> el hueco desaparece y sólo
+     queda el documento, que puede entonces fluir por su cuenta. */
+  html,body{height:auto !important;margin:0 !important;padding:0 !important;overflow:visible !important}
+  body>*{display:none !important}
+  #printRoot{display:block !important;position:static;width:auto}
   .doc-page{width:100%;min-height:auto;box-shadow:none !important;margin:0;padding:10mm 12mm;
     page-break-after:always}
   .doc-page:last-child{page-break-after:auto}
@@ -1852,11 +1857,31 @@ const TIPO_DOC_META = {
   FORMATO_CAJA:             { label: 'Formato de caja menor', icono: 'doc',    color: 'p-blue' },
   COMPROBANTE_CONSIGNACION: { label: 'Comprobante de consignación', icono: 'banco', color: 'p-green' },
   SOPORTE_COMPRA:           { label: 'Soporte de compra',     icono: 'file',   color: 'p-amber' },
-  FACTURA:                  { label: 'Factura',               icono: 'file',   color: 'p-violet' },
+  FACTURA:                  { label: 'Factura del proveedor', icono: 'file',   color: 'p-violet' },
   RECIBO:                   { label: 'Recibo',                icono: 'file',   color: 'p-gray' },
   FORMATO_COMPRAS:          { label: 'Formato de compras',    icono: 'doc',    color: 'p-blue' },
   OTRO:                     { label: 'Otro',                  icono: 'folder', color: 'p-gray' }
 };
+
+/**
+ * Los papeles de una caja menor son de TRES momentos distintos y no deben
+ * amontonarse, porque prueban cosas diferentes:
+ *
+ *  1. ANTES de girar — la factura o la cotización del taller. Es lo que
+ *     justifica por qué hay que consignar ese monto y no otro.
+ *  2. El GIRO — el comprobante de la transferencia de quien adelanta el dinero.
+ *  3. DESPUÉS de gastar — lo que envía el líder cuando ya usó la plata:
+ *     facturas y recibos de lo que compró. Es la legalización del gasto.
+ *
+ * El formato generado por el sistema no es de ninguno de los tres.
+ */
+const DOCS_ANTICIPO = [TipoDocumento.FACTURA];
+const DOCS_DEL_GIRO = [TipoDocumento.COMPROBANTE_CONSIGNACION];
+const DOCS_GENERADOS = [TipoDocumento.FORMATO_CAJA];
+const esDocAnticipo = d => DOCS_ANTICIPO.includes(d.tipo);
+const esDocDelGiro = d => DOCS_DEL_GIRO.includes(d.tipo);
+const esDocLegalizacion = d => !esDocAnticipo(d) && !esDocDelGiro(d) &&
+                               !DOCS_GENERADOS.includes(d.tipo);
 
 /** Roles estadísticos: gasolina y aceite vienen de fábrica, el resto los crea el usuario */
 const RolEstadistico = Object.freeze({ GASOLINA: 'GASOLINA', ACEITE: 'ACEITE' });
@@ -6656,6 +6681,11 @@ const VistaCaja = {
       : [];
     const esComprobante = d => d.tipo === TipoDocumento.COMPROBANTE_CONSIGNACION;
     const comprobantes = docs.filter(esComprobante).concat(docsCons.filter(esComprobante));
+    /* Lo que justifica el giro (la factura del taller, antes de consignar) y lo
+       que legaliza el gasto (lo que envían después) van por separado: prueban
+       cosas distintas y amontonarlos borra esa diferencia. */
+    const anticipo = docs.filter(esDocAnticipo);
+    const legalizacion = docs.filter(esDocLegalizacion);
     const repuesto = Finanzas.repuesto(apls);
     const pendiente = Finanzas.pendiente(caja, apls);
     const calc = Finanzas.calcular(detalles, caja.retencion);
@@ -6846,6 +6876,25 @@ const VistaCaja = {
             'Adjunte aquí la captura o el PDF que le envíe quien consignó.</div>') +
         '</div></div>' +
 
+      /* Dos tarjetas, no una: la factura del taller llega ANTES de girar y
+         justifica el monto; los soportes del gasto llegan DESPUÉS, cuando el
+         líder ya usó la plata. Y ninguna de las dos es el comprobante de la
+         transferencia, que vive junto a la reposición. */
+      VistaCaja.tarjetaDocs({
+        titulo: 'Soporte del anticipo',
+        sub: 'Antes de girar · justifica el monto',
+        vacio: 'Sin soporte todavía. Adjunte aquí la factura o la cotización que le entregó el ' +
+               'taller o el proveedor: es lo que justifica cuánto hay que consignar.',
+        docs: anticipo, accion: 'adjuntarAnticipo', input: 'inAnticipo'
+      }) +
+      VistaCaja.tarjetaDocs({
+        titulo: 'Legalización del gasto',
+        sub: 'Después de gastar · en qué se usó la plata',
+        vacio: 'Sin legalizar todavía. Aquí van las facturas y recibos que le envíe el líder ' +
+               'cuando ya haya gastado el dinero de esta caja.',
+        docs: legalizacion, accion: 'adjuntarLegalizacion', input: 'inLegalizacion'
+      }) +
+
       '<div class="card"><div class="card-h"><h3>Trazabilidad</h3></div><div class="card-b">' +
         '<dl class="dl">' +
         '<dt>ID interno</dt><dd class="mono fs11">' + esc(caja.id) + '</dd>' +
@@ -6898,6 +6947,8 @@ const VistaCaja = {
         VistaCaja.render(cont, params);
       },
       adjuntarComprobante: () => { const i = $('#inComprobante'); if (i) i.click(); },
+      adjuntarAnticipo: () => { const i = $('#inAnticipo'); if (i) i.click(); },
+      adjuntarLegalizacion: () => { const i = $('#inLegalizacion'); if (i) i.click(); },
       masAcciones: () => VistaCaja.menuAcciones(caja, cont, params),
       ...Expediente.acciones({ cajaId: caja.id, recargar: () => VistaCaja.render(cont, params) })
     });
@@ -6911,6 +6962,53 @@ const VistaCaja = {
       await Expediente.subir(files, { cajaId: caja.id, tipo: TipoDocumento.COMPROBANTE_CONSIGNACION });
       VistaCaja.render(cont, params);
     };
+
+    /* Igual que el comprobante: se adjunta a ESTA caja y ya clasificado según
+       la tarjeta desde la que se subió, sin elegir el tipo en un desplegable. */
+    const engancharDoc = (idInput, tipo) => {
+      const el = $('#' + idInput);
+      if (!el) return;
+      el.onchange = async () => {
+        const files = [...el.files];
+        if (!files.length) return;
+        await Expediente.subir(files, { cajaId: caja.id, tipo: tipo });
+        VistaCaja.render(cont, params);
+      };
+    };
+    engancharDoc('inAnticipo', TipoDocumento.FACTURA);
+    engancharDoc('inLegalizacion', TipoDocumento.SOPORTE_COMPRA);
+  },
+
+  /**
+   * Tarjeta de documentos de la caja.
+   *
+   * Las dos —lo que justifica el giro y lo que legaliza el gasto— se ven igual
+   * y se comportan igual; lo único que cambia es qué prueban. Una sola función
+   * evita que se separen con el tiempo.
+   */
+  tarjetaDocs(o) {
+    return '<div class="card mb16"><div class="card-h"><h3>' + esc(o.titulo) + '</h3>' +
+      '<span class="ch-sub">' + esc(o.sub) +
+        (o.docs.length ? ' · ' + o.docs.length + ' archivo(s)' : '') + '</span>' +
+      '<div class="ch-act">' +
+        '<button class="btn btn-sm" data-act="' + attr(o.accion) + '">' +
+          Icon('upload', '', 12) + 'Adjuntar</button>' +
+        '<input type="file" id="' + attr(o.input) + '" multiple hidden>' +
+      '</div></div><div class="card-b">' +
+      (o.docs.length
+        ? '<div class="comp-lista">' + o.docs.map(d =>
+            '<div class="comp-item">' +
+              '<span class="comp-ic">' + Icon(U.esImagen(d.mime) ? 'eye' : 'file', '', 13) + '</span>' +
+              '<button class="link fs12 trunc" style="text-align:left" data-act="expVer" data-id="' + attr(d.id) +
+                '" title="' + attr(d.nombre) + '">' + esc(d.nombre) + '</button>' +
+              '<span class="txt-3 fs11 nowrap">' + Txt.bytes(d.tamano) + '</span>' +
+              '<span class="pill np ' + attr((TIPO_DOC_META[d.tipo] || {}).color || 'p-gray') + '">' +
+                esc((TIPO_DOC_META[d.tipo] || {}).label || d.tipo) + '</span>' +
+              '<button class="btn btn-sm btn-ghost btn-icon" data-act="expDescargar" data-id="' + attr(d.id) +
+                '" title="Descargar">' + Icon('download', '', 12) + '</button>' +
+            '</div>').join('') + '</div>'
+        : '<div class="fs12 txt-3">' + esc(o.vacio) + '</div>') +
+      '</div></div>';
   },
 
   /** Ventanita para escribir la nota corta que se ve en el listado */
@@ -7306,8 +7404,26 @@ const VistaCajaForm = {
           '</div>' +
         '</div></div>' +
 
-        '<div class="card"><div class="card-h"><h3>Observaciones</h3></div><div class="card-b">' +
+        '<div class="card mb16"><div class="card-h"><h3>Observaciones</h3></div><div class="card-b">' +
         '<textarea class="inp" id="fObs" placeholder="Notas internas sobre esta caja menor…">' + esc(base.observaciones || '') + '</textarea>' +
+        '</div></div>' +
+
+        /* La factura del taller llega con la caja, no después. Antes había que
+           guardar, entrar a la caja y volver a subirla: un rodeo por una razón
+           técnica —el archivo necesita una caja a la que colgarse— que no tiene
+           por qué notarse. Los archivos esperan aquí y suben solos al guardar. */
+        '<div class="card"><div class="card-h"><h3>Soporte del anticipo</h3>' +
+          '<span class="ch-sub">Opcional · la factura del taller o del proveedor</span>' +
+          '<div class="ch-act"><button class="btn btn-sm" data-act="elegirAdjuntos">' +
+            Icon('upload', '', 12) + 'Adjuntar</button>' +
+            '<input type="file" id="fAdjuntos" multiple hidden></div>' +
+        '</div><div class="card-b">' +
+          '<div class="dz mb12" id="dzCaja">' + Icon('upload') +
+          '<h4>Arrastre aquí la factura o haga clic para buscarla</h4>' +
+          '<p>Lo que justifica cuánto hay que consignar: la factura o la cotización del taller. ' +
+          'Los soportes de lo que compren <b>después</b> se adjuntan en la caja ya guardada. ' +
+          'Se guardan al pulsar Guardar.</p></div>' +
+          '<div id="listaAdjuntos"></div>' +
         '</div></div>' +
       '</div>' +
 
@@ -7378,9 +7494,26 @@ const VistaCajaForm = {
         this.pintarDetalles(); },
       cambiarRol: el => { this.estado.detalles[Number(el.dataset.i)].rol = el.value || null; this.pintarTotales(); },
       repartir: el => this.abrirReparto(Number(el.dataset.i)),
+      elegirAdjuntos: () => { const i = $('#fAdjuntos'); if (i) i.click(); },
+      quitarAdjunto: el => { this.estado.adjuntos.splice(Number(el.dataset.i), 1); this.pintarAdjuntos(); },
       cancelar: () => Router.ir(editandoId ? 'caja/' + editandoId : 'cajas'),
       guardar: () => this.guardar(editandoId, cont)
     });
+
+    /* Los archivos se quedan en memoria hasta que la caja exista. */
+    if (!this.estado.adjuntos) this.estado.adjuntos = [];
+    const sumar = files => {
+      for (const f of files) {
+        if (this.estado.adjuntos.some(x => x.name === f.name && x.size === f.size)) continue;
+        this.estado.adjuntos.push(f);
+      }
+      this.pintarAdjuntos();
+    };
+    const inAdj = $('#fAdjuntos');
+    if (inAdj) inAdj.onchange = () => { sumar([...inAdj.files]); inAdj.value = ''; };
+    const dz = $('#dzCaja');
+    if (dz) DropZone.montar(dz, files => sumar([...files]));
+    this.pintarAdjuntos();
 
     // sincronizar campos simples
     $('#fFecha').addEventListener('change', e => { this.estado.fecha = e.target.value; });
@@ -7533,6 +7666,23 @@ const VistaCajaForm = {
       g.municipios.push({ municipioId: d.municipioId, monto: d.valor || 0 });
     }
     return fuera;
+  },
+
+  /** Lo que espera para subirse cuando la caja se guarde. */
+  pintarAdjuntos() {
+    const cont = $('#listaAdjuntos'); if (!cont) return;
+    const lista = this.estado.adjuntos || [];
+    cont.innerHTML = lista.length
+      ? '<div class="comp-lista">' + lista.map((f, i) =>
+          '<div class="comp-item">' +
+            '<span class="comp-ic">' + Icon(/^image\//.test(f.type) ? 'eye' : 'file', '', 13) + '</span>' +
+            '<span class="fs12 trunc" style="flex:1" title="' + attr(f.name) + '">' + esc(f.name) + '</span>' +
+            '<span class="txt-3 fs11 nowrap">' + Txt.bytes(f.size) + '</span>' +
+            '<span class="pill np p-amber">al guardar</span>' +
+            '<button class="btn btn-sm btn-ghost btn-icon" data-act="quitarAdjunto" data-i="' + i +
+              '" data-tip="Quitar">' + Icon('trash', '', 12) + '</button>' +
+          '</div>').join('') + '</div>'
+      : '<div class="fs12 txt-3">Sin archivos por ahora. Puede guardar la caja sin ellos y adjuntarlos después.</div>';
   },
 
   rolesDisponibles() {
@@ -7718,6 +7868,19 @@ const VistaCajaForm = {
       } else {
         caja = await CajaService.crear(entrada);
         Toast.ok('Caja ' + caja.numero + ' creada por ' + Money.format(caja.total) + '.');
+      }
+      /* Ahora sí existe la caja: los archivos que esperaban se cuelgan de
+         ella. Si alguno falla se avisa, pero la caja YA está guardada: no se
+         pierde el trabajo de escribirla por un archivo que no subió. */
+      const adj = e.adjuntos || [];
+      if (adj.length) {
+        try {
+          await Expediente.subir(adj, { cajaId: caja.id, tipo: TipoDocumento.FACTURA });
+          e.adjuntos = [];
+        } catch (err2) {
+          Toast.warn('La caja se guardó, pero no se pudieron adjuntar los archivos. ' +
+            'Vuelva a intentarlo desde la caja. (' + (err2 && err2.message ? err2.message : '') + ')', 9000);
+        }
       }
       Shell.refrescarConteos();
       Router.ir('caja/' + caja.id);
@@ -14364,6 +14527,172 @@ const Pruebas = {
             Pruebas.ok(/Apartadó/.test(html) && /Andes/.test(html) && /Caucasia/.test(html),
               'Salen los tres municipios del reparto');
             Pruebas.ok(!/No aplica/.test(html), 'Y no el «No aplica» de la caja');
+          } },
+
+        { nombre: 'CRÍTICO · al imprimir no sale una hoja en blanco detrás', fn: () => {
+            /* La app se ocultaba con `visibility:hidden`, que esconde la tinta
+               pero NO el hueco: el cuerpo seguia midiendo sus 416 mm y la
+               impresora sacaba una hoja vacia detras de cada documento. */
+            const reglas = [...document.styleSheets]
+              .flatMap(s => { try { return [...s.cssRules]; } catch (e) { return []; } })
+              .filter(r => r.type === CSSRule.MEDIA_RULE && /print/.test(r.conditionText || ''));
+            Pruebas.ok(reglas.length > 0, 'Hay reglas de impresión');
+            const css = reglas.map(r => [...r.cssRules].map(x => x.cssText).join(' ')).join(' ');
+            Pruebas.ok(/body\s*>\s*\*[^{]*\{[^}]*display:\s*none/.test(css),
+              'Los hijos del body se quitan del todo, no sólo se vuelven invisibles');
+            Pruebas.ok(!/body \*[^{]*\{[^}]*visibility:\s*hidden/.test(css),
+              'Ya no queda el ocultado que dejaba el hueco');
+            Pruebas.ok(/#printRoot[^{]*\{[^}]*display:\s*block/.test(css),
+              'Y el documento sí se enseña');
+          } },
+
+        { nombre: 'CRÍTICO · la factura se adjunta mientras se hace la caja', fn: async ctx => {
+            /* Antes habia que guardar, entrar a la caja y volver a subirla: un
+               rodeo por una razon tecnica —el archivo necesita una caja a la
+               que colgarse— que no tiene por que notarse. Los archivos esperan
+               en memoria y suben solos al guardar.
+
+               Se hace el recorrido COMPLETO: montar el formulario, elegir el
+               archivo, rellenar la caja y pulsar guardar. Mirar solo el codigo
+               dejaba pasar el fallo de que los archivos no llegaran. */
+            const man = await CategoriaRepo.obtenerOCrear('Mantenimiento/Arreglo');
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            const irOriginal = Router.ir;
+            let cajaId = null;
+            const antes = (await db.getAll('documentos')).length;
+            try {
+              await VistaCajaForm.render(div, []);
+                Pruebas.ok(/Soporte del anticipo/.test(div.innerHTML),
+                'El formulario tiene donde adjuntar antes de guardar');
+              Pruebas.ok(/id="dzCaja"/.test(div.innerHTML), 'Con zona para arrastrar');
+
+              /* Se elige el archivo por la casilla real del formulario. */
+              const pdf = new File([new Uint8Array([37, 80, 68, 70])], 'Factura 9001.pdf',
+                { type: 'application/pdf' });
+              const inp = div.querySelector('#fAdjuntos');
+              Pruebas.ok(Boolean(inp), 'Hay casilla para elegir archivos');
+              const dt = new DataTransfer(); dt.items.add(pdf); inp.files = dt.files;
+              inp.dispatchEvent(new Event('change', { bubbles: true }));
+              await new Promise(r => setTimeout(r, 60));
+              Pruebas.igual((VistaCajaForm.estado.adjuntos || []).length, 1,
+                'El archivo queda esperando');
+              Pruebas.igual((await db.getAll('documentos')).length, antes,
+                'Y mientras se escribe la caja NO se sube nada todavia');
+              Pruebas.ok(/al guardar/.test(div.querySelector('#listaAdjuntos').innerHTML),
+                'Se avisa de que subira al guardar');
+
+              /* Se rellena y se guarda, como lo haria una persona. */
+              VistaCajaForm.estado.solicitanteId = ctx.fernando.id;
+              VistaCajaForm.estado.municipioId = ctx.municipio.id;
+              div.querySelector('#fSolicitante').value = 'x';
+              const d = VistaCajaForm.estado.detalles[0];
+              d.categoriaId = man.id; d.categoriaNombre = man.nombre;
+              d.elemento = 'Arreglo de la guadaña'; d.valor = 32000000;
+              Router.ir = ruta => { cajaId = String(ruta).replace('caja/', ''); };
+              await VistaCajaForm.guardar(null, div);
+              await new Promise(r => setTimeout(r, 120));
+            } finally { Router.ir = irOriginal; div.remove(); }
+
+            Pruebas.ok(Boolean(cajaId), 'La caja se guarda');
+            const caja = await CajaRepo.get(cajaId);
+            Pruebas.igual(caja.total, 32000000, 'Con su total');
+            const docs = await CajaRepo.documentos(cajaId);
+            Pruebas.igual(docs.length, 1, 'Y el archivo que esperaba llega a ESA caja');
+            Pruebas.igual(docs[0].nombre, 'Factura 9001.pdf', 'Es el que se eligio');
+            Pruebas.igual(docs[0].tipo, TipoDocumento.FACTURA, 'Ya clasificado como factura');
+            Pruebas.igual((VistaCajaForm.estado.adjuntos || []).length, 0,
+              'Y la lista de espera queda limpia, para no subirlo dos veces');
+          } },
+
+        { nombre: 'CRÍTICO · lo que justifica el giro no se mezcla con lo que legaliza el gasto', fn: async ctx => {
+            /* Son tres momentos distintos del mismo dinero y prueban cosas
+               diferentes: la factura del taller llega ANTES y justifica cuanto
+               hay que consignar; el comprobante prueba EL GIRO; los recibos
+               llegan DESPUES y dicen en que se uso la plata. Amontonarlos
+               borra esa diferencia. */
+            const man = await CategoriaRepo.obtenerOCrear('Mantenimiento/Arreglo');
+            const caja = await CajaService.crear({
+              fecha: '2026-09-11', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
+              detalles: [{ categoriaId: man.id, elemento: 'Mantenimiento de guadaña', valor: 32000000 }]
+            });
+            /* Cada archivo con contenido distinto: el programa descarta los
+               duplicados por su huella, y con los mismos bytes solo entraria
+               el primero. */
+            let sem = 0;
+            const arch = (nom, tipo) => Expediente.subir(
+              [new File([new Uint8Array([37, 80, 68, 70, ++sem])], nom, { type: 'application/pdf' })],
+              { cajaId: caja.id, tipo: tipo });
+            await arch('Factura taller 4821.pdf', TipoDocumento.FACTURA);
+            await arch('Recibo repuestos.pdf', TipoDocumento.SOPORTE_COMPRA);
+            await arch('Comprobante Bancolombia.pdf', TipoDocumento.COMPROBANTE_CONSIGNACION);
+
+            const docs = await CajaRepo.documentos(caja.id);
+            Pruebas.igual(docs.length, 3, 'Los tres papeles cuelgan de la caja');
+            const nombres = f => docs.filter(f).map(d => d.nombre).sort().join(', ');
+            Pruebas.igual(nombres(esDocAnticipo), 'Factura taller 4821.pdf',
+              'El anticipo lleva sólo lo que justifica el giro');
+            Pruebas.igual(nombres(esDocLegalizacion), 'Recibo repuestos.pdf',
+              'La legalización lleva sólo lo que se gastó');
+            Pruebas.igual(nombres(esDocDelGiro), 'Comprobante Bancolombia.pdf',
+              'Y el comprobante va aparte');
+            /* Ninguno cae en dos sitios ni se queda fuera. */
+            for (const d of docs) {
+              const en = [esDocAnticipo(d), esDocLegalizacion(d), esDocDelGiro(d)].filter(Boolean).length;
+              Pruebas.igual(en, 1, d.nombre + ' está en exactamente un grupo');
+            }
+            /* El formato que genera el sistema no es de ninguno de los tres. */
+            Pruebas.ok(!esDocLegalizacion({ tipo: TipoDocumento.FORMATO_CAJA }),
+              'El formato generado no se cuela como legalización');
+
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            let html = '';
+            try { await VistaCaja.render(div, [caja.id]); html = div.innerHTML; }
+            finally { div.remove(); }
+            Pruebas.ok(/Soporte del anticipo/.test(html), 'La caja tiene la tarjeta del anticipo');
+            Pruebas.ok(/Legalización del gasto/.test(html), 'Y la de la legalización');
+            Pruebas.ok(/Antes de girar/.test(html) && /Después de gastar/.test(html),
+              'Cada una dice de qué momento es');
+          } },
+
+        { nombre: 'La factura del taller se guarda en su caja', fn: async ctx => {
+            /* Una caja de mantenimiento lleva la factura del taller. Va en la
+               caja, no perdida en el expediente general, y separada del
+               comprobante de la transferencia: prueban cosas distintas. */
+            const man = await CategoriaRepo.obtenerOCrear('Mantenimiento/Arreglo');
+            const caja = await CajaService.crear({
+              fecha: '2026-09-09', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
+              detalles: [{ categoriaId: man.id, elemento: 'Arreglo de la guadaña', valor: 32000000 }]
+            });
+            const pdf = new File([new Uint8Array([37, 80, 68, 70])], 'Factura taller 4821.pdf',
+              { type: 'application/pdf' });
+            await Expediente.subir([pdf], { cajaId: caja.id, tipo: TipoDocumento.FACTURA });
+            const docs = await CajaRepo.documentos(caja.id);
+            Pruebas.igual(docs.length, 1, 'La factura queda colgada de esta caja');
+            Pruebas.igual(docs[0].tipo, TipoDocumento.FACTURA, 'Y ya clasificada como factura');
+            Pruebas.igual(docs[0].cajaId, caja.id, 'Asociada a la caja correcta');
+
+            /* Un comprobante de consignación NO debe aparecer entre los
+               soportes de la compra, ni al revés. */
+            const png = new File([new Uint8Array([137, 80, 78, 71])], 'Comprobante.png',
+              { type: 'image/png' });
+            await Expediente.subir([png], { cajaId: caja.id,
+              tipo: TipoDocumento.COMPROBANTE_CONSIGNACION });
+            const todos = await CajaRepo.documentos(caja.id);
+            const soportes = todos.filter(d => d.tipo !== TipoDocumento.COMPROBANTE_CONSIGNACION);
+            const comps = todos.filter(d => d.tipo === TipoDocumento.COMPROBANTE_CONSIGNACION);
+            Pruebas.igual(soportes.length, 1, 'Un soporte de compra');
+            Pruebas.igual(comps.length, 1, 'Y un comprobante, cada uno en su sitio');
+            Pruebas.igual(soportes[0].nombre, 'Factura taller 4821.pdf', 'Sin mezclarse');
+
+            const div = document.createElement('div');
+            await VistaCaja.render(div, [caja.id]);
+            Pruebas.ok(/Soporte del anticipo/.test(div.innerHTML),
+              'La caja tiene su tarjeta para las facturas');
+            Pruebas.ok(/Factura taller 4821\.pdf/.test(div.innerHTML), 'Con la factura dentro');
           } },
 
         { nombre: 'El formato impreso no gasta media hoja en renglones vacíos', fn: async ctx => {
