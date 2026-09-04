@@ -3386,6 +3386,26 @@ const Finanzas = {
    * valor exacto: $100.000 entre 3 da 33.333,34 + 33.333,33 + 33.333,33 y no
    * se pierde ni se inventa un peso.
    */
+  /**
+   * Parte un valor en n trozos iguales, en PESOS ENTEROS.
+   *
+   * Repartir al centavo daba $266.666,67 tres veces, y eso no se puede ni
+   * pagar ni escribir: la casilla del dinero sólo sabe pesos enteros, así que
+   * mostraba 266.667, al releerla sumaba un peso a cada parte y el reparto
+   * acababa valiendo un peso más que el gasto. Aquí el sobrante se reparte de
+   * peso en peso —266.667 + 266.667 + 266.666— y la suma es exacta.
+   *
+   * Si el valor tuviera centavos (nunca en una factura, pero puede escribirse)
+   * se reparte al centavo, que sigue siendo exacto.
+   */
+  partesIguales(valor, n) {
+    if (n < 1) return [];
+    const pesos = valor % 100 === 0;
+    const unidad = pesos ? 100 : 1;
+    const trozos = Money.split(valor / unidad, Array.from({ length: n }, () => 1));
+    return trozos.map(t => t * unidad);
+  },
+
   repartirEntreMunicipios(valor, municipios) {
     const lista = (municipios || []).filter(m => m && m.municipioId);
     if (lista.length < 2) return [];
@@ -3394,8 +3414,7 @@ const Finanzas = {
       throw new ErrorDominio('Un municipio no puede aparecer dos veces en el mismo reparto.', 'REPARTO');
     const aMano = lista.every(m => Number.isInteger(m.monto) && m.monto >= 0) &&
                   lista.some(m => m.monto > 0);
-    const partes = aMano ? lista.map(m => m.monto)
-                         : Money.split(valor, lista.map(() => 1));
+    const partes = aMano ? lista.map(m => m.monto) : this.partesIguales(valor, lista.length);
     /* Las partes SON el gasto: si no sumaran el valor de la línea, el total de
        la caja cambiaría por la puerta de atrás. Antes que consentir eso, se
        para. La ventana del reparto ya lo impide, esto es la última defensa. */
@@ -7360,7 +7379,7 @@ const VistaCajaForm = {
 
     const igualar = () => {
       if (aMano || sel.length < 2) return;
-      const partes = Money.split(valor, sel.map(() => 1));
+      const partes = Finanzas.partesIguales(valor, sel.length);
       sel.forEach((m, k) => { m.monto = partes[k]; });
     };
 
@@ -7390,8 +7409,14 @@ const VistaCajaForm = {
               (cuadra ? ' <span class="rep-ok">\u2713</span>'
                       : ' <span class="rep-mal">' +
                         (suma < valor ? 'faltan ' + Money.format(valor - suma)
-                                      : 'sobran ' + Money.format(suma - valor)) + '</span>');
+                                      : 'sobran ' + Money.format(suma - valor)) + '</span>') +
+              /* Salida de emergencia: despues de corregir cifras a mano es facil
+                 quedarse con una suma que no cuadra y sin saber como volver. */
+              (aMano ? ' <button type="button" class="btn btn-sm btn-ghost" id="repIgual">' +
+                       'Volver a repartir por igual</button>' : '');
           btnOk.disabled = !cuadra;
+          const btnIgual = pie.querySelector('#repIgual');
+          if (btnIgual) btnIgual.onclick = () => { aMano = false; pintar(); };
         };
 
         const pintar = () => {
@@ -7423,6 +7448,10 @@ const VistaCajaForm = {
             MoneyInput.montar(inp, v => {
               const p = sel.find(x => x.municipioId === inp.dataset.mon);
               if (!p) return;
+              /* Al montarse, la casilla relee su propio texto y avisa. Eso no
+                 es que nadie haya escrito nada: si el valor no cambia, no se
+                 toca el reparto ni se marca como corregido a mano. */
+              if (v === p.monto) return;
               aMano = true; p.monto = v;
               /* Solo se repinta el pie: repintar la lista entera le quitaria
                  el foco a quien esta escribiendo la cifra. */
@@ -7445,7 +7474,7 @@ const VistaCajaForm = {
 
   /** el reparto guardado, es el reparto por partes iguales? */
   repartoEsIgual(sel, valor) {
-    const partes = Money.split(valor, sel.map(() => 1));
+    const partes = Finanzas.partesIguales(valor, sel.length);
     return sel.every((m, k) => (m.monto || 0) === partes[k]);
   },
 
@@ -14113,18 +14142,70 @@ const Pruebas = {
               'Y desde luego menos que la caja completa');
           } },
 
-        { nombre: 'CRÍTICO · los centavos del reparto no se pierden', fn: () => {
-            /* $100.000 entre 3 no es exacto. Money.split coloca el sobrante. */
+        { nombre: 'CRÍTICO · el reparto no pierde ni inventa dinero', fn: () => {
+            /* $100.000 entre 3 no da una cifra redonda: el peso sobrante tiene
+               que ir a alguien, no desaparecer ni duplicarse. */
             const partes = Finanzas.repartirEntreMunicipios(10000000,
               [{ municipioId: 'a' }, { municipioId: 'b' }, { municipioId: 'c' }]);
             Pruebas.igual(U.sumBy(partes, p => p.monto), 10000000, 'Las partes suman el valor exacto');
-            Pruebas.igual(partes.map(p => p.monto).join(','), '3333334,3333333,3333333',
-              'El centavo sobrante va a la primera, no se tira');
+            Pruebas.igual(partes.map(p => p.monto).join(','), '3333400,3333300,3333300',
+              '$33.334 + $33.333 + $33.333, en pesos enteros');
             for (let n = 2; n <= 9; n++) {
               const ms = Array.from({ length: n }, (_, k) => ({ municipioId: 'm' + k }));
               const ps = Finanzas.repartirEntreMunicipios(10000001, ms);
               Pruebas.igual(U.sumBy(ps, p => p.monto), 10000001, 'Exacto también entre ' + n);
             }
+          } },
+
+        { nombre: 'CRÍTICO · el reparto se hace en pesos enteros, sin pesos sueltos', fn: () => {
+            /* Caso real: $800.000 de recolección entre tres municipios. Al
+               centavo daba $266.666,67 tres veces; la casilla del dinero sólo
+               escribe pesos enteros, mostraba 266.667, al releerla sumaba un
+               peso a cada parte y el reparto valía $800.001. */
+            const partes = Finanzas.partesIguales(80000000, 3);
+            Pruebas.igual(U.sumBy(partes, p => p), 80000000, 'Las partes suman el gasto exacto');
+            Pruebas.igual(partes.join(','), '26666700,26666700,26666600',
+              '266.667 + 266.667 + 266.666, sin centavos');
+            Pruebas.ok(partes.every(p => p % 100 === 0), 'Ninguna parte tiene centavos');
+
+            /* Y lo que se ve escrito en la casilla vuelve a leerse igual: es lo
+               que se rompía. */
+            for (const p of partes)
+              Pruebas.igual(Money.parse(Money.formatInput(p)), p,
+                'La cifra escrita se relee sin cambiar: ' + Money.format(p));
+
+            /* De 2 a 9 municipios, con importes que no dividen bien. */
+            for (let n = 2; n <= 9; n++) {
+              for (const v of [80000000, 10000000, 100000, 123456700, 99999900]) {
+                const ps = Finanzas.partesIguales(v, n);
+                Pruebas.igual(U.sumBy(ps, x => x), v, Money.format(v) + ' entre ' + n + ' suma exacto');
+                Pruebas.ok(ps.every(x => x % 100 === 0),
+                  Money.format(v) + ' entre ' + n + ' sin centavos');
+                Pruebas.ok(Math.max(...ps) - Math.min(...ps) <= 100,
+                  'Y nadie se lleva más de un peso de diferencia');
+              }
+            }
+
+            /* Un valor con centavos escritos a mano sigue repartiéndose exacto. */
+            const conCent = Finanzas.partesIguales(80000050, 3);
+            Pruebas.igual(U.sumBy(conCent, p => p), 80000050, 'Con centavos también cuadra');
+          } },
+
+        { nombre: 'CRÍTICO · el reparto guardado no lleva pesos sueltos', fn: async ctx => {
+            const rec = await CategoriaRepo.obtenerOCrear('Recolección');
+            const ms = [];
+            for (const n of ['El Carmen de Viboral', 'Envigado', 'Guarne'])
+              ms.push(await MunicipioRepo.obtenerOCrear(n));
+            const caja = await CajaService.crear({
+              fecha: '2026-09-04', solicitanteId: ctx.fernando.id, municipioId: ms[0].id,
+              detalles: [{ categoriaId: rec.id, elemento: 'Transporte de residuos vegetales',
+                valor: 80000000, municipios: ms.map(m => ({ municipioId: m.id })) }]
+            });
+            Pruebas.igual(caja.total, 80000000, 'La caja vale $800.000, no $800.001');
+            const dets = await CajaRepo.detalles(caja.id);
+            Pruebas.igual(U.sumBy(dets, d => d.valor), 80000000, 'Las filas suman el gasto');
+            Pruebas.igual(dets.map(d => d.valor).sort((a, b) => b - a).join(','),
+              '26666700,26666700,26666600', 'Repartido en pesos enteros');
           } },
 
         { nombre: 'CRÍTICO · un reparto que no cuadra se rechaza', fn: () => {
