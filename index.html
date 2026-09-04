@@ -520,15 +520,19 @@ table.tbl tbody tr.marcada > td:first-child{box-shadow:inset 3px 0 0 var(--brand
    la vista por la columna, sin robarle sitio al número. */
 .tip{position:fixed;z-index:9998;max-width:280px;background:#111a22;color:#eaf1f6;font-size:11.5px;
   line-height:1.45;padding:6px 9px;border-radius:7px;box-shadow:var(--sh-3);pointer-events:none;
-  opacity:0;transform:translateY(3px);transition:opacity .1s,transform .1s;left:0;top:0}
+  opacity:0;transform:translateY(3px);transition:opacity .1s,transform .1s;left:0;top:0;
+  /* Los avisos son frases, no etiquetas: tienen que doblar línea. */
+  white-space:normal;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
 .tip.on{opacity:1;transform:translateY(0)}
 html[data-theme="dark"] .tip{background:#e6edf3;color:#0e1419}
-.col-marcas{width:58px;white-space:nowrap;padding-left:4px!important;padding-right:0!important}
+.col-marcas{width:76px;white-space:nowrap;padding-left:4px!important;padding-right:0!important}
 .marca{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;
   border-radius:4px;cursor:help;vertical-align:middle;outline-offset:1px}
 .marca+.marca{margin-left:2px}
 /* La legalización usa el mismo par ✓/⚠ que el comprobante, en otro color, para
    que de un vistazo se distingan las dos cosas que hay que poder probar. */
+.marca.m-fact{background:var(--viol-50,#f2eefc);color:var(--viol-600,#6d4aca)}
+html[data-theme="dark"] .marca.m-fact{background:rgba(109,74,202,.20);color:#bda6f5}
 .marca.m-legal{background:var(--info-50);color:var(--info-600)}
 .marca.m-sinlegal{background:var(--warn-50);color:var(--warn-700)}
 html[data-theme="dark"] .marca.m-legal{background:rgba(56,132,255,.16);color:#8fbcff}
@@ -590,9 +594,7 @@ mark{background:rgba(200,134,13,.28);color:inherit;border-radius:2px;padding:0 1
 .chart .dot{fill:var(--surface);stroke:var(--brand-500);stroke-width:2}
 .legend{display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;color:var(--text-2);margin-top:8px}
 .legend i{width:9px;height:9px;border-radius:2px;display:inline-block;margin-right:5px;vertical-align:-1px}
-.tip{position:fixed;background:var(--ink-900);color:#fff;padding:5px 9px;border-radius:5px;font-size:11.5px;
-  pointer-events:none;z-index:400;box-shadow:var(--sh-2);white-space:nowrap;font-variant-numeric:tabular-nums}
-html[data-theme="dark"] .tip{background:#323f4a;border:1px solid var(--border)}
+/* (el estilo de la burbuja vive arriba, junto al componente Tip) */
 
 @media(max-width:860px){
   .sidebar{transform:translateX(-100%)}
@@ -5277,6 +5279,9 @@ const Tip = {
     if (!texto) return;
     const d = this._capa();
     d.textContent = texto;
+    /* Se mide desde la esquina: si se midiera en la posición anterior, cerca
+       del borde derecho la ventana la estrecharía y el ancho saldría mal. */
+    d.style.left = '0px'; d.style.top = '0px';
     d.classList.add('on');
     const r = sobre.getBoundingClientRect();
     const t = d.getBoundingClientRect();
@@ -5786,29 +5791,10 @@ const Chart = (() => {
   return { barras, linea, dona, apilada, PALETA };
 })();
 
-/* Tooltips globales para los gráficos */
-(function tooltips() {
-  let tip = null;
-  document.addEventListener('mouseover', e => {
-    const t = e.target.closest ? e.target.closest('[data-tip]') : null;
-    if (!t) return;
-    if (!tip) { tip = document.createElement('div'); tip.className = 'tip'; document.body.appendChild(tip); }
-    tip.textContent = t.getAttribute('data-tip');
-    tip.style.display = 'block';
-  });
-  document.addEventListener('mousemove', e => {
-    if (!tip || tip.style.display === 'none') return;
-    const w = tip.offsetWidth, h = tip.offsetHeight;
-    let x = e.clientX + 12, y = e.clientY - h - 8;
-    if (x + w > innerWidth - 8) x = e.clientX - w - 12;
-    if (y < 6) y = e.clientY + 16;
-    tip.style.left = x + 'px'; tip.style.top = y + 'px';
-  });
-  document.addEventListener('mouseout', e => {
-    const t = e.target.closest ? e.target.closest('[data-tip]') : null;
-    if (t && tip) tip.style.display = 'none';
-  });
-})();
+/* Los gráficos usan el MISMO `[data-tip]` que el resto, así que los atiende
+   `Tip`. Antes había aquí un segundo sistema de burbujas: las dos se disparaban
+   sobre el mismo elemento y la vieja —que no doblaba línea— tapaba a la nueva y
+   salía el texto cortado. Una sola, y se acabó. */
 
 
 /* ==========================================================================
@@ -6516,8 +6502,12 @@ const VistaCajas = {
     /* Y cuáles tienen ya los soportes de lo que se compró. Sólo cuentan los
        colgados de la caja: la legalización es de la caja, no del giro. */
     const conLegalizacion = new Set();
-    for (const d of docsTodos)
-      if (d.cajaId && d.estado !== Estado.INACTIVO && esDocLegalizacion(d)) conLegalizacion.add(d.cajaId);
+    const conFactura = new Set();
+    for (const d of docsTodos) {
+      if (!d.cajaId || d.estado === Estado.INACTIVO) continue;
+      if (esDocLegalizacion(d)) conLegalizacion.add(d.cajaId);
+      if (esDocAnticipo(d)) conFactura.add(d.cajaId);
+    }
 
     const detsPorCaja = new Map();
     for (const d of detsTodos) {
@@ -6729,6 +6719,13 @@ const VistaCajas = {
                     'data-tip="El dinero ya se giró, pero no hay comprobante de la transferencia adjunto">' +
                     Icon('warn', '', 11) + '</span>'
                   : '')) +
+            /* La factura del proveedor sólo aparece cuando la hay: no todas
+               las cajas nacen de una factura, así que no falta cuando no está
+               y no tiene sentido reclamarla. */
+            (conFactura.has(c.id)
+              ? '<span class="marca m-fact" tabindex="0" ' +
+                'data-tip="Tiene adjunta la factura del proveedor">' + Icon('file', '', 11) + '</span>'
+              : '') +
             (conLegalizacion.has(c.id)
               ? '<span class="marca m-legal" tabindex="0" ' +
                 'data-tip="Tiene adjuntos los soportes de en qué se gastó">' + Icon('file', '', 11) + '</span>'
@@ -7172,6 +7169,10 @@ const VistaCaja = {
        dibujada en la página el expediente se montaba en la que no era. */
     await Expediente.montar($('#expedienteCaja', cont), {
       cajaId: caja.id, docs, titulo: 'Expediente documental de ' + caja.numero,
+      /* Sin esto el expediente se redibujaba a sí mismo y el resto de la caja
+         se quedaba con los datos viejos: se adjuntaba el comprobante aquí abajo
+         y arriba, en su tarjeta, seguía diciendo que no había ninguno. */
+      recargar: () => VistaCaja.render(cont, params),
       opciones: DESTINOS_DOC.map(d => ({ tipo: d.tipo, titulo: d.titulo })),
       tipoPorDefecto: TipoDocumento.SOPORTE_COMPRA
     });
@@ -8604,6 +8605,7 @@ const VistaConsignacion = {
        excepcional y cabe en «Otro». */
     await Expediente.montar($('#expedienteCons', cont), {
       consignacionId: c.id, docs: d.documentos,
+      recargar: () => VistaConsignacion.render(cont, params),
       opciones: [TipoDocumento.COMPROBANTE_CONSIGNACION, TipoDocumento.OTRO]
         .map(t => ({ tipo: t, titulo: TIPO_DOC_META[t].label })),
       tipoPorDefecto: TipoDocumento.COMPROBANTE_CONSIGNACION,
@@ -14973,6 +14975,126 @@ const Pruebas = {
             for (const d of DESTINOS_DOC)
               Pruebas.igual(d.titulo, TIPO_DOC_META[d.tipo].label,
                 'El desplegable y la etiqueta del archivo dicen lo mismo: ' + d.titulo);
+          } },
+
+        { nombre: 'CRÍTICO · lo subido desde el expediente aparece arriba en su tarjeta', fn: async ctx => {
+            /* El expediente se redibujaba a si mismo y el resto de la caja se
+               quedaba con los datos viejos: se adjuntaba el comprobante abajo y
+               arriba seguia diciendo que no habia ninguno. */
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const caja = await CajaService.crear({
+              fecha: '2026-09-15', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
+              estado: EstadoCaja.CONSIGNADA,
+              detalles: [{ categoriaId: cm.id, elemento: 'Varios', valor: 18150000 }]
+            });
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            const enTarjeta = (titulo, archivo) => {
+              const c = [...div.querySelectorAll('.card')].find(x => x.textContent.includes(titulo));
+              return Boolean(c) && c.textContent.includes(archivo);
+            };
+            try {
+              await VistaCaja.render(div, [caja.id]);
+              Pruebas.ok(Boolean(div.querySelector('#expTipo')), 'El expediente de la caja está montado');
+              let sem = 0;
+              const subir = async (nombre, tipo) => {
+                /* Tras cada archivo la vista se redibuja entera —que es
+                   justamente lo que se está comprobando— así que el desplegable
+                   y la zona de arrastre hay que volver a buscarlos. */
+                const sel = div.querySelector('#expTipo');
+                sel.value = tipo;
+                const inp = div.querySelector('#expDz input[type=file]');
+                const dt = new DataTransfer();
+                dt.items.add(new File([new Uint8Array([37, 80, 68, 70, ++sem])], nombre,
+                  { type: 'application/pdf' }));
+                inp.files = dt.files;
+                inp.dispatchEvent(new Event('change', { bubbles: true }));
+                await new Promise(r => setTimeout(r, 260));
+              };
+              await subir('Comprobante.pdf', TipoDocumento.COMPROBANTE_CONSIGNACION);
+              Pruebas.ok(enTarjeta('Reposición', 'Comprobante.pdf'),
+                'El comprobante subido abajo aparece arriba, en su tarjeta');
+              await subir('Factura.pdf', TipoDocumento.FACTURA);
+              Pruebas.ok(enTarjeta(DESTINOS_DOC[0].titulo, 'Factura.pdf'),
+                'La factura también sube a su tarjeta');
+              await subir('Recibo.pdf', TipoDocumento.SOPORTE_COMPRA);
+              Pruebas.ok(enTarjeta(DESTINOS_DOC[2].titulo, 'Recibo.pdf'),
+                'Y el recibo a la suya');
+              /* Y siguen estando abajo, no se mueven de sitio. */
+              Pruebas.ok(enTarjeta('Expediente documental', 'Comprobante.pdf'),
+                'El expediente los sigue enseñando todos');
+            } finally { div.remove(); }
+            Pruebas.igual((await CajaRepo.documentos(caja.id)).length, 3, 'Los tres quedaron guardados');
+          } },
+
+        { nombre: 'CRÍTICO · una sola burbuja, y los avisos caben enteros', fn: async () => {
+            /* Habia DOS sistemas de burbujas escuchando el mismo `[data-tip]`:
+               el viejo de los graficos no doblaba linea y tapaba al nuevo, asi
+               que los avisos largos salian cortados. */
+            Tip.iniciar();
+            const b = document.createElement('button');
+            b.setAttribute('data-tip', 'Sin legalizar: no han enviado los soportes de en qué se gastó este dinero');
+            b.style.cssText = 'position:fixed;left:40px;top:200px';
+            document.body.appendChild(b);
+            let medidas = {};
+            try {
+              b.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+              await new Promise(r => setTimeout(r, 80));
+              /* La invariante que impide que se dupliquen: la capa se reutiliza
+                 siempre, nunca se crea una segunda. Contar `.tip` en el
+                 documento no servía: no distingue la capa del componente de
+                 cualquier otro elemento que lleve esa clase. */
+              const t = Tip._capa();
+              Pruebas.ok(t === Tip._capa() && t === Tip._capa(),
+                'La burbuja es UNA sola capa que se reutiliza, no una nueva cada vez');
+              Pruebas.ok(document.body.contains(t), 'Y vive colgada del documento');
+              Pruebas.ok(t.classList.contains('on'), 'Se enseñó al pasar el cursor');
+              Pruebas.igual(getComputedStyle(t).whiteSpace, 'normal',
+                'El texto dobla línea en vez de salirse de la caja');
+              Pruebas.igual(t.textContent, b.getAttribute('data-tip'), 'Y dice el aviso entero');
+              medidas = t.getBoundingClientRect();
+              Pruebas.ok(medidas.height > 30, 'Un aviso largo ocupa más de un renglón');
+              b.dispatchEvent(new MouseEvent('mouseout', { bubbles: true }));
+              await new Promise(r => setTimeout(r, 60));
+              Pruebas.ok(!t.classList.contains('on'), 'Y se retira al salir');
+            } finally { b.remove(); }
+          } },
+
+        { nombre: 'La factura del proveedor se marca sólo cuando la hay', fn: async ctx => {
+            /* Las otras dos marcas reclaman cuando faltan; ésta no: no todas
+               las cajas nacen de una factura, asi que su ausencia no es un
+               problema que haya que señalar. */
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const hacer = async conFactura => {
+              const c = await CajaService.crear({
+                fecha: '2026-09-14', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
+                estado: EstadoCaja.CONSIGNADA,
+                detalles: [{ categoriaId: cm.id, elemento: 'Varios', valor: 10000000 }]
+              });
+              if (conFactura) await Expediente.subir(
+                [new File([new Uint8Array([37, 80, 68, 70, Date.now() % 251, Math.random() * 250 | 0])],
+                  'f.pdf', { type: 'application/pdf' })],
+                { cajaId: c.id, tipo: TipoDocumento.FACTURA });
+              return c;
+            };
+            const conF = await hacer(true), sinF = await hacer(false);
+            const docsCon = await CajaRepo.documentos(conF.id);
+            Pruebas.igual(docsCon.filter(esDocAnticipo).length, 1, 'Una tiene factura');
+            Pruebas.igual((await CajaRepo.documentos(sinF.id)).filter(esDocAnticipo).length, 0,
+              'Y la otra no');
+
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            let html = '';
+            try { await VistaCajas.render(div); html = div.innerHTML; }
+            finally { div.remove(); }
+            Pruebas.ok(/m-fact/.test(html), 'La marca sale cuando hay factura');
+            Pruebas.igual((html.match(/m-fact/g) || []).length,
+              (await db.getAll('documentos')).filter(d => d.cajaId && esDocAnticipo(d))
+                .reduce((s, d) => s.add(d.cajaId), new Set()).size,
+              'Una marca por caja con factura, ni más ni menos');
           } },
 
         { nombre: 'CRÍTICO · los comprobantes de antes siguen en su sitio', fn: async ctx => {
