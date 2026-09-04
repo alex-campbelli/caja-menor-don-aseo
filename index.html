@@ -10133,8 +10133,12 @@ const Documento = {
     const ctr = ContratoRepo.get(caja.contratoId) || ContratoRepo.activo() || {};
     const detalles = o.detalles || await CajaRepo.detalles(caja.id);
     const sol = caja.solicitante || {};
-    const FILAS_MIN = 12;
-    const vacias = Math.max(0, FILAS_MIN - detalles.length);
+    /* Antes se rellenaba hasta 12 filas «por si acaso». Con eso el formato
+       llegaba al borde de la hoja y cualquier caja con varios conceptos —o con
+       un gasto repartido, que ocupa una fila por municipio— se pasaba a una
+       segunda página que salía casi en blanco. Bastan dos renglones libres
+       para anotar algo a mano; si ya hay muchas líneas, ninguno. */
+    const vacias = Math.max(0, Math.min(2, 14 - detalles.length));
 
     const logo = cfg.logoDataUrl
       ? '<img src="' + attr(cfg.logoDataUrl) + '" alt="">'
@@ -10555,6 +10559,22 @@ const Documento = {
     /* Para qué es el dinero: la categoría del gasto. Gasolina y aceite no
        cuentan aquí —son partes del total de una caja menor, no el motivo—,
        salvo que la caja no tenga ninguna otra cosa. */
+    /* Dónde se prestó el servicio. Si el gasto se repartió, la ubicación de
+       la caja no lo cuenta: puede decir «No aplica» mientras el trabajo se hizo
+       en tres municipios. Manda lo que dicen las líneas. */
+    const ubicacionDe = c => {
+      const ds = (detsPorCaja && detsPorCaja.get(c.id)) || [];
+      const out = [];
+      for (const d of ds) {
+        const n = d.municipioId ? MunicipioRepo.nombre(d.municipioId) : '';
+        if (n && out.indexOf(n) < 0) out.push(n);
+      }
+      if (!out.length) return c.municipioNombre || '';
+      /* Con una sola, se escribe tal cual. Con varias, se listan: es
+         exactamente el dato que Fabián necesita para saber qué está pagando. */
+      return out.join(' · ');
+    };
+
     const categoriaDe = c => {
       const ds = (detsPorCaja && detsPorCaja.get(c.id)) || [];
       const propias = [], subs = [];
@@ -10586,14 +10606,14 @@ const Documento = {
         '</div></div>' : '') +
       '<table class="dp-tbl rr-tbl"><thead><tr>' +
         '<th style="width:26mm">NÚMERO</th><th style="width:17mm">FECHA</th>' +
-        '<th>CONCEPTO</th><th style="width:30mm">CATEGORÍA</th><th style="width:28mm">UBICACIÓN</th>' +
+        '<th>CONCEPTO</th><th style="width:28mm">CATEGORÍA</th><th style="width:34mm">UBICACIÓN</th>' +
         '<th style="width:26mm">TOTAL</th><th style="width:26mm">PENDIENTE</th></tr></thead><tbody>' +
       lista.map(c => '<tr>' +
         '<td>' + esc(c.numero) + '</td>' +
         '<td class="c">' + Fecha.corta(c.fecha) + '</td>' +
         '<td>' + esc(Comp.nombreSolicitante(c)) + '</td>' +
         '<td>' + esc(categoriaDe(c)) + '</td>' +
-        '<td>' + esc(c.municipioNombre || '') + '</td>' +
+        '<td>' + esc(ubicacionDe(c)) + '</td>' +
         '<td class="n">' + Money.format(c.total) + '</td>' +
         '<td class="n">' + Money.format(pendDe(c)) + '</td></tr>').join('') +
       (variosGrupos
@@ -10661,6 +10681,8 @@ const Documento = {
         };
       }
     });
+    /* Se devuelve lo compuesto: asi puede comprobarse sin abrir la ventana. */
+    return html;
   },
 
   /* =======================================================================
@@ -14328,6 +14350,50 @@ const Pruebas = {
             Pruebas.ok(/Vr\. unitario/.test(await pintar(conCant)),
               'Pero donde si hay cantidad, siguen saliendo');
             Pruebas.ok(!/pill np p-blue">PARTE</.test(htmlSimple), 'Ni la marca');
+          } },
+
+        { nombre: 'CRÍTICO · la relación para Fabián dice los municipios del reparto', fn: async ctx => {
+            /* La caja repartida puede tener «No aplica» como ubicación, porque
+               como caja no es de ningún municipio en concreto. En la relación
+               eso no sirve: Fabián necesita saber dónde se prestó el servicio. */
+            const caja = ctx.cajaReparto;
+            const dets = new Map([[caja.id, await CajaRepo.detalles(caja.id)]]);
+            /* Abre una ventana; se cierra enseguida y se comprueba lo compuesto. */
+            const html = Documento.resumenReembolso([caja], new Map(), dets);
+            Modal.cerrarTop();
+            Pruebas.ok(/Apartadó/.test(html) && /Andes/.test(html) && /Caucasia/.test(html),
+              'Salen los tres municipios del reparto');
+            Pruebas.ok(!/No aplica/.test(html), 'Y no el «No aplica» de la caja');
+          } },
+
+        { nombre: 'El formato impreso no gasta media hoja en renglones vacíos', fn: async ctx => {
+            /* Se rellenaba hasta 12 filas: el formato llegaba al borde y una
+               caja con varias líneas se pasaba a una segunda hoja casi blanca. */
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const una = await CajaService.crear({
+              fecha: '2026-09-08', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
+              detalles: [{ categoriaId: cm.id, elemento: 'Lima', valor: 3000000 }]
+            });
+            const doc1 = await Documento.construir(una);
+            Pruebas.igual((doc1.match(/class="empty-r"/g) || []).length, 2,
+              'Con un solo gasto quedan dos renglones para escribir a mano');
+
+            const muchos = [];
+            for (let i = 0; i < 15; i++)
+              muchos.push({ categoriaId: cm.id, elemento: 'Artículo ' + i, valor: 100000 });
+            const llena = await CajaService.crear({
+              fecha: '2026-09-08', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
+              detalles: muchos
+            });
+            const doc2 = await Documento.construir(llena);
+            Pruebas.igual((doc2.match(/class="empty-r"/g) || []).length, 0,
+              'Con la hoja llena no se añade ni uno más');
+
+            /* Y el gasto repartido, que ocupa una fila por municipio, tampoco
+               se dispara. */
+            const doc3 = await Documento.construir(ctx.cajaReparto);
+            Pruebas.ok((doc3.match(/class="empty-r"/g) || []).length <= 2,
+              'El repartido tampoco llena la hoja de renglones');
           } },
 
         { nombre: 'El desglose y el impreso dicen a dónde fue cada parte', fn: async ctx => {
