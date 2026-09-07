@@ -2046,6 +2046,10 @@ const Modelo = {
     const nombre = String(p.nombre || '').trim();
     return {
       id: p.id || ID.persona(),
+      /* Cada contrato tiene su propia lista: dos contratos distintos pueden
+         tener personas, categorías o municipios con el mismo nombre sin
+         estorbarse. Se rellena solo al guardar, con el contrato activo. */
+      contratoId: p.contratoId || null,
       nombre,
       nombreNorm: Txt.norm(nombre),
       /* El número va en `cedula` desde el primer día; renombrarlo rompería el
@@ -2075,6 +2079,10 @@ const Modelo = {
     const nombre = String(p.nombre || '').trim();
     return {
       id: p.id || ID.municipio(),
+      /* Cada contrato tiene su propia lista: dos contratos distintos pueden
+         tener personas, categorías o municipios con el mismo nombre sin
+         estorbarse. Se rellena solo al guardar, con el contrato activo. */
+      contratoId: p.contratoId || null,
       nombre,
       nombreNorm: Txt.norm(nombre),
       departamento: p.departamento || 'Antioquia',
@@ -2092,6 +2100,10 @@ const Modelo = {
     const nombre = String(p.nombre || '').trim();
     return {
       id: p.id || ID.categoria(),
+      /* Cada contrato tiene su propia lista: dos contratos distintos pueden
+         tener personas, categorías o municipios con el mismo nombre sin
+         estorbarse. Se rellena solo al guardar, con el contrato activo. */
+      contratoId: p.contratoId || null,
       nombre,
       nombreNorm: Txt.norm(nombre),
       /** rol estadístico especial: GASOLINA | ACEITE | <clave libre> | null */
@@ -3148,6 +3160,28 @@ const ContratoRepo = {
   activoId() { const c = this.activo(); return c ? c.id : null; },
   nombre(id) { const c = this.get(id); return c ? c.nombre : ''; },
 
+  /**
+   * Un contrato recién creado no tiene catálogos propios y arrancaría vacío:
+   * sin municipios donde elegir y sin categorías. Se le instalan los mismos de
+   * fábrica, que a partir de ahí son suyos y puede cambiar a su gusto sin que
+   * eso afecte a los demás contratos.
+   */
+  async sembrarCatalogos(contratoId) {
+    const tiene = col => [...Cache[col].values()].some(x => x.contratoId === contratoId);
+    if (!tiene('municipios')) {
+      const lista = Semillas.MUNICIPIOS.map(n =>
+        Modelo.municipio({ nombre: n, origen: Origen.SISTEMA, contratoId }));
+      lista.push(Modelo.municipio({ nombre: VALOR_NO_APLICA, origen: Origen.SISTEMA,
+        esNoAplica: 1, departamento: '', contratoId }));
+      await db.putMany('municipios', lista);
+    }
+    if (!tiene('categorias')) {
+      await db.putMany('categorias', Semillas.CATEGORIAS.map(c =>
+        Modelo.categoria(Object.assign({ origen: Origen.SISTEMA, contratoId }, c))));
+    }
+    await Cache.cargar();
+  },
+
   async cambiarActivo(id) {
     if (!this.get(id)) throw new ErrorDominio('Contrato no encontrado.', 'NO_EXISTE');
     await ConfigRepo.guardar({ contratoActivoId: id });
@@ -3165,6 +3199,7 @@ const ContratoRepo = {
     if (dup && dup.id !== c.id) throw new ErrorDominio('Ya existe un contrato llamado "' + c.nombre + '".', 'DUPLICADO');
     await db.put('contratos', c);
     Cache.contratos.set(c.id, c);
+    if (!previo) await this.sembrarCatalogos(c.id);
     await Auditoria.registrar('contrato', c.id, previo ? 'ACTUALIZAR' : 'CREAR', { nombre: c.nombre });
     Bus.emit('contratos:cambio', c);
     return c;
@@ -3206,8 +3241,30 @@ const ConfigRepo = {
   }
 };
 
+/**
+ * Los tres catálogos —personas, categorías y municipios— son de cada contrato.
+ *
+ * El filtro se aplica en UN solo sitio por catálogo: la función que devuelve la
+ * lista completa. Todo lo demás —activas, solicitantes, buscar por nombre,
+ * comprobar duplicados— pasa por ahí y lo hereda.
+ *
+ * Buscar por identificador NO filtra, a propósito: una caja de otro contrato
+ * puede nombrar a una persona suya, y ese nombre tiene que poder resolverse
+ * para enseñarlo. Se filtra lo que se OFRECE, no lo que se consulta.
+ */
+function delContratoActivo(lista) {
+  const ctrId = ContratoRepo.activoId();
+  if (!ctrId) return lista;
+  return lista.filter(x => x.contratoId === ctrId);
+}
+/** Sella con el contrato activo lo que se guarde sin contrato propio. */
+function sellarContrato(x) {
+  if (!x.contratoId) x.contratoId = ContratoRepo.activoId() || null;
+  return x;
+}
+
 const PersonaRepo = {
-  todas() { return [...Cache.personas.values()]; },
+  todas() { return delContratoActivo([...Cache.personas.values()]); },
   activas() { return this.todas().filter(p => p.estado === Estado.ACTIVO); },
   solicitantes() { return this.activas().filter(p => p.esSolicitante).sort(U.by('nombre')); },
   financiadores() { return this.activas().filter(p => p.esFinanciador).sort(U.by('nombre')); },
@@ -3233,7 +3290,7 @@ const PersonaRepo = {
   async guardar(datos) {
     const previa = datos.id ? Cache.personas.get(datos.id) : null;
     // se valida el modelo ya normalizado (con sus valores por defecto), no la entrada cruda
-    const p = Modelo.persona(Object.assign({}, previa || {}, datos));
+    const p = sellarContrato(Modelo.persona(Object.assign({}, previa || {}, datos)));
     const errores = Validar.persona(p);
     if (errores.length) throw new ErrorValidacion(errores);
     const dup = this.porNombre(p.nombre);
@@ -3274,14 +3331,14 @@ const PersonaRepo = {
 };
 
 const MunicipioRepo = {
-  todos() { return [...Cache.municipios.values()].sort(U.by('nombre')); },
+  todos() { return delContratoActivo([...Cache.municipios.values()]).sort(U.by('nombre')); },
   activos() { return this.todos().filter(m => m.estado === Estado.ACTIVO); },
   get(id) { return Cache.municipios.get(id) || null; },
   nombre(id) { const m = this.get(id); return m ? m.nombre : ''; },
   porNombre(n) { const x = Txt.norm(n); return this.todos().find(m => m.nombreNorm === x) || null; },
   async guardar(datos) {
     const previo = datos.id ? Cache.municipios.get(datos.id) : null;
-    const m = Modelo.municipio(Object.assign({}, previo || {}, datos));
+    const m = sellarContrato(Modelo.municipio(Object.assign({}, previo || {}, datos)));
     const e = Validar.municipio(m);
     if (e.length) throw new ErrorValidacion(e);
     const dup = this.porNombre(m.nombre);
@@ -3312,7 +3369,8 @@ const MunicipioRepo = {
 };
 
 const CategoriaRepo = {
-  todas() { return [...Cache.categorias.values()].sort((a, b) => (a.orden - b.orden) || a.nombre.localeCompare(b.nombre, 'es')); },
+  todas() { return delContratoActivo([...Cache.categorias.values()])
+    .sort((a, b) => (a.orden - b.orden) || a.nombre.localeCompare(b.nombre, 'es')); },
   activas() { return this.todas().filter(c => c.estado === Estado.ACTIVO); },
   estadisticas() { return this.todas().filter(c => c.estadistica); },
   get(id) { return Cache.categorias.get(id) || null; },
@@ -3321,7 +3379,7 @@ const CategoriaRepo = {
   porRol(rol) { return this.todas().find(c => c.rol === rol) || null; },
   async guardar(datos) {
     const previa = datos.id ? Cache.categorias.get(datos.id) : null;
-    const c = Modelo.categoria(Object.assign({}, previa || {}, datos));
+    const c = sellarContrato(Modelo.categoria(Object.assign({}, previa || {}, datos)));
     const e = Validar.categoria(c);
     if (e.length) throw new ErrorValidacion(e);
     const dup = this.porNombre(c.nombre);
@@ -4498,6 +4556,27 @@ const Analitica = (() => {
   return {
     invalidar,
     async vista() { return obtener(); },
+
+    /**
+     * Los documentos del contrato activo.
+     *
+     * Un documento no lleva contrato propio: lo hereda de la caja o de la
+     * consignación de la que cuelga. Antes se contaban y se listaban TODOS, así
+     * que al cambiar de contrato seguían apareciendo los soportes del anterior.
+     *
+     * Los que no cuelgan de nada se ven siempre: no son de ningún contrato y
+     * esconderlos sería perderlos de vista para siempre.
+     */
+    async documentosDelContrato() {
+      const v = await obtener();
+      const cons = new Set(v.consignaciones.map(c => c.id));
+      const todos = await db.getAll('documentos');
+      return todos.filter(d =>
+        d.estado === Estado.ACTIVO && (
+          (d.cajaId && v.cajaPorId.has(d.cajaId)) ||
+          (d.consignacionId && cons.has(d.consignacionId)) ||
+          (!d.cajaId && !d.consignacionId)));
+    },
 
     /** Consulta principal: devuelve KPIs + todas las agrupaciones para un filtro */
     async consultar(filtros) {
@@ -5911,11 +5990,14 @@ const Shell = {
     try {
       const ctrId = ContratoRepo.activoId();
       // tres conteos independientes: se piden a la vez, no en fila
-      const [cajas, consignaciones, documentos] = await Promise.all([
+      const [cajas, consignaciones, docs] = await Promise.all([
         ctrId ? db.count('cajas', 'contratoId', ctrId) : db.count('cajas'),
         ctrId ? db.count('consignaciones', 'contratoId', ctrId) : db.count('consignaciones'),
-        db.count('documentos')
+        /* Los documentos no llevan contrato propio: se cuentan los que cuelgan
+           de algo de ESTE contrato, igual que los lista el expediente. */
+        Analitica.documentosDelContrato()
       ]);
+      const documentos = docs.length;
       this.conteos = {
         cajas, consignaciones, documentos,
         personas: PersonaRepo.activas().length,
@@ -6409,6 +6491,19 @@ const VistaDashboard = {
 /* ==========================================================================
    VISTA · CAJAS MENORES (listado)
    ========================================================================== */
+/* Lo marcado pertenece a las cajas de UN contrato: al cambiar de contrato hay
+   que olvidarlo, o la barra sigue diciendo «12 cajas marcadas · $3.141.500»
+   sobre cajas que ya ni se ven.
+
+   Se suscribe aquí, junto a la propia selección, y no en el arranque: así no
+   depende de que el arranque llegue hasta el final para que funcione. */
+Bus.on('contrato:cambio', () => {
+  VistaCajas.seleccion.clear();
+  /* Y se borra la barra en el acto, sin esperar a que el listado se redibuje:
+     si ya se estaba mirando, seguiría anunciando un total del contrato viejo. */
+  VistaCajas.refrescarSeleccion();
+});
+
 const VistaCajas = {
   /* Qué cajas están marcadas. Vive fuera de los filtros porque sobrevive a
      repintados y a cambios de página: se puede marcar en la página 1, pasar a
@@ -9931,7 +10026,9 @@ const VistaExpediente = {
     Shell.titulo('Expediente documental', 'Todos los soportes del contrato');
     cont.innerHTML = Comp.cargando();
     const f = this.filtros;
-    const todos = (await db.getAll('documentos')).filter(d => d.estado === Estado.ACTIVO);
+    /* El título dice «Todos los soportes del contrato» y hasta ahora mentía:
+       listaba también los de los demás contratos. */
+    const todos = await Analitica.documentosDelContrato();
     const v = await Analitica.vista();
     const consPorId = new Map(v.consignaciones.map(c => [c.id, c]));
     const q = Txt.norm(f.texto);
@@ -12706,6 +12803,8 @@ const Migracion = {
     T('');
     T('create table if not exists municipios (');
     T('  id text primary key, nombre text not null, nombre_norm text, departamento text,');
+    T('  -- cada contrato tiene su propia lista');
+    T('  contrato_id text references contratos(id) on delete cascade,');
     T("  estado text not null default 'ACTIVO', es_no_aplica boolean default false,");
     T("  origen text default 'MANUAL', legacy jsonb,");
     T('  creado_en timestamptz default now(), actualizado_en timestamptz default now()');
@@ -12714,6 +12813,8 @@ const Migracion = {
     T('');
     T('create table if not exists personas (');
     T('  id text primary key, nombre text not null, nombre_norm text, cedula text,');
+    T('  -- cada contrato tiene su propia lista');
+    T('  contrato_id text references contratos(id) on delete cascade,');
     T("  tipo_documento text default 'Cédula',");
     T('  banco text, tipo_cuenta text, numero_cuenta text,');
     T('  municipio_id text references municipios(id) on delete set null,');
@@ -12727,6 +12828,8 @@ const Migracion = {
     T('');
     T('create table if not exists categorias (');
     T('  id text primary key, nombre text not null, nombre_norm text, rol text,');
+    T('  -- cada contrato tiene su propia lista');
+    T('  contrato_id text references contratos(id) on delete cascade,');
     T('  estadistica boolean default false, color text, descripcion text, orden int default 100,');
     T("  estado text not null default 'ACTIVO', sistema boolean default false, origen text default 'MANUAL',");
     T('  creado_en timestamptz default now(), actualizado_en timestamptz default now()');
@@ -15097,6 +15200,117 @@ const Pruebas = {
                 'El desplegable y la etiqueta del archivo dicen lo mismo: ' + d.titulo);
           } },
 
+        { nombre: 'CRÍTICO · cada contrato tiene sus propios catálogos', fn: async ctx => {
+            /* Personas, categorias y municipios eran listas compartidas. Ahora
+               cada contrato tiene las suyas: dos contratos pueden tener el
+               mismo nombre sin estorbarse, y lo de uno no asoma en el otro. */
+            const original = ContratoRepo.activoId();
+            const antesP = PersonaRepo.todas().length;
+            const antesC = CategoriaRepo.todas().length;
+            const antesM = MunicipioRepo.todos().length;
+            Pruebas.ok(antesM > 0, 'El contrato de origen tiene municipios');
+            const otro = await ContratoRepo.guardar({ nombre: 'CONTRATO APARTE',
+              prefijoCaja: 'AP', prefijoConsignacion: 'APC' });
+            try {
+              const propia = await PersonaRepo.guardar({ nombre: 'Persona Sólo Del Primero',
+                esSolicitante: 1 });
+              Pruebas.ok(PersonaRepo.todas().some(x => x.id === propia.id),
+                'La persona se ve en el contrato donde se creó');
+
+              await ContratoRepo.cambiarActivo(otro.id);
+              Pruebas.ok(!PersonaRepo.todas().some(x => x.id === propia.id),
+                'Y NO se ve desde el otro contrato');
+              /* Pero se sigue pudiendo resolver por identificador: una caja del
+                 primer contrato la nombra y hay que poder enseñar ese nombre. */
+              Pruebas.ok(Boolean(PersonaRepo.get(propia.id)),
+                'Aunque por identificador se sigue resolviendo, para el histórico');
+
+              /* Un contrato nuevo nace con sus propios catálogos de fábrica. */
+              Pruebas.ok(MunicipioRepo.todos().length > 0,
+                'El contrato nuevo nace con sus municipios');
+              Pruebas.ok(CategoriaRepo.todas().length > 0, 'Y con sus categorías');
+              Pruebas.igual(PersonaRepo.todas().length, 0,
+                'Pero sin personas: ésas se crean para cada contrato');
+
+              /* Y el mismo nombre en los dos ya no choca. */
+              const gemela = await PersonaRepo.guardar({ nombre: 'Persona Sólo Del Primero',
+                esSolicitante: 1 });
+              Pruebas.ok(gemela.id !== propia.id,
+                'El mismo nombre se admite en otro contrato: son personas distintas');
+              Pruebas.igual(gemela.contratoId, otro.id, 'Y queda sellada con su contrato');
+
+              /* Nada se perdió: en la base están las de los dos. */
+              const todasEnLaBase = await db.getAll('personas');
+              Pruebas.ok(todasEnLaBase.some(x => x.id === propia.id) &&
+                         todasEnLaBase.some(x => x.id === gemela.id),
+                'Las dos siguen guardadas, cada una con su dueño');
+
+              await ContratoRepo.cambiarActivo(original);
+              Pruebas.igual(PersonaRepo.todas().length, antesP + 1,
+                'Al volver, el primer contrato ve las suyas y sólo las suyas');
+              Pruebas.igual(CategoriaRepo.todas().length, antesC, 'Sus categorías intactas');
+              Pruebas.igual(MunicipioRepo.todos().length, antesM, 'Y sus municipios');
+            } finally { await ContratoRepo.cambiarActivo(original); }
+          } },
+
+        { nombre: 'CRÍTICO · al cambiar de contrato no queda nada del anterior', fn: async ctx => {
+            /* Al cambiar de contrato seguian saliendo las cajas marcadas del
+               anterior («12 cajas · $3.141.500») y los soportes documentales,
+               porque un documento no lleva contrato propio: lo hereda de la
+               caja de la que cuelga, y nadie lo estaba mirando. */
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const original = ContratoRepo.activoId();
+            const otro = await ContratoRepo.guardar({ nombre: 'CONTRATO DE PRUEBA',
+              prefijoCaja: 'PR', prefijoConsignacion: 'PRC' });
+            let sem = 0;
+            const cajas = [];
+            try {
+              for (let i = 0; i < 3; i++) {
+                const c = await CajaService.crear({
+                  fecha: '2026-09-18', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
+                  estado: EstadoCaja.CONSIGNADA,
+                  detalles: [{ categoriaId: cm.id, elemento: 'Varios', valor: 10000000 }]
+                });
+                cajas.push(c);
+                await Expediente.subir([new File([new Uint8Array([37, 80, 68, 70, ++sem])],
+                  'sop' + i + '.pdf', { type: 'application/pdf' })],
+                  { cajaId: c.id, tipo: TipoDocumento.SOPORTE_COMPRA });
+              }
+              Analitica.invalidar();
+              const docsAntes = await Analitica.documentosDelContrato();
+              Pruebas.ok(docsAntes.length >= 3, 'El contrato de origen ve sus soportes');
+
+              cajas.forEach(c => VistaCajas.seleccion.add(c.id));
+              Pruebas.igual(VistaCajas.seleccion.size, 3, 'Tres cajas marcadas');
+
+              await ContratoRepo.cambiarActivo(otro.id);
+              Pruebas.igual(VistaCajas.seleccion.size, 0,
+                'Al cambiar de contrato se olvida lo marcado del anterior');
+
+              Analitica.invalidar();
+              const docsDespues = await Analitica.documentosDelContrato();
+              Pruebas.igual(docsDespues.length, 0,
+                'Y el contrato nuevo no ve los soportes del otro');
+              /* Pero los documentos NO se borraron: siguen en la base. */
+              const enLaBase = (await db.getAll('documentos')).length;
+              Pruebas.ok(enLaBase >= 3, 'Los soportes siguen guardados, sólo no se muestran aquí');
+
+              await ContratoRepo.cambiarActivo(original);
+              Analitica.invalidar();
+              Pruebas.ok((await Analitica.documentosDelContrato()).length >= 3,
+                'Y al volver al contrato de origen reaparecen');
+            } finally {
+              await ContratoRepo.cambiarActivo(original);
+              Analitica.invalidar();
+              VistaCajas.seleccion.clear();
+            }
+
+            /* El olvido vive junto a la selección, no en el arranque: así no
+               depende de que el arranque llegue hasta el final. */
+            const src = VistaCajas.refrescarSeleccion.toString();
+            Pruebas.ok(src.length > 0, 'La selección sabe repintarse sola');
+          } },
+
         { nombre: 'CRÍTICO · cambiar el tema no deja la pantalla en blanco', fn: async () => {
             /* Cambiar el tema desde Configuración redibujaba la carcasa entera,
                y eso REEMPLAZA el contenedor de la vista: lo que se pintaba
@@ -16071,6 +16285,29 @@ const Semillas = {
           cuenta[k] = (cuenta[k] || 0) + 1;
         }
         console.info('[migración v3] estados actualizados:', cuenta);
+      }
+    }
+
+    /* --- migración v4: catálogos de cada contrato ------------------------
+       Personas, categorías y municipios pasaron a pertenecer a un contrato.
+       Lo que se creó antes no lleva ninguno y, sin dueño, no aparecería en
+       ninguna parte. Se asigna al contrato MÁS ANTIGUO, que es de donde de
+       verdad salió: cuando esto se estrena sólo había uno.
+
+       Va aquí y no antes porque necesita que el contrato ya exista y que los
+       catálogos de fábrica ya estén sembrados. Es idempotente: en el segundo
+       arranque ya no queda nada sin dueño y no hace nada. */
+    {
+      const primero = (await db.getAll('contratos')).slice().sort(U.by('creadoEn'))[0];
+      if (primero) {
+        for (const col of ['personas', 'categorias', 'municipios']) {
+          const sinDueno = (await db.getAll(col)).filter(x => !x.contratoId);
+          if (!sinDueno.length) continue;
+          sinDueno.forEach(x => { x.contratoId = primero.id; });
+          await db.putMany(col, sinDueno);
+          console.info('[migración v4] ' + sinDueno.length + ' ' + col +
+            ' asignados a «' + primero.nombre + '».');
+        }
       }
     }
 
