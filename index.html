@@ -536,8 +536,6 @@ html[data-theme="dark"] .dias.d-aviso{color:#f0b942}
 .marca+.marca{margin-left:2px}
 /* La legalización usa el mismo par ✓/⚠ que el comprobante, en otro color, para
    que de un vistazo se distingan las dos cosas que hay que poder probar. */
-.marca.m-fact{background:var(--viol-50,#f2eefc);color:var(--viol-600,#6d4aca)}
-html[data-theme="dark"] .marca.m-fact{background:rgba(109,74,202,.20);color:#bda6f5}
 .marca.m-legal{background:var(--info-50);color:var(--info-600)}
 .marca.m-sinlegal{background:var(--warn-50);color:var(--warn-700)}
 html[data-theme="dark"] .marca.m-legal{background:rgba(56,132,255,.16);color:#8fbcff}
@@ -683,6 +681,9 @@ html[data-theme="dark"] .preview-shell{background:#0a0f13}
 .rr-tbl td,.rr-tbl th{font-size:8pt;padding:1.2mm 1.8mm}
 .rr-sub td{background:#f2f2f2;font-weight:700}
 .rr-tot td{background:#e6e6e6;font-weight:800}
+/* La cuenta donde hay que consignar, debajo del total. */
+.rr-cta td{background:#fff;font-size:8pt;font-weight:400;line-height:1.5;padding:1.6mm 1.8mm}
+.rr-num{font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:700;letter-spacing:.2px}
 
 @media print{
   @page{size:letter;margin:0}
@@ -708,6 +709,7 @@ html[data-theme="dark"] .preview-shell{background:#0a0f13}
   .rr-tbl td,.rr-tbl th{font-size:7.5pt;padding:1.1mm 1.6mm}
   .rr-sub td{background:#f2f2f2;font-weight:700}
   .rr-tot td{background:#e6e6e6;font-weight:800;font-size:8.5pt}
+  .rr-cta td{background:#fff;font-weight:400;font-size:7.8pt;line-height:1.45;padding:1.5mm 1.6mm}
   .doc-firmas{display:flex;gap:40px;margin-top:34px;font-size:10px}
   .doc-firmas div{flex:1}
   .doc-firmas span{display:block;border-top:1px solid #333;margin-bottom:4px}
@@ -1917,7 +1919,6 @@ const TipoDocumento = Object.freeze({
   FORMATO_CAJA: 'FORMATO_CAJA',
   COMPROBANTE_CONSIGNACION: 'COMPROBANTE_CONSIGNACION',
   SOPORTE_COMPRA: 'SOPORTE_COMPRA',
-  FACTURA: 'FACTURA',
   RECIBO: 'RECIBO',
   FORMATO_COMPRAS: 'FORMATO_COMPRAS',
   OTRO: 'OTRO'
@@ -1926,47 +1927,45 @@ const TIPO_DOC_META = {
   FORMATO_CAJA:             { label: 'Formato de caja menor', icono: 'doc',    color: 'p-blue' },
   COMPROBANTE_CONSIGNACION: { label: 'Comprobante de la transferencia', icono: 'banco', color: 'p-green' },
   SOPORTE_COMPRA:           { label: 'Legalización del gasto', icono: 'file',  color: 'p-amber' },
-  FACTURA:                  { label: 'Factura del proveedor', icono: 'file',   color: 'p-violet' },
   RECIBO:                   { label: 'Recibo',                icono: 'file',   color: 'p-gray' },
   FORMATO_COMPRAS:          { label: 'Formato de compras',    icono: 'doc',    color: 'p-blue' },
   OTRO:                     { label: 'Otro',                  icono: 'folder', color: 'p-gray' }
 };
 
 /**
- * Los papeles de una caja menor son de TRES momentos distintos y no deben
- * amontonarse, porque prueban cosas diferentes:
+ * Los papeles de una caja menor son de DOS momentos, y prueban cosas distintas:
  *
- *  1. ANTES de girar — la factura o la cotización del taller. Es lo que
- *     justifica por qué hay que consignar ese monto y no otro.
- *  2. El GIRO — el comprobante de la transferencia de quien adelanta el dinero.
- *  3. DESPUÉS de gastar — lo que envía el líder cuando ya usó la plata:
- *     facturas y recibos de lo que compró. Es la legalización del gasto.
+ *  1. El GIRO — el comprobante de la transferencia de quien adelanta el dinero.
+ *  2. DESPUÉS de gastar — lo que justifica en qué se usó: la factura del
+ *     taller, los recibos que envía el líder. Es la legalización del gasto.
  *
- * El formato generado por el sistema no es de ninguno de los tres.
+ * Hubo un tercero, «Factura del proveedor», para el papel que llegaba ANTES de
+ * girar y justificaba el monto. Se quitó: en la práctica esa factura ES la que
+ * legaliza el gasto, así que tenerla aparte obligaba a subir dos veces lo
+ * mismo o dejaba la caja marcada como sin legalizar teniendo su soporte
+ * delante. Lo que se subió como factura del proveedor pasó a legalización.
+ *
+ * El formato generado por el sistema no es de ninguno de los dos.
  */
-const DOCS_ANTICIPO = [TipoDocumento.FACTURA];
 const DOCS_DEL_GIRO = [TipoDocumento.COMPROBANTE_CONSIGNACION];
 const DOCS_GENERADOS = [TipoDocumento.FORMATO_CAJA];
-/* Los tres destinos, en el orden en que ocurren. De aquí salen tanto el
-   desplegable del formulario como las tarjetas de la caja. */
-/* El NOMBRE de cada uno se escribe una sola vez, en TIPO_DOC_META, y de ahí
-   sale para todas partes: el desplegable al adjuntar, el título de la tarjeta
-   y la etiqueta del archivo ya subido. Antes el nombre estaba escrito dos
-   veces y se elegía «Soporte del anticipo» para que el archivo apareciera
-   luego como «Factura del proveedor»: dos nombres para la misma cosa.
-   Lo que cambia entre ellos es CUÁNDO ocurre, y eso va en el subtítulo. */
+/* Los dos destinos, en el orden en que ocurren. De aquí salen tanto el
+   desplegable del formulario como las tarjetas de la caja. El NOMBRE de cada
+   uno se escribe una sola vez, en TIPO_DOC_META, y de ahí sale para todas
+   partes; lo que cambia entre ellos es CUÁNDO ocurre, y eso va en el
+   subtítulo. */
 const DESTINOS_DOC = [
-  { tipo: TipoDocumento.FACTURA,
-    cuando: 'Antes de girar · justifica el monto' },
   { tipo: TipoDocumento.COMPROBANTE_CONSIGNACION,
     cuando: 'El giro · prueba que el dinero se envió' },
   { tipo: TipoDocumento.SOPORTE_COMPRA,
     cuando: 'Después de gastar · en qué se usó la plata' }
 ].map(d => Object.assign(d, { titulo: TIPO_DOC_META[d.tipo].label }));
-const esDocAnticipo = d => DOCS_ANTICIPO.includes(d.tipo);
 const esDocDelGiro = d => DOCS_DEL_GIRO.includes(d.tipo);
-const esDocLegalizacion = d => !esDocAnticipo(d) && !esDocDelGiro(d) &&
-                               !DOCS_GENERADOS.includes(d.tipo);
+/* Todo lo que no sea el comprobante del giro ni el formato que genera el
+   programa legaliza el gasto. Así, un documento antiguo guardado como
+   «FACTURA» cuenta como legalización aunque su fila todavía no se haya
+   convertido: por ejemplo al restaurar un respaldo viejo. */
+const esDocLegalizacion = d => !esDocDelGiro(d) && !DOCS_GENERADOS.includes(d.tipo);
 
 /** Roles estadísticos: gasolina y aceite vienen de fábrica, el resto los crea el usuario */
 const RolEstadistico = Object.freeze({ GASOLINA: 'GASOLINA', ACEITE: 'ACEITE' });
@@ -2542,6 +2541,15 @@ const Nube = {
     const campo = partes[partes.length - 1];
     const legible = { nombre: 'nombre', cedula: 'cédula', numero: 'número',
                       codigo: 'código', correo: 'correo', clave: 'clave' }[campo] || campo;
+    /* Los catálogos son de cada contrato desde hace poco. Si la nube rechaza un
+       nombre que en ESTE contrato no existe, es que su base todavía tiene la
+       regla antigua —única en toda la tabla— y falta correr la actualización.
+       Decirlo aquí ahorra buscar a ciegas. */
+    const tabla = partes.length > 1 ? partes[1] : '';
+    if (campo === 'nombre' && ['personas', 'categorias', 'municipios'].includes(tabla))
+      return new ErrorDominio('La nube rechazó el nombre por repetido. Si en este contrato no ' +
+        'existe, su base de datos todavía tiene la regla antigua: ejecute «actualizacion-columnas.sql» ' +
+        'en Supabase para que el nombre sea único por contrato y no en toda la base.', 'DUPLICADO');
     return new ErrorDominio('Ya existe un registro con ese ' + legible +
       '. No se guardó para no duplicarlo.', 'DUPLICADO');
   },
@@ -3285,7 +3293,11 @@ const PersonaRepo = {
     const cfg = ConfigRepo.get() || {};
     const id = ctr.financiadorPorDefectoId || cfg.financiadorPorDefectoId;
     const p = id ? this.get(id) : null;
-    if (p && p.estado === Estado.ACTIVO) return p;
+    /* Tiene que ser de ESTE contrato: la configuración recuerda un identificador
+       que puede apuntar a una persona del contrato de al lado, y proponerla
+       aquí sería ofrecer a alguien que en esta lista no existe. */
+    const ctrId = ContratoRepo.activoId();
+    if (p && p.estado === Estado.ACTIVO && (!ctrId || p.contratoId === ctrId)) return p;
     return this.financiadores()[0] || null;
   },
   get(id) { return Cache.personas.get(id) || null; },
@@ -3384,6 +3396,26 @@ const CategoriaRepo = {
     .sort((a, b) => (a.orden - b.orden) || a.nombre.localeCompare(b.nombre, 'es')); },
   activas() { return this.todas().filter(c => c.estado === Estado.ACTIVO); },
   estadisticas() { return this.todas().filter(c => c.estadistica); },
+  /**
+   * Los conceptos que el panel de ESTE contrato debe enseñar.
+   *
+   * Marcada como medible no basta: un contrato que heredó «Gasolina» y
+   * «Aceite» pero nunca ha comprado ni un litro no gana nada con dos tarjetas
+   * en cero. Sale lo que se usa de verdad, mirando TODO el histórico del
+   * contrato y no el período elegido: si no, filtrar por un mes flojo haría
+   * desaparecer tarjetas y volver a aparecer al mes siguiente.
+   */
+  seguidasEnPanel(detallesDelContrato) {
+    const cats = this.estadisticas().slice().sort(U.by('orden'));
+    if (!detallesDelContrato) return cats;
+    const conRol = new Set(), conCat = new Set();
+    for (const d of detallesDelContrato) {
+      if (!d.valor) continue;
+      if (d.rol) conRol.add(d.rol);
+      if (d.categoriaId) conCat.add(d.categoriaId);
+    }
+    return cats.filter(c => (c.rol && conRol.has(c.rol)) || conCat.has(c.id));
+  },
   get(id) { return Cache.categorias.get(id) || null; },
   nombre(id) { const c = this.get(id); return c ? c.nombre : ''; },
   porNombre(n) { const x = Txt.norm(n); return this.todas().find(c => c.nombreNorm === x) || null; },
@@ -3688,6 +3720,41 @@ const Finanzas = {
     const dias = Fecha.diasEntre(caja.fecha);
     const nivel = dias >= this.DIAS_ALARMA ? 'alarma' : dias >= this.DIAS_AVISO ? 'aviso' : '';
     return { dias, nivel, pendiente: pend };
+  },
+
+  /**
+   * Reparte el gasto entre los conceptos que un contrato quiere seguir.
+   *
+   * El panel enseñaba siempre gasolina y aceite, escritos a fuego. En un
+   * contrato de un hospital eso son dos tarjetas en cero y un «otros
+   * conceptos» que repite el total: ruido en el sitio donde primero se mira.
+   * Ahora manda lo que cada contrato marcó como medible.
+   *
+   * Una línea la reclama UN solo indicador, el primero de la lista. Sin esa
+   * regla, una línea de gasolina dentro de «Mantenimiento» se contaría dos
+   * veces si se siguieran las dos, y «Otros» saldría en negativo.
+   *
+   * Se reclama por ROL o por categoría. Por rol, porque es estable aunque la
+   * categoría se renombre y porque una línea de gasolina puede vivir dentro de
+   * otra categoría. Y también por categoría, porque las líneas anteriores a
+   * que se marcara como medible no llevan rol: sin eso, marcar «Medicamentos»
+   * hoy enseñaría cero pese a meses de medicamentos.
+   */
+  porIndicador(detalles, categorias, total) {
+    const partes = (categorias || []).map(c => ({
+      clave: c.id, etiqueta: c.nombre, rol: c.rol || null,
+      color: c.color || '', total: 0, n: 0
+    }));
+    let reclamado = 0;
+    for (const d of (detalles || [])) {
+      const p = partes.find(x => (x.rol && d.rol === x.rol) || (d.categoriaId && d.categoriaId === x.clave));
+      if (!p) continue;
+      p.total += d.valor || 0; p.n++;
+      reclamado += d.valor || 0;
+    }
+    /* Nunca por debajo de cero. Manda el total de las cajas: si hay retención,
+       la diferencia cae aquí, igual que caía antes. */
+    return { partes, otros: Math.max(0, (total || 0) - reclamado), reclamado };
   },
 
   calcular(detalles, retencion) {
@@ -5387,6 +5454,40 @@ const Modal = (() => {
       if (ev.target === el && o.cerrarFuera !== false) cerrar(el);
       if (ev.target.closest('[data-cerrar]')) cerrar(el);
     });
+    /* Ningún botón de la ventana se dispara dos veces seguidas.
+       Los botones de una ventana llevan su tarea en `onclick`, puesta a mano
+       después de abrirla. Este oyente va en fase de captura, así que ve el clic
+       ANTES que el propio botón: aprovecha para envolver esa tarea —una sola
+       vez, la primera— en una que se niega a empezar si la anterior sigue en
+       marcha. El envoltorio corre ya en este mismo clic. */
+    el.addEventListener('click', ev => {
+      const b = ev.target.closest('button');
+      if (!b || b._sinRepetir || typeof b.onclick !== 'function') return;
+      b._sinRepetir = true;
+      const tarea = b.onclick;
+      b.onclick = function (e) {
+        if (b.dataset.enCurso) return;
+        let r;
+        try { r = tarea.call(this, e); } catch (err) { throw err; }
+        // lo que termina al instante no puede solaparse consigo mismo
+        if (!r || typeof r.then !== 'function') return r;
+        b.dataset.enCurso = '1';
+        const antes = b.innerHTML;
+        /* Sólo se avisa si de verdad tarda: en algo rápido, cambiar el texto
+           es un parpadeo que estorba más de lo que informa. */
+        const aviso = setTimeout(() => {
+          if (b.isConnected) b.innerHTML = '<span class="spin"></span>Un momento…';
+        }, 250);
+        return r.finally(() => {
+          clearTimeout(aviso);
+          /* Si salió bien, la ventana ya se cerró y el botón no está en
+             ninguna página: devolverle el texto no haría daño, pero tampoco
+             falta. Si falló, sigue ahí y hay que dejarlo como estaba. */
+          if (b.isConnected) b.innerHTML = antes;
+          delete b.dataset.enCurso;
+        });
+      };
+    }, true);
     if (o.alMontar) setTimeout(() => o.alMontar(el), 0);
     const foco = el.querySelector('[autofocus],input:not([type=hidden]),select,textarea');
     if (foco) setTimeout(() => foco.focus(), 60);
@@ -6221,14 +6322,36 @@ const Shell = {
  * 180 ms, así que lo rápido sigue viéndose rápido.
  */
 async function correrAccion(fn, el, ev) {
+  /* Mientras una acción está en camino, su propio botón no vuelve a lanzarla.
+     Guardar tarda: va al servidor y vuelve. En esa espera el botón seguía vivo
+     y un segundo clic empezaba la misma operación otra vez. Las dos pasaban la
+     comprobación de duplicados —ninguna había terminado, así que ninguna veía a
+     la otra— y era la base de datos la que rechazaba la segunda. De ahí el
+     «ya existe un registro con ese nombre» apareciendo justo debajo del
+     «guardado» de la primera. En una caja menor era peor: dos clics, dos cajas
+     con dos consecutivos, el mismo dinero contado dos veces.
+
+     Se bloquea el elemento, no la acción: dos botones distintos pueden estar
+     trabajando a la vez sin estorbarse. Y sólo se bloquean clics y envíos de
+     formulario: un desplegable tiene que poder cambiar de valor las veces que
+     haga falta, o la pantalla mostraría una cosa y el programa recordaría otra. */
+  const bloqueable = el && el.dataset && ev &&
+    (ev.type === 'click' || ev.type === 'submit');
+  if (bloqueable && el.dataset.enCurso) return;
   let r;
   try { r = fn(el, ev); }
   catch (err) { manejarError(err); return; }
   if (!r || typeof r.then !== 'function') return r;
+  if (bloqueable) el.dataset.enCurso = '1';
   Cargando.iniciar();
   try { return await r; }
   catch (err) { manejarError(err); }
-  finally { Cargando.terminar(); }
+  finally {
+    Cargando.terminar();
+    /* Se libera pase lo que pase: si un guardado falla, hay que poder
+       corregir y volver a intentarlo. */
+    if (bloqueable) delete el.dataset.enCurso;
+  }
 }
 
 /* --- Delegación global de eventos ---------------------------------------- */
@@ -6371,6 +6494,59 @@ const VistaDashboard = {
     const serieMes = r.porMes.map(m => ({ etiqueta: m.etiqueta, corta: Fecha.mesCorto(m.clave), valor: m.total }));
     const pctRepuesto = res.gastoOperativo ? (res.totalRepuesto / res.gastoOperativo * 100) : 0;
 
+    /* Lo que ESTE contrato quiere analizar. El panel enseñaba siempre gasolina
+       y aceite, escritos a fuego: en un contrato de hospital eso son dos
+       tarjetas en cero y un «otros conceptos» que repite el total. Ahora manda
+       lo que se marcó como medible en las categorías, y sólo si se usa.
+
+       Se mira el histórico completo del contrato para decidir QUÉ sale, y el
+       período elegido para decidir CUÁNTO: así, filtrar por un mes flojo no
+       hace desaparecer tarjetas y reaparecer al mes siguiente. */
+    const vistaCtr = await Analitica.vista();
+    const seguidas = CategoriaRepo.seguidasEnPanel(vistaCtr.detalles);
+    const ind = Finanzas.porIndicador(r.detalles, seguidas, res.gastoOperativo);
+    const PALETA = ['#c8860d', '#6d4aca', '#0e8a8a', '#b5453f', '#3f6cb5', '#7a8a1f'];
+    const ICONOS = { GASOLINA: 'fuel', ACEITE: 'drop' };
+    const colorDe = (p, i) => p.color || PALETA[i % PALETA.length];
+    /* Una fila de cinco se ve bien; una de siete, no. Se elige el ancho que
+       reparte las tarjetas sin dejar huecos sueltos al final. */
+    const rejilla = n => n >= 6 ? 'g3' : n === 5 ? 'g5' : n === 4 ? 'g4'
+      : n === 3 ? 'g3' : n === 2 ? 'g2' : 'g5';
+
+    const kpiTotal = Comp.kpi({ label: 'Total gastado', valor: Money.format(res.gastoOperativo), icono: 'money',
+      color: 'var(--brand-500)', meta: '<span>' + res.numeroCajas + ' cajas · promedio ' + Money.compact(res.promedioCaja) + '</span>',
+      titulo: 'Suma de los totales de las cajas menores. NO incluye consignaciones.' });
+    const kpisFijos = [
+      Comp.kpi({ label: 'Pendiente por reponer', valor: Money.format(res.pendienteReponer), icono: 'clock',
+        color: 'var(--dang-500)', colorTexto: res.pendienteReponer > 0 ? 'var(--dang-500)' : '',
+        meta: '<span>' + pendientes.length + '+ cajas con saldo</span>', ruta: 'consignacion-nueva' }),
+      Comp.kpi({ label: 'Total repuesto', valor: Money.format(res.totalRepuesto), icono: 'check',
+        color: 'var(--ok-500)', meta: Comp.progreso(pctRepuesto, pctRepuesto.toFixed(1).replace('.', ',') + '% del gasto repuesto') }),
+      Comp.kpi({ label: 'Número de cajas', valor: res.numeroCajas.toLocaleString('es-CO'), icono: 'caja',
+        color: 'var(--info-500)', meta: '<span>' + res.cajasAnuladas + ' anuladas</span>', ruta: 'cajas' }),
+      Comp.kpi({ label: 'Consignaciones', valor: res.numeroConsignaciones.toLocaleString('es-CO'), icono: 'banco',
+        color: '#8a6d3b', meta: '<span>' + Money.compact(res.valorConsignaciones) + ' consignados</span>', ruta: 'consignaciones' })
+    ];
+    const kpisSeguidos = ind.partes.map((p, i) =>
+      Comp.kpi({ label: p.etiqueta, valor: Money.format(p.total), icono: ICONOS[p.rol] || 'tag',
+        color: colorDe(p, i),
+        meta: '<span>' + U.pct(p.total, res.gastoOperativo).toFixed(1).replace('.', ',') + '% del gasto</span>',
+        titulo: 'Subcomponente del total. No se suma por encima de él.',
+        ruta: p.rol ? 'categoria-rol/' + p.rol : 'categoria/' + p.clave }));
+    /* «Otros conceptos» sólo tiene sentido si hay algo de lo que distinguirlo:
+       sin nada que seguir, repetiría el total. */
+    const kpisArriba = kpisSeguidos.length
+      ? [kpiTotal].concat(kpisSeguidos, [
+          Comp.kpi({ label: 'Otros conceptos', valor: Money.format(ind.otros), icono: 'layers', color: '#0e8a8a',
+            meta: '<span>Total − ' + esc(ind.partes.map(p => p.etiqueta.toLowerCase()).join(' − ')) + '</span>' })])
+      : [kpiTotal];
+    /* Sin nada que seguir, el total se junta con los otros cuatro en una sola
+       fila: una tarjeta suelta ocupando toda la anchura queda pobre. */
+    const filas = kpisSeguidos.length
+      ? '<div class="grid ' + rejilla(kpisArriba.length) + ' mb16">' + kpisArriba.join('') + '</div>' +
+        '<div class="grid g4 mb16">' + kpisFijos.join('') + '</div>'
+      : '<div class="grid g5 mb16">' + kpiTotal + kpisFijos.join('') + '</div>';
+
     cont.innerHTML =
       '<div class="page-head">' +
         '<div><h1>Control de Caja Menor</h1>' +
@@ -6406,31 +6582,7 @@ const VistaDashboard = {
           'data-tip="No recordármelo hoy">' + Icon('x', '', 13) + '</button></div>';
       })() +
 
-      '<div class="grid g4 mb16">' +
-        Comp.kpi({ label: 'Total gastado', valor: Money.format(res.gastoOperativo), icono: 'money',
-          color: 'var(--brand-500)', meta: '<span>' + res.numeroCajas + ' cajas · promedio ' + Money.compact(res.promedioCaja) + '</span>',
-          titulo: 'Suma de los totales de las cajas menores. NO incluye consignaciones.' }) +
-        Comp.kpi({ label: 'Gasolina', valor: Money.format(res.gasolina), icono: 'fuel', color: '#c8860d',
-          meta: '<span>' + U.pct(res.gasolina, res.gastoOperativo).toFixed(1).replace('.', ',') + '% del gasto</span>',
-          titulo: 'Subcomponente del total. No se suma por encima de él.', ruta: 'categoria-rol/GASOLINA' }) +
-        Comp.kpi({ label: 'Aceite', valor: Money.format(res.aceite), icono: 'drop', color: '#6d4aca',
-          meta: '<span>' + U.pct(res.aceite, res.gastoOperativo).toFixed(1).replace('.', ',') + '% del gasto</span>',
-          titulo: 'Subcomponente del total.', ruta: 'categoria-rol/ACEITE' }) +
-        Comp.kpi({ label: 'Otros conceptos', valor: Money.format(res.otros), icono: 'layers', color: '#0e8a8a',
-          meta: '<span>Total − gasolina − aceite</span>' }) +
-      '</div>' +
-
-      '<div class="grid g4 mb16">' +
-        Comp.kpi({ label: 'Pendiente por reponer', valor: Money.format(res.pendienteReponer), icono: 'clock',
-          color: 'var(--dang-500)', colorTexto: res.pendienteReponer > 0 ? 'var(--dang-500)' : '',
-          meta: '<span>' + pendientes.length + '+ cajas con saldo</span>', ruta: 'consignacion-nueva' }) +
-        Comp.kpi({ label: 'Total repuesto', valor: Money.format(res.totalRepuesto), icono: 'check',
-          color: 'var(--ok-500)', meta: Comp.progreso(pctRepuesto, pctRepuesto.toFixed(1).replace('.', ',') + '% del gasto repuesto') }) +
-        Comp.kpi({ label: 'Número de cajas', valor: res.numeroCajas.toLocaleString('es-CO'), icono: 'caja',
-          color: 'var(--info-500)', meta: '<span>' + res.cajasAnuladas + ' anuladas</span>', ruta: 'cajas' }) +
-        Comp.kpi({ label: 'Consignaciones', valor: res.numeroConsignaciones.toLocaleString('es-CO'), icono: 'banco',
-          color: '#8a6d3b', meta: '<span>' + Money.compact(res.valorConsignaciones) + ' consignados</span>', ruta: 'consignaciones' }) +
-      '</div>' +
+      filas +
 
       (pendFin.length ? '<div class="card mb16"><div class="card-h">' +
         '<h3>Saldo pendiente por quien adelantó el dinero</h3>' +
@@ -6452,11 +6604,10 @@ const VistaDashboard = {
           '<div class="card-b">' + Chart.barras(serieMes, { alto: 210 }) + '</div></div>' +
         '<div class="card"><div class="card-h"><h3>Composición del gasto</h3></div>' +
           '<div class="card-b">' +
-          Chart.dona([
-            { etiqueta: 'Gasolina', valor: res.gasolina, color: '#c8860d' },
-            { etiqueta: 'Aceite', valor: res.aceite, color: '#6d4aca' },
-            { etiqueta: 'Otros conceptos', valor: Math.max(0, res.otros), color: '#0f7f58' }
-          ], { alto: 180, centro: Money.compact(res.gastoOperativo), centroSub: 'total' }) +
+          Chart.dona(ind.partes.map((p, i) => ({ etiqueta: p.etiqueta, valor: p.total, color: colorDe(p, i) }))
+            .concat([{ etiqueta: kpisSeguidos.length ? 'Otros conceptos' : 'Gasto del período',
+                       valor: ind.otros, color: '#0f7f58' }]),
+            { alto: 180, centro: Money.compact(res.gastoOperativo), centroSub: 'total' }) +
           '</div></div>' +
       '</div>' +
 
@@ -6464,7 +6615,10 @@ const VistaDashboard = {
         '<div class="card"><div class="card-h"><h3>Gastos por persona</h3>' +
           '<div class="ch-act"><span class="link fs12" data-ir="analisis">Ver todos</span></div></div>' +
           '<div class="card-b">' + Comp.ranking(r.porPersona, { limite: 8, ruta: it => it.ref ? 'persona/' + it.clave : 'cajas',
-            sub: it => it.n + ' cajas · gasolina ' + Money.compact(it.gasolina) }) + '</div></div>' +
+            /* Antes decía siempre «· gasolina $ 0». Sólo se nombra si este
+               contrato la sigue: es el único desglose que trae el ranking. */
+            sub: it => it.n + ' cajas' + (seguidas.some(c => c.rol === RolEstadistico.GASOLINA)
+              ? ' · gasolina ' + Money.compact(it.gasolina) : '') }) + '</div></div>' +
         '<div class="card"><div class="card-h"><h3>Gastos por municipio</h3></div>' +
           '<div class="card-b">' + Comp.ranking(r.porMunicipio, { limite: 8, color: 'var(--info-500)',
             ruta: it => it.ref ? 'municipio/' + it.clave : 'cajas', sub: it => it.n + ' cajas' }) + '</div></div>' +
@@ -6659,11 +6813,22 @@ const VistaCajas = {
    * caja y suma sobre la marcha: sirve para escoger a ojo las que faltan por
    * reembolsar y ver de una vez cuánto suman, sin sacar la calculadora.
    */
+  /** Las que ya se consignaron y todavía tienen saldo por devolver. */
+  pendientesDe(lista, repuesto) {
+    return (lista || []).filter(c => ESTADOS_POR_REEMBOLSAR.includes(c.estado) &&
+      Finanzas.pendienteDe(c, repuesto.get(c.id) || 0) > 0);
+  },
+
   barraSeleccion() {
     const ctx = VistaCajas._ctx;
     if (!ctx) return '';
     const sel = ctx.todas.filter(c => VistaCajas.seleccion.has(c.id));
     if (!sel.length) return '';
+    /* Lo que quedó fuera. El botón de arriba marca lo que se ve, que es lo que
+       se espera al pulsarlo; el resto se ofrece aquí, donde se está mirando la
+       suma, en vez de esconderlo o de marcarlo sin avisar. */
+    const faltan = VistaCajas.pendientesDe(ctx.todas, ctx.repuesto)
+      .filter(c => !VistaCajas.seleccion.has(c.id)).length;
     const total = U.sumBy(sel, c => c.total);
     const pend = U.sumBy(sel, c => Finanzas.pendienteDe(c, ctx.repuesto.get(c.id) || 0));
     return '<div class="selbar">' +
@@ -6673,6 +6838,8 @@ const VistaCajas = {
         'Total <b>' + Money.format(total) + '</b>' +
         (pend ? '<span class="selbar-sep"></span>Pendiente <b>' + Money.format(pend) + '</b>' : '') +
         '<span style="flex:1"></span>' +
+        (faltan ? '<button class="btn btn-sm" data-act="selPorReembolsarTodas">' + Icon('check', '', 13) +
+          'Marcar también las ' + faltan + ' de otras páginas</button>' : '') +
         '<button class="btn btn-sm" data-act="resumenSeleccion">' + Icon('doc', '', 13) +
           'Resumen para quien consignó</button>' +
         '<button class="btn btn-sm btn-primary" data-act="pdfSeleccion">' + Icon('print', '', 13) +
@@ -6739,11 +6906,9 @@ const VistaCajas = {
     /* Y cuáles tienen ya los soportes de lo que se compró. Sólo cuentan los
        colgados de la caja: la legalización es de la caja, no del giro. */
     const conLegalizacion = new Set();
-    const conFactura = new Set();
     for (const d of docsTodos) {
       if (!d.cajaId || d.estado === Estado.INACTIVO) continue;
       if (esDocLegalizacion(d)) conLegalizacion.add(d.cajaId);
-      if (esDocAnticipo(d)) conFactura.add(d.cajaId);
     }
 
     const detsPorCaja = new Map();
@@ -6860,7 +7025,7 @@ const VistaCajas = {
       '<div class="ph-sub">' + todas.length.toLocaleString('es-CO') + ' registro(s) · Total ' + Money.format(sumTotal) +
       ' · Pendiente ' + Money.format(sumPend) + '</div></div>' +
       '<div class="ph-actions">' +
-      '<button class="btn" data-act="selPorReembolsar" title="Marca las cajas ya consignadas que todavía no se han reembolsado">' +
+      '<button class="btn" data-act="selPorReembolsar" title="Marca las cajas de esta página que ya se consignaron y todavía no se han reembolsado">' +
         Icon('check', '', 14) + 'Marcar por reembolsar</button>' +
       '<button class="btn" data-act="exportarExcel">' + Icon('download', '', 14) + 'Excel</button>' +
       '<button class="btn" data-act="exportarCsv">' + Icon('download', '', 14) + 'CSV</button>' +
@@ -6956,13 +7121,6 @@ const VistaCajas = {
                     'data-tip="El dinero ya se giró, pero no hay comprobante de la transferencia adjunto">' +
                     Icon('warn', '', 11) + '</span>'
                   : '')) +
-            /* La factura del proveedor sólo aparece cuando la hay: no todas
-               las cajas nacen de una factura, así que no falta cuando no está
-               y no tiene sentido reclamarla. */
-            (conFactura.has(c.id)
-              ? '<span class="marca m-fact" tabindex="0" ' +
-                'data-tip="Tiene adjunta la factura del proveedor">' + Icon('file', '', 11) + '</span>'
-              : '') +
             (conLegalizacion.has(c.id)
               ? '<span class="marca m-legal" tabindex="0" ' +
                 'data-tip="Tiene adjuntos los soportes de en qué se gastó">' + Icon('file', '', 11) + '</span>'
@@ -7085,13 +7243,22 @@ const VistaCajas = {
       },
       selLimpiar: () => { VistaCajas.seleccion.clear(); VistaCajas.refrescarSeleccion(); },
       /* Atajo para lo que se pide cada semana: las que ya se consignaron y
-         todavía no se han reembolsado. */
+         todavía no se han reembolsado.
+
+         Marca SÓLO las de la página que se está viendo. Antes marcaba todas
+         las que pasaran el filtro, también las de las páginas siguientes: se
+         pulsaba con veinticinco cajas delante y salían marcadas ciento
+         cuarenta, sin poder comprobar cuáles. Lo que queda fuera se ofrece
+         aparte, en la barra de abajo, y sigue estando a un clic. */
       selPorReembolsar: () => {
         VistaCajas.seleccion.clear();
-        todas.filter(c => ESTADOS_POR_REEMBOLSAR.includes(c.estado) &&
-          Finanzas.pendienteDe(c, repuesto.get(c.id) || 0) > 0)
-          .forEach(c => VistaCajas.seleccion.add(c.id));
-        if (!VistaCajas.seleccion.size) Toast.warn('No hay cajas consignadas pendientes de reembolso.');
+        VistaCajas.pendientesDe(pagina, repuesto).forEach(c => VistaCajas.seleccion.add(c.id));
+        if (!VistaCajas.seleccion.size) Toast.warn('En esta página no hay cajas pendientes de reembolso.');
+        VistaCajas.refrescarSeleccion();
+      },
+      /* Las que están fuera de la página, sin perder lo ya marcado. */
+      selPorReembolsarTodas: () => {
+        VistaCajas.pendientesDe(todas, repuesto).forEach(c => VistaCajas.seleccion.add(c.id));
         VistaCajas.refrescarSeleccion();
       },
       resumenSeleccion: () => {
@@ -7173,10 +7340,8 @@ const VistaCaja = {
       : [];
     const esComprobante = d => d.tipo === TipoDocumento.COMPROBANTE_CONSIGNACION;
     const comprobantes = docs.filter(esComprobante).concat(docsCons.filter(esComprobante));
-    /* Lo que justifica el giro (la factura del taller, antes de consignar) y lo
-       que legaliza el gasto (lo que envían después) van por separado: prueban
-       cosas distintas y amontonarlos borra esa diferencia. */
-    const anticipo = docs.filter(esDocAnticipo);
+    /* Todo lo que justifica en qué se gastó va junto: la factura del taller y
+       los recibos que envía el líder prueban lo mismo. */
     const legalizacion = docs.filter(esDocLegalizacion);
     const repuesto = Finanzas.repuesto(apls);
     const pendiente = Finanzas.pendiente(caja, apls);
@@ -7375,15 +7540,9 @@ const VistaCaja = {
       /* Los títulos salen de la misma lista que el desplegable: así no pueden
          volver a llamarse de dos maneras distintas. */
       VistaCaja.tarjetaDocs({
-        destino: DESTINOS_DOC[0],
-        vacio: 'Sin soporte todavía. Adjunte aquí la factura o la cotización que le entregó el ' +
-               'taller o el proveedor: es lo que justifica cuánto hay que consignar.',
-        docs: anticipo, accion: 'adjuntarAnticipo', input: 'inAnticipo'
-      }) +
-      VistaCaja.tarjetaDocs({
-        destino: DESTINOS_DOC[2],
-        vacio: 'Sin legalizar todavía. Aquí van las facturas y recibos que le envíe el líder ' +
-               'cuando ya haya gastado el dinero de esta caja.',
+        destino: DESTINOS_DOC[1],
+        vacio: 'Sin legalizar todavía. Aquí va todo lo que justifica en qué se gastó: la factura ' +
+               'del taller o del proveedor y los recibos que le envíe el líder.',
         docs: legalizacion, accion: 'adjuntarLegalizacion', input: 'inLegalizacion'
       }) +
 
@@ -7452,7 +7611,6 @@ const VistaCaja = {
         VistaCaja.render(cont, params);
       },
       adjuntarComprobante: () => { const i = $('#inComprobante'); if (i) i.click(); },
-      adjuntarAnticipo: () => { const i = $('#inAnticipo'); if (i) i.click(); },
       adjuntarLegalizacion: () => { const i = $('#inLegalizacion'); if (i) i.click(); },
       masAcciones: () => VistaCaja.menuAcciones(caja, cont, params),
       ...Expediente.acciones({ cajaId: caja.id, recargar: () => VistaCaja.render(cont, params) })
@@ -7480,7 +7638,6 @@ const VistaCaja = {
         VistaCaja.render(cont, params);
       };
     };
-    engancharDoc('inAnticipo', TipoDocumento.FACTURA);
     engancharDoc('inLegalizacion', TipoDocumento.SOPORTE_COMPRA);
   },
 
@@ -7938,7 +8095,12 @@ const VistaCajaForm = {
           '<span class="ch-sub">Opcional · se guardan al pulsar Guardar</span>' +
           '<div class="ch-act">' +
             '<select class="inp" id="fTipoAdjunto" style="height:30px;font-size:12px;width:auto">' +
-              DESTINOS_DOC.map(d => '<option value="' + attr(d.tipo) + '">' +
+          /* Se parte de la legalización: es lo que más se sube y lo que
+             acierta si alguien suelta varios archivos sin mirar. El orden de
+             la lista es el de los hechos —primero el giro—, pero lo elegido
+             de entrada es lo más frecuente. */
+              DESTINOS_DOC.map(d => '<option value="' + attr(d.tipo) + '"' +
+                (d.tipo === TipoDocumento.SOPORTE_COMPRA ? ' selected' : '') + '>' +
                 esc(d.titulo) + '</option>').join('') + '</select>' +
             '<button class="btn btn-sm" data-act="elegirAdjuntos">' +
               Icon('upload', '', 12) + 'Adjuntar</button>' +
@@ -8031,7 +8193,7 @@ const VistaCajaForm = {
     const sumar = files => {
       /* El destino se fija al elegir el archivo, no al guardar: si luego se
          cambia el desplegable para el siguiente, los ya puestos no se mueven. */
-      const tipo = ($('#fTipoAdjunto') || {}).value || TipoDocumento.FACTURA;
+      const tipo = ($('#fTipoAdjunto') || {}).value || TipoDocumento.SOPORTE_COMPRA;
       for (const f of files) {
         if (this.estado.adjuntos.some(x => x.file.name === f.name && x.file.size === f.size)) continue;
         this.estado.adjuntos.push({ file: f, tipo: tipo });
@@ -9371,8 +9533,9 @@ const VistaCategorias = {
         '<div class="field"><label>Descripción</label><input class="inp" id="cDesc" value="' + attr(c.descripcion || '') + '"></div>' +
         '<div class="field"><label class="inline-lbl"><input type="checkbox" id="cEstad"' + (c.estadistica ? ' checked' : '') + '>' +
         'Medible estadísticamente</label>' +
-        '<div class="hint">Tendrá su propia serie en el dashboard y en el módulo de estadísticas, como gasolina y aceite. ' +
-        'Los detalles marcados con este rol se descuentan del total, nunca se suman por encima.</div></div>' +
+        '<div class="hint">Tendrá su propia tarjeta en el dashboard de <b>este contrato</b> y su serie en ' +
+        'estadísticas, como gasolina y aceite. Lo marcado se descuenta del total, nunca se suma por encima. ' +
+        'La tarjeta aparece cuando la categoría tenga movimiento: marcarla no llena el panel de ceros.</div></div>' +
         (c.rol ? '<div class="field"><label>Rol estadístico</label><input class="inp" value="' + attr(c.rol) + '" readonly>' +
           '<div class="hint">El rol es estable: no cambia aunque renombre la categoría, para no romper el histórico.</div></div>' : '') +
         '<div class="field"><label>Estado</label><select class="inp" id="cEstado">' +
@@ -11362,6 +11525,32 @@ const Documento = {
     const pendGeneral = U.sumBy(orden, c => pendDe(c));
     const variosGrupos = grupos.size > 1;
 
+    /* A qué cuenta hay que consignar. Este papel existe para que alguien
+       pague: sin la cuenta, quien lo recibe tiene que ir a buscarla aparte y
+       ése era justo el paso que sobraba.
+
+       Se prefiere la ficha ACTUAL de la persona y no la foto que quedó
+       guardada en la caja. En todo lo demás manda la foto —lo que se firmó
+       entonces no cambia— pero una cuenta bancaria es la excepción: si cambió
+       de banco, el dinero tiene que ir al banco de hoy, no al de cuando se
+       hizo el gasto. */
+    const cuentaDe = lista => {
+      const conFicha = lista.find(c => c.consigno && c.consigno.personaId);
+      if (!conFicha) return '';   // se escribió a mano: no hay ficha que mirar
+      const snap = conFicha.consigno;
+      const p = PersonaRepo.get(snap.personaId) || snap;
+      const dato = (v) => esc(v || VALOR_NO_DISPONIBLE);
+      return '<tr class="rr-cta"><td colspan="7">' +
+        '<b>PARA CONSIGNAR A:</b> ' + esc(p.nombre || snap.nombre) +
+        ' &nbsp;·&nbsp; ' + esc(p.tipoDocumento || snap.tipoDocumento || 'C.C.') + ' ' +
+        (p.cedula ? esc(Txt.cedulaFmt(p.cedula)) : esc(VALOR_NO_DISPONIBLE)) +
+        '<br><b>Banco:</b> ' + dato(p.banco) +
+        ' &nbsp;·&nbsp; <b>Tipo de cuenta:</b> ' + dato(p.tipoCuenta) +
+        ' &nbsp;·&nbsp; <b>N.° de cuenta:</b> <span class="rr-num">' +
+        dato(p.numeroCuenta) + '</span>' +
+        '</td></tr>';
+    };
+
     const bloque = (quien, lista) =>
       (variosGrupos ? '<div class="dp-sec"><div class="dp-sec-t">Consignó: ' + esc(quien) +
         '</div></div>' : '') +
@@ -11386,6 +11575,8 @@ const Documento = {
         (variosGrupos ? '' : ' A ' + esc(quien.toUpperCase())) + '</td>' +
         '<td class="n">' + Money.format(variosGrupos ? U.sumBy(lista, c => c.total) : totalGeneral) + '</td>' +
         '<td class="n">' + Money.format(variosGrupos ? U.sumBy(lista, c => pendDe(c)) : pendGeneral) + '</td></tr>' +
+      /* Justo debajo del total: se lee la cifra y enseguida a dónde va. */
+      cuentaDe(lista) +
       '</tbody></table>';
 
     const logo = cfg.logoDataUrl
@@ -11975,11 +12166,23 @@ const Importador = {
     });
   },
 
+  /**
+   * Contra qué cajas se comprueba si una fila ya estaba: sólo las de ESTE
+   * contrato. Si se miraran todas, importar el mismo archivo en un contrato
+   * nuevo marcaría cada fila como repetida por existir en el contrato de al
+   * lado — que es un gasto distinto, de otra cuenta, aunque se parezca.
+   */
+  async cajasParaComparar() {
+    const ctrId = ContratoRepo.activoId();
+    return (await db.getAll('cajas'))
+      .filter(c => !ctrId || !c.contratoId || c.contratoId === ctrId);
+  },
+
   /* ---------------- PASO 4 · validación ---------------- */
   async analizar() {
     const s = this.st;
     const filas = this.filasDatos();
-    const cajasExistentes = await db.getAll('cajas');
+    const cajasExistentes = await this.cajasParaComparar();
     const clavesExistentes = new Map();
     for (const c of cajasExistentes) {
       const k = this.claveDuplicado({
@@ -13774,6 +13977,87 @@ const Pruebas = {
       ]
     },
     {
+      nombre: 'Un guardado no se dispara dos veces',
+      casos: [
+        { nombre: 'CRÍTICO · el despachador ignora el segundo clic', fn: async () => {
+            /* Éste era el «mensaje raro»: se pulsaba Guardar dos veces, las dos
+               operaciones pasaban la comprobación de duplicados —ninguna había
+               terminado todavía— y la base de datos rechazaba la segunda con
+               «ya existe un registro con ese nombre», justo debajo del
+               «guardado» de la primera. En una caja menor habría sido peor: dos
+               cajas, dos consecutivos y el mismo dinero contado dos veces. */
+            const btn = document.createElement('button');
+            let veces = 0;
+            const lento = async () => { veces++; await new Promise(r => setTimeout(r, 60)); };
+            const ev = { type: 'click' };
+            const a1 = correrAccion(lento, btn, ev);
+            const a2 = correrAccion(lento, btn, ev);   // el impaciente
+            await Promise.all([a1, a2]);
+            Pruebas.igual(veces, 1, 'La operación tiene que correr UNA sola vez');
+            /* Y al terminar el botón queda libre: si el guardado falló, hay que
+               poder corregir y volver a intentarlo. */
+            await correrAccion(lento, btn, ev);
+            Pruebas.igual(veces, 2, 'Después vuelve a admitir la operación');
+          } },
+        { nombre: 'Un guardado que falla deja el botón libre', fn: async () => {
+            const btn = document.createElement('button');
+            let veces = 0;
+            const falla = async () => { veces++; throw new ErrorDominio('probando', 'PRUEBA'); };
+            await correrAccion(falla, btn, { type: 'click' });
+            await correrAccion(falla, btn, { type: 'click' });
+            Pruebas.igual(veces, 2, 'Un error no puede dejar el botón bloqueado para siempre');
+            Pruebas.ok(!btn.dataset.enCurso, 'Y la marca de «en curso» se retira');
+          } },
+        { nombre: 'Un desplegable sí puede cambiar dos veces seguidas', fn: async () => {
+            /* Los cambios de un control no se bloquean: si se tragara el
+               segundo, la pantalla mostraría un valor y el programa recordaría
+               otro, que es peor que el problema que se quería evitar. */
+            const sel = document.createElement('select');
+            let veces = 0;
+            const lento = async () => { veces++; await new Promise(r => setTimeout(r, 40)); };
+            await Promise.all([
+              correrAccion(lento, sel, { type: 'change' }),
+              correrAccion(lento, sel, { type: 'change' })
+            ]);
+            Pruebas.igual(veces, 2, 'Los dos cambios se atienden');
+          } },
+        { nombre: 'CRÍTICO · el botón de una ventana tampoco se repite', fn: async () => {
+            let veces = 0;
+            const m = Modal.abrir({ titulo: 'Prueba de doble clic', pie:
+              '<button class="btn btn-primary" id="xGuardar">Guardar</button>' });
+            try {
+              const btn = m.querySelector('#xGuardar');
+              btn.onclick = async () => { veces++; await new Promise(r => setTimeout(r, 60)); };
+              btn.click(); btn.click();          // dos clics seguidos, como en la vida real
+              await new Promise(r => setTimeout(r, 140));
+              Pruebas.igual(veces, 1, 'Sólo una debe llegar a guardar');
+              Pruebas.ok(!btn.dataset.enCurso, 'Al terminar queda libre');
+              btn.click();
+              await new Promise(r => setTimeout(r, 140));
+              Pruebas.igual(veces, 2, 'Y admite un guardado posterior');
+            } finally { Modal.cerrar(m); }
+          } },
+        { nombre: 'El botón de una ventana recupera su texto si falla', fn: async () => {
+            const m = Modal.abrir({ titulo: 'Prueba de fallo', pie:
+              '<button class="btn btn-primary" id="yGuardar">Guardar</button>' });
+            try {
+              const btn = m.querySelector('#yGuardar');
+              const texto = btn.innerHTML;
+              btn.onclick = async () => {
+                await new Promise(r => setTimeout(r, 300));   // pasa del aviso de espera
+                throw new Error('probando');
+              };
+              btn.click();
+              await new Promise(r => setTimeout(r, 280));
+              Pruebas.ok(btn.innerHTML.includes('spin'), 'Mientras tarda avisa que está trabajando');
+              await new Promise(r => setTimeout(r, 200));
+              Pruebas.igual(btn.innerHTML, texto, 'Y al fallar recupera su texto');
+              Pruebas.ok(!btn.dataset.enCurso, 'Y se puede volver a intentar');
+            } finally { Modal.cerrar(m); }
+          } }
+      ]
+    },
+    {
       nombre: 'Navegación y tiempos de espera',
       casos: [
         { nombre: 'CRÍTICO · los conteos del almacén no hacen cola', fn: async () => {
@@ -13895,16 +14179,28 @@ const Pruebas = {
             Pruebas.ok(!rA.cajas.some(c => c.id === ctx.cajaB1.id), 'No debe aparecer una caja del contrato B');
             Pruebas.ok(rA.cajas.some(c => c.id === ctx.cajaA.id), 'Sí debe aparecer la suya');
           } },
+        { nombre: 'CRÍTICO · el financiador por defecto no cruza contratos', fn: async ctx => {
+            /* La configuración recuerda UN identificador de financiador. Estando
+               en el contrato B, ese recuerdo apunta a alguien del contrato A: no
+               se puede proponer, porque en esta lista no existe. */
+            await ContratoRepo.cambiarActivo(ctx.ctrB.id);
+            Pruebas.igual(PersonaRepo.financiadorPorDefecto(), null,
+              'Un contrato sin financiadores propios no propone el del otro');
+            ctx.fabB = await PersonaRepo.guardar({ nombre: 'Pagador de Apartadó', esFinanciador: 1 });
+            const prop = PersonaRepo.financiadorPorDefecto();
+            Pruebas.ok(prop && prop.id === ctx.fabB.id, 'Propone el suyo en cuanto lo tiene');
+          } },
         { nombre: 'CRÍTICO · una consignación no puede cruzar contratos', fn: async ctx => {
             await ContratoRepo.cambiarActivo(ctx.ctrB.id);
-            const fab = PersonaRepo.financiadorPorDefecto();
+            const fab = ctx.fabB;
+            Pruebas.ok(fab && fab.id, 'La prueba necesita un financiador de verdad');
             await Pruebas.lanza(() => ConsignacionService.crear({
               fecha: '2026-05-10', beneficiarioId: fab.id, valor: Money.parse('100.000'),
               asignaciones: [{ cajaId: ctx.cajaA.id, monto: Money.parse('100.000') }]
             }), 'Debe impedir reponer una caja de otro contrato');
           } },
         { nombre: 'La consignación sí repone las cajas de su propio contrato', fn: async ctx => {
-            const fab = PersonaRepo.financiadorPorDefecto();
+            const fab = ctx.fabB;
             const con = await ConsignacionService.crear({
               fecha: '2026-05-10', beneficiarioId: fab.id, valor: Money.parse('500.000'),
               asignaciones: [{ cajaId: ctx.cajaB1.id, monto: ctx.cajaB1.total },
@@ -13938,7 +14234,10 @@ const Pruebas = {
                pruebas siguientes. */
             try {
               await ContratoRepo.cambiarActivo(ctx.ctrB.id);
-              Pruebas.igual(PersonaRepo.todas().length, 0, 'El contrato nuevo no hereda personas');
+              /* Sólo la que la prueba anterior creó aquí a propósito: ninguna
+                 heredada del contrato A. */
+              Pruebas.igual(PersonaRepo.todas().map(p => p.nombre).join('|'), 'Pagador de Apartadó',
+                'El contrato nuevo no hereda personas: sólo tiene la suya');
               Pruebas.igual(CategoriaRepo.todas().length, 0, 'Ni categorías');
               Pruebas.igual(MunicipioRepo.todos().length, 0, 'Ni municipios');
               /* Pero lo del otro contrato se sigue resolviendo por identificador,
@@ -13992,6 +14291,75 @@ const Pruebas = {
         { nombre: 'Gasolina y aceite existen como categorías del sistema', fn: () => {
             Pruebas.ok(CategoriaRepo.porRol(RolEstadistico.GASOLINA), 'Categoría gasolina');
             Pruebas.ok(CategoriaRepo.porRol(RolEstadistico.ACEITE), 'Categoría aceite');
+          } }
+      ]
+    },
+    {
+      nombre: 'El panel sigue lo que cada contrato quiere analizar',
+      casos: [
+        { nombre: 'CRÍTICO · el reparto no cuenta ninguna línea dos veces', fn: () => {
+            /* Una línea de gasolina puede vivir dentro de «Mantenimiento». Si
+               se siguieran las dos, sumar por separado daría más que el total
+               y «Otros» saldría en negativo. */
+            const gas = { id: 'cat_gas', nombre: 'Gasolina', rol: 'GASOLINA' };
+            const man = { id: 'cat_man', nombre: 'Mantenimiento', rol: 'MANTENIMIENTO' };
+            const dets = [
+              { categoriaId: 'cat_man', rol: 'GASOLINA', valor: 10000000 },  // de las dos
+              { categoriaId: 'cat_man', rol: null,       valor: 20000000 },
+              { categoriaId: 'cat_otr', rol: null,       valor: 30000000 }
+            ];
+            const r = Finanzas.porIndicador(dets, [gas, man], 60000000);
+            Pruebas.igual(r.partes[0].total, 10000000, 'La gasolina reclama la línea primero');
+            Pruebas.igual(r.partes[1].total, 20000000, 'Y a mantenimiento le queda la suya');
+            Pruebas.igual(r.otros, 30000000, 'Otros es lo que nadie reclamó');
+            Pruebas.igual(r.partes[0].total + r.partes[1].total + r.otros, 60000000,
+              'Las partes tienen que sumar el total exacto');
+          } },
+        { nombre: 'CRÍTICO · Otros nunca sale negativo', fn: () => {
+            /* Con retención, la suma de las líneas pasa del total de las cajas.
+               La diferencia cae en Otros, como caía antes, pero nunca por
+               debajo de cero: una tarjeta en negativo no significa nada. */
+            const cat = { id: 'cat_a', nombre: 'Todo', rol: 'TODO' };
+            const r = Finanzas.porIndicador([{ categoriaId: 'cat_a', valor: 50000000 }], [cat], 40000000);
+            Pruebas.igual(r.otros, 0, 'Se queda en cero, no en negativo');
+          } },
+        { nombre: 'Sin nada que seguir, el reparto es todo el total', fn: () => {
+            const r = Finanzas.porIndicador([{ categoriaId: 'x', valor: 900 }], [], 900);
+            Pruebas.igual(r.partes.length, 0, 'No hay partes');
+            Pruebas.igual(r.otros, 900, 'Y el total entero queda sin repartir');
+          } },
+        { nombre: 'Reclama por categoría lo anterior a marcarla', fn: () => {
+            /* El rol se hereda de la categoría al crear la línea, así que lo
+               registrado ANTES de marcarla no lo lleva. Sin reclamar también
+               por categoría, marcar «Medicamentos» hoy enseñaría cero pese a
+               meses de medicamentos. */
+            const cat = { id: 'cat_med', nombre: 'Medicamentos', rol: 'MEDICAMENTOS' };
+            const dets = [
+              { categoriaId: 'cat_med', rol: null, valor: 5000 },            // de antes
+              { categoriaId: 'cat_med', rol: 'MEDICAMENTOS', valor: 3000 }   // de después
+            ];
+            const r = Finanzas.porIndicador(dets, [cat], 8000);
+            Pruebas.igual(r.partes[0].total, 8000, 'Cuentan las dos');
+            Pruebas.igual(r.partes[0].n, 2, 'Y son dos líneas');
+          } },
+        { nombre: 'CRÍTICO · sólo sale lo que el contrato usa de verdad', fn: async ctx => {
+            /* Éste era el problema: un contrato de hospital enseñaba «Gasolina
+               $ 0» y «Aceite $ 0» porque las tarjetas estaban escritas a fuego
+               en el panel. */
+            const gas = CategoriaRepo.porRol(RolEstadistico.GASOLINA);
+            Pruebas.ok(gas && gas.estadistica, 'Gasolina viene marcada como medible');
+            const sinNada = CategoriaRepo.seguidasEnPanel([]);
+            Pruebas.igual(sinNada.length, 0, 'Un contrato sin movimiento no enseña ninguna');
+            const conGasolina = CategoriaRepo.seguidasEnPanel([{ rol: RolEstadistico.GASOLINA, valor: 100 }]);
+            Pruebas.igual(conGasolina.map(c => c.nombre).join('|'), 'Gasolina',
+              'Con gasolina de por medio, sale gasolina y sólo gasolina');
+          } },
+        { nombre: 'Una categoría normal no se cuela en el panel', fn: () => {
+            const rec = CategoriaRepo.todas().find(c => !c.estadistica);
+            Pruebas.ok(rec, 'La prueba necesita una categoría corriente');
+            const seguidas = CategoriaRepo.seguidasEnPanel([{ categoriaId: rec.id, valor: 500 }]);
+            Pruebas.ok(!seguidas.some(c => c.id === rec.id),
+              'Tener movimiento no basta: hay que marcarla como medible');
           } }
       ]
     },
@@ -14484,10 +14852,131 @@ const Pruebas = {
     {
       nombre: 'Documentos y formato',
       casos: [
+        { nombre: 'CRÍTICO · la relación dice a qué cuenta consignar', fn: async ctx => {
+            /* El papel existe para que alguien pague. Antes sólo decía «TOTAL
+               PENDIENTE POR REEMBOLSAR A FABIÁN CASTRO» y quien iba a girar
+               tenía que buscar la cuenta por su lado. */
+            const pagador = await PersonaRepo.guardar({
+              nombre: 'Pagador de la Relación', esFinanciador: 1, cedula: '1098765432',
+              banco: 'Bancolombia', tipoCuenta: 'Ahorros', numeroCuenta: '91200034567'
+            });
+            const solicitante = await PersonaRepo.guardar({
+              nombre: 'Líder de la Relación', esSolicitante: 1 });
+            const caja = await CajaService.crear({
+              fecha: '2026-06-01', solicitanteId: solicitante.id, consignoId: pagador.id,
+              estado: EstadoCaja.CONSIGNADA,
+              detalles: [{ categoriaNombre: 'Recolección', descripcion: 'relación', valor: Money.parse('400.000') }]
+            });
+            ctx.cajaRelacion = caja; ctx.pagadorRelacion = pagador;
+
+            const html = Documento.resumenReembolso([caja], new Map(), new Map());
+            Modal.cerrarTop();
+            Pruebas.ok(html.includes('PARA CONSIGNAR A'), 'Debe decir a quién se le consigna');
+            Pruebas.ok(html.includes('Bancolombia'), 'Con su banco');
+            Pruebas.ok(html.includes('Ahorros'), 'Y el tipo de cuenta');
+            Pruebas.ok(html.includes('91200034567'), 'Y el número de cuenta completo');
+            Pruebas.ok(html.includes(Txt.cedulaFmt('1098765432')), 'Y su documento, para verificar el titular');
+          } },
+        { nombre: 'CRÍTICO · usa la cuenta de HOY, no la de cuando se hizo el gasto', fn: async ctx => {
+            /* En todo lo demás manda la foto guardada en la caja: lo que se
+               firmó entonces no cambia. La cuenta bancaria es la excepción — si
+               cambió de banco, el dinero tiene que ir al banco de hoy. */
+            const viejo = ctx.cajaRelacion.consigno.numeroCuenta;
+            Pruebas.igual(viejo, '91200034567', 'La caja guardó la cuenta de entonces');
+            await PersonaRepo.guardar(Object.assign({}, ctx.pagadorRelacion,
+              { banco: 'Davivienda', numeroCuenta: '77700099999' }));
+
+            const html = Documento.resumenReembolso([ctx.cajaRelacion], new Map(), new Map());
+            Modal.cerrarTop();
+            Pruebas.ok(html.includes('77700099999'), 'Debe girar a la cuenta nueva');
+            Pruebas.ok(html.includes('Davivienda'), 'Y al banco nuevo');
+            Pruebas.ok(!html.includes('91200034567'),
+              'La cuenta vieja no puede aparecer: el dinero se iría a donde ya no está');
+          } },
+        { nombre: 'Sin ficha de quien consignó, no se inventa una cuenta', fn: async ctx => {
+            /* Cuando el nombre se escribió a mano no hay ficha que mirar. Antes
+               que enseñar una cuenta equivocada, mejor no enseñar ninguna. */
+            const suelta = Object.assign({}, ctx.cajaRelacion,
+              { consigno: null, consignoId: null, consignoTexto: 'Alguien escrito a mano' });
+            const html = Documento.resumenReembolso([suelta], new Map(), new Map());
+            Modal.cerrarTop();
+            Pruebas.ok(!html.includes('PARA CONSIGNAR A'), 'No debe aparecer el bloque de la cuenta');
+            Pruebas.ok(html.includes('REEMBOLSAR'), 'Pero el resto del documento sigue igual');
+          } },
+        { nombre: 'CRÍTICO · marcar por reembolsar sólo toca la página que se ve', fn: async ctx => {
+            /* Marcaba todas las que pasaran el filtro, también las de las
+               páginas siguientes: se pulsaba con veinticinco cajas delante y
+               salían marcadas muchas más, sin poder comprobar cuáles. */
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const hechas = [];
+            for (let i = 0; i < 7; i++) {
+              hechas.push(await CajaService.crear({
+                fecha: '2026-10-0' + (i + 1), solicitanteId: ctx.fernando.id,
+                municipioId: ctx.municipio.id, estado: EstadoCaja.CONSIGNADA,
+                detalles: [{ categoriaId: cm.id, descripcion: 'Paginada ' + i, valor: 1000000 + i }]
+              }));
+            }
+            const tamPrevio = Prefs.get('paginaTam');
+            const filtrosPrevios = Estado_App.filtrosCajas;
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            try {
+              Prefs.set('paginaTam', 5);
+              Estado_App.filtrosCajas = Object.assign({}, filtrosPrevios,
+                { texto: 'Paginada', estado: '', pagina: 1 });
+              VistaCajas.seleccion.clear();
+              await VistaCajas.render(div);
+
+              const enPagina = VistaCajas._ctx.pagina.length;
+              Pruebas.igual(enPagina, 5, 'La página enseña cinco');
+              Pruebas.ok(VistaCajas._ctx.todas.length > enPagina,
+                'Y hay más fuera, que es lo que hace útil la prueba');
+
+              const boton = div.querySelector('[data-act="selPorReembolsar"]');
+              Pruebas.ok(Boolean(boton), 'El botón está en la pantalla');
+              await correrAccion(Acciones.selPorReembolsar, boton, { type: 'click' });
+
+              Pruebas.igual(VistaCajas.seleccion.size, enPagina,
+                'Marca exactamente las de la página, ni una de las de después');
+              const idsPagina = new Set(VistaCajas._ctx.pagina.map(c => c.id));
+              Pruebas.ok([...VistaCajas.seleccion].every(id => idsPagina.has(id)),
+                'Y todas las marcadas están a la vista');
+
+              /* Lo que quedó fuera no se esconde: se ofrece en la barra. */
+              const barra = VistaCajas.barraSeleccion();
+              Pruebas.ok(/selPorReembolsarTodas/.test(barra),
+                'La barra ofrece incluir las de otras páginas');
+              await correrAccion(Acciones.selPorReembolsarTodas, document.createElement('button'),
+                { type: 'click' });
+              const pendTodas = VistaCajas.pendientesDe(VistaCajas._ctx.todas, VistaCajas._ctx.repuesto).length;
+              Pruebas.igual(VistaCajas.seleccion.size, pendTodas,
+                'Y entonces sí quedan todas las pendientes');
+              Pruebas.ok(!/selPorReembolsarTodas/.test(VistaCajas.barraSeleccion()),
+                'Ya no se ofrece: no queda ninguna fuera');
+            } finally {
+              div.remove();
+              VistaCajas.seleccion.clear();
+              Prefs.set('paginaTam', tamPrevio);
+              Estado_App.filtrosCajas = filtrosPrevios;
+            }
+          } },
+
+        { nombre: 'Una caja ya reembolsada no se marca', fn: async ctx => {
+            /* Sólo las que tienen saldo. Marcar una saldada la metería en la
+               relación de lo que hay que devolver, que ya se devolvió. */
+            const repuesto = new Map();
+            const saldada = { id: 'x1', estado: EstadoCaja.REEMBOLSADA, total: 1000 };
+            const pendiente = { id: 'x2', estado: EstadoCaja.CONSIGNADA, total: 1000 };
+            repuesto.set('x2', 0);
+            const r = VistaCajas.pendientesDe([saldada, pendiente], repuesto);
+            Pruebas.igual(r.map(c => c.id).join(','), 'x2', 'Sólo la que tiene saldo');
+          } },
+
         { nombre: 'Adjuntar un PDF a una caja', fn: async ctx => {
             const blob = new Blob(['%PDF-1.4 prueba'], { type: 'application/pdf' });
             const file = new File([blob], 'factura.pdf', { type: 'application/pdf' });
-            const doc = await DocumentoService.adjuntar(file, { cajaId: ctx.caja300.id, tipo: TipoDocumento.FACTURA });
+            const doc = await DocumentoService.adjuntar(file, { cajaId: ctx.caja300.id, tipo: TipoDocumento.SOPORTE_COMPRA });
             Pruebas.ok(Ulid.isValid(doc.id, 'doc'), 'ID de documento');
             const recuperado = await DocumentoService.blob(doc.id);
             Pruebas.ok(recuperado && recuperado.size > 0, 'El archivo debe poder recuperarse');
@@ -15276,15 +15765,17 @@ const Pruebas = {
             const docs = await CajaRepo.documentos(cajaId);
             Pruebas.igual(docs.length, 1, 'Y el archivo que esperaba llega a ESA caja');
             Pruebas.igual(docs[0].nombre, 'Factura 9001.pdf', 'Es el que se eligio');
-            Pruebas.igual(docs[0].tipo, TipoDocumento.FACTURA, 'Ya clasificado como factura');
+            Pruebas.igual(docs[0].tipo, TipoDocumento.SOPORTE_COMPRA, 'Ya clasificado como legalización');
             Pruebas.igual((VistaCajaForm.estado.adjuntos || []).length, 0,
               'Y la lista de espera queda limpia, para no subirlo dos veces');
           } },
 
-        { nombre: 'Dentro de una caja sólo se elige entre los tres momentos', fn: async ctx => {
-            /* El expediente ofrecia las siete etiquetas del archivo general.
-               Dentro de una caja la pregunta tiene TRES respuestas —de que
-               momento es este papel— y las otras cuatro solo enredan. */
+        { nombre: 'Dentro de una caja sólo se elige entre los dos momentos', fn: async ctx => {
+            /* El expediente ofrecía las siete etiquetas del archivo general.
+               Dentro de una caja la pregunta tiene DOS respuestas —el giro o la
+               legalización— y las demás sólo enredan. Fueron tres: la factura
+               del proveedor salió porque esa misma factura ES la que legaliza
+               el gasto, y tenerla aparte obligaba a subirla dos veces. */
             const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
             const caja = await CajaService.crear({
               fecha: '2026-09-13', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
@@ -15303,15 +15794,17 @@ const Pruebas = {
             } finally { div.remove(); }
 
             Pruebas.igual(opciones.join(','), DESTINOS_DOC.map(d => d.tipo).join(','),
-              'Ofrece exactamente los tres momentos, en orden');
-            Pruebas.igual(opciones.length, 3, 'Ni uno más');
+              'Ofrece exactamente los dos momentos, en orden');
+            Pruebas.igual(opciones.length, 2, 'Ni uno más');
+            Pruebas.ok(!opciones.includes('FACTURA'),
+              'La factura del proveedor ya no es un destino aparte');
             /* Ahi se sueltan varios archivos de golpe —las facturas del lider—
                asi que se parte de la legalizacion: es el caso que acierta si
                alguien arrastra ocho sin mirar. */
             Pruebas.igual(porDefecto, TipoDocumento.SOPORTE_COMPRA,
               'Y parte de la legalización, que es lo que más se sube ahí');
 
-            /* Los tres destinos salen de la MISMA lista que usa el formulario:
+            /* Los destinos salen de la MISMA lista que usa el formulario:
                si mañana cambia uno, cambian los dos. */
             /* Lo que importa no es CUAL sea el nombre, sino que sea UNO SOLO:
                antes se elegia «Soporte del anticipo» y el archivo aparecia
@@ -15780,17 +16273,14 @@ const Pruebas = {
               await subir('Comprobante.pdf', TipoDocumento.COMPROBANTE_CONSIGNACION);
               Pruebas.ok(enTarjeta('Reposición', 'Comprobante.pdf'),
                 'El comprobante subido abajo aparece arriba, en su tarjeta');
-              await subir('Factura.pdf', TipoDocumento.FACTURA);
-              Pruebas.ok(enTarjeta(DESTINOS_DOC[0].titulo, 'Factura.pdf'),
-                'La factura también sube a su tarjeta');
               await subir('Recibo.pdf', TipoDocumento.SOPORTE_COMPRA);
-              Pruebas.ok(enTarjeta(DESTINOS_DOC[2].titulo, 'Recibo.pdf'),
+              Pruebas.ok(enTarjeta(DESTINOS_DOC[1].titulo, 'Recibo.pdf'),
                 'Y el recibo a la suya');
               /* Y siguen estando abajo, no se mueven de sitio. */
               Pruebas.ok(enTarjeta('Expediente documental', 'Comprobante.pdf'),
                 'El expediente los sigue enseñando todos');
             } finally { div.remove(); }
-            Pruebas.igual((await CajaRepo.documentos(caja.id)).length, 3, 'Los tres quedaron guardados');
+            Pruebas.igual((await CajaRepo.documentos(caja.id)).length, 2, 'Los dos quedaron guardados');
           } },
 
         { nombre: 'CRÍTICO · una sola burbuja, y los avisos caben enteros', fn: async () => {
@@ -15826,40 +16316,44 @@ const Pruebas = {
             } finally { b.remove(); }
           } },
 
-        { nombre: 'La factura del proveedor se marca sólo cuando la hay', fn: async ctx => {
-            /* Las otras dos marcas reclaman cuando faltan; ésta no: no todas
-               las cajas nacen de una factura, asi que su ausencia no es un
-               problema que haya que señalar. */
+        { nombre: 'CRÍTICO · lo subido como factura del proveedor legaliza el gasto', fn: async ctx => {
+            /* Había tres tipos de adjunto y el primero era la factura que
+               llegaba ANTES de girar. Se quitó: esa misma factura es la que
+               legaliza. Lo que ya estaba subido tiene que contar como
+               legalización, y la caja dejar de salir marcada como sin
+               legalizar teniendo su soporte delante. */
             const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
-            const hacer = async conFactura => {
-              const c = await CajaService.crear({
-                fecha: '2026-09-14', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
-                estado: EstadoCaja.CONSIGNADA,
-                detalles: [{ categoriaId: cm.id, elemento: 'Varios', valor: 10000000 }]
-              });
-              if (conFactura) await Expediente.subir(
-                [new File([new Uint8Array([37, 80, 68, 70, Date.now() % 251, Math.random() * 250 | 0])],
-                  'f.pdf', { type: 'application/pdf' })],
-                { cajaId: c.id, tipo: TipoDocumento.FACTURA });
-              return c;
-            };
-            const conF = await hacer(true), sinF = await hacer(false);
-            const docsCon = await CajaRepo.documentos(conF.id);
-            Pruebas.igual(docsCon.filter(esDocAnticipo).length, 1, 'Una tiene factura');
-            Pruebas.igual((await CajaRepo.documentos(sinF.id)).filter(esDocAnticipo).length, 0,
-              'Y la otra no');
+            const caja = await CajaService.crear({
+              fecha: '2026-09-15', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
+              estado: EstadoCaja.CONSIGNADA,
+              detalles: [{ categoriaId: cm.id, elemento: 'Guadaña', valor: 21500000 }]
+            });
+            /* Se guarda con el tipo ANTIGUO a propósito: es lo que hay en la
+               base de quien viene de la versión de antes, o lo que vuelve al
+               restaurar un respaldo viejo. */
+            await Expediente.subir(
+              [new File([new Uint8Array([37, 80, 68, 70, 91, 17])], 'Factura taller.pdf',
+                { type: 'application/pdf' })], { cajaId: caja.id, tipo: 'FACTURA' });
+            const docs = await CajaRepo.documentos(caja.id);
+            Pruebas.igual(docs.length, 1, 'El documento sigue ahí');
+            Pruebas.ok(esDocLegalizacion(docs[0]),
+              'Y cuenta como legalización aunque su fila diga FACTURA');
+            Pruebas.ok(!esDocDelGiro(docs[0]), 'Sin colarse en el comprobante del giro');
 
+            /* Y en el listado, la caja NO debe salir marcada como sin legalizar. */
             const div = document.createElement('div');
             div.style.cssText = 'position:fixed;left:-99999px;top:0';
             document.body.appendChild(div);
-            let html = '';
-            try { await VistaCajas.render(div); html = div.innerHTML; }
-            finally { div.remove(); }
-            Pruebas.ok(/m-fact/.test(html), 'La marca sale cuando hay factura');
-            Pruebas.igual((html.match(/m-fact/g) || []).length,
-              (await db.getAll('documentos')).filter(d => d.cajaId && esDocAnticipo(d))
-                .reduce((s, d) => s.add(d.cajaId), new Set()).size,
-              'Una marca por caja con factura, ni más ni menos');
+            let fila = '';
+            try {
+              await VistaCajas.render(div);
+              const tr = [...div.querySelectorAll('tr')].find(x => x.textContent.includes(caja.numero));
+              fila = tr ? tr.innerHTML : '';
+            } finally { div.remove(); }
+            Pruebas.ok(fila, 'La caja aparece en el listado');
+            Pruebas.ok(!/m-sinlegal/.test(fila),
+              'No puede reclamar legalización: la tiene');
+            Pruebas.ok(!/m-fact/.test(fila), 'Y la marca de factura ya no existe');
           } },
 
         { nombre: 'CRÍTICO · los comprobantes de antes siguen en su sitio', fn: async ctx => {
@@ -15890,11 +16384,11 @@ const Pruebas = {
             const nom = f => docs.filter(f).map(d => d.nombre).sort().join(', ');
             Pruebas.igual(nom(esDocDelGiro), 'Comprobante en la caja.pdf',
               'El comprobante de antes sigue contando como del giro');
-            Pruebas.igual(nom(esDocAnticipo), '', 'No se cuela en el anticipo');
+
             Pruebas.igual(nom(esDocLegalizacion), 'Algo suelto.pdf, Recibo antiguo.pdf',
               'Los recibos viejos quedan en la legalización, que es donde corresponden');
-            /* El formato archivado no es de ninguno de los tres. */
-            const enAlguno = d => esDocAnticipo(d) || esDocDelGiro(d) || esDocLegalizacion(d);
+            /* El formato archivado no es de ninguno de los dos. */
+            const enAlguno = d => esDocDelGiro(d) || esDocLegalizacion(d);
             Pruebas.ok(!enAlguno(docs.find(d => d.tipo === TipoDocumento.FORMATO_CAJA)),
               'El formato archivado no ensucia ninguna tarjeta');
 
@@ -15921,19 +16415,17 @@ const Pruebas = {
               'Con su sección del comprobante');
             Pruebas.ok(dentroDe('Reposición', 'Comprobante en la caja.pdf'),
               'El comprobante de antes se ve donde siempre');
-            Pruebas.ok(!dentroDe(DESTINOS_DOC[0].titulo, 'Comprobante en la caja.pdf'),
-              'Y NO se cuela en la tarjeta de la factura');
-            Pruebas.ok(!dentroDe(DESTINOS_DOC[2].titulo, 'Comprobante en la caja.pdf'),
-              'Ni en la del gasto');
-            Pruebas.ok(dentroDe(DESTINOS_DOC[2].titulo, 'Recibo antiguo.pdf'),
+            Pruebas.ok(!dentroDe(DESTINOS_DOC[1].titulo, 'Comprobante en la caja.pdf'),
+              'Y NO se cuela en la tarjeta del gasto');
+            Pruebas.ok(dentroDe(DESTINOS_DOC[1].titulo, 'Recibo antiguo.pdf'),
               'Los recibos viejos se siguen viendo, con los soportes de compra');
           } },
 
-        { nombre: 'CRÍTICO · los tres papeles se pueden adjuntar al crear la caja', fn: async ctx => {
-            /* A veces la caja se registra cuando TODO ya paso: el taller cobro,
-               Fabian giro y el lider ya gasto. Tener que guardar y volver a
-               entrar por cada papel era el rodeo de antes, multiplicado por
-               tres. Se eligen los tres de una vez y cada uno va a su sitio. */
+        { nombre: 'CRÍTICO · los dos papeles se pueden adjuntar al crear la caja', fn: async ctx => {
+            /* A veces la caja se registra cuando TODO ya pasó: Fabián giró y el
+               líder ya gastó. Tener que guardar y volver a entrar por cada
+               papel era el rodeo de antes. Se eligen los dos de una vez y cada
+               uno va a su sitio. */
             const man = await CategoriaRepo.obtenerOCrear('Mantenimiento/Arreglo');
             const div = document.createElement('div');
             div.style.cssText = 'position:fixed;left:-99999px;top:0';
@@ -15946,7 +16438,7 @@ const Pruebas = {
               Pruebas.ok(Boolean(sel), 'El formulario deja elegir a qué corresponde el archivo');
               Pruebas.igual([...sel.options].map(o => o.value).join(','),
                 DESTINOS_DOC.map(d => d.tipo).join(','),
-                'Ofrece los tres destinos, en el orden en que ocurren');
+                'Ofrece los dos destinos, en el orden en que ocurren');
 
               /* Cada archivo con contenido distinto: el programa descarta los
                  duplicados por su huella. */
@@ -15960,15 +16452,13 @@ const Pruebas = {
                 inp.dispatchEvent(new Event('change', { bubbles: true }));
                 await new Promise(r => setTimeout(r, 40));
               };
-              await poner('Factura taller 4821.pdf', TipoDocumento.FACTURA);
               await poner('Comprobante Bancolombia.pdf', TipoDocumento.COMPROBANTE_CONSIGNACION);
               await poner('Recibo repuestos.pdf', TipoDocumento.SOPORTE_COMPRA);
 
-              Pruebas.igual((VistaCajaForm.estado.adjuntos || []).length, 3, 'Los tres esperan');
+              Pruebas.igual((VistaCajaForm.estado.adjuntos || []).length, 2, 'Los dos esperan');
               /* Cambiar el desplegable no debe mover los que ya estaban. */
               Pruebas.igual(VistaCajaForm.estado.adjuntos.map(x => x.tipo).join(','),
-                [TipoDocumento.FACTURA, TipoDocumento.COMPROBANTE_CONSIGNACION,
-                 TipoDocumento.SOPORTE_COMPRA].join(','),
+                [TipoDocumento.COMPROBANTE_CONSIGNACION, TipoDocumento.SOPORTE_COMPRA].join(','),
                 'Cada uno conserva el destino con el que se eligió');
               const vista = div.querySelector('#listaAdjuntos').innerHTML;
               for (const d of DESTINOS_DOC)
@@ -15986,16 +16476,15 @@ const Pruebas = {
             } finally { Router.ir = irOriginal; div.remove(); }
 
             const docs = await CajaRepo.documentos(cajaId);
-            Pruebas.igual(docs.length, 3, 'Los tres llegan a la caja de una sola vez');
+            Pruebas.igual(docs.length, 2, 'Los dos llegan a la caja de una sola vez');
             const nom = f => docs.filter(f).map(x => x.nombre).join(',');
-            Pruebas.igual(nom(esDocAnticipo), 'Factura taller 4821.pdf', 'La factura, al anticipo');
             Pruebas.igual(nom(esDocDelGiro), 'Comprobante Bancolombia.pdf', 'El comprobante, al giro');
             Pruebas.igual(nom(esDocLegalizacion), 'Recibo repuestos.pdf', 'El recibo, a la legalización');
           } },
 
-        { nombre: 'CRÍTICO · lo que justifica el giro no se mezcla con lo que legaliza el gasto', fn: async ctx => {
-            /* Son tres momentos distintos del mismo dinero y prueban cosas
-               diferentes: la factura del taller llega ANTES y justifica cuanto
+        { nombre: 'CRÍTICO · el comprobante del giro no se mezcla con lo que legaliza el gasto', fn: async ctx => {
+            /* Son dos momentos distintos del mismo dinero y prueban cosas
+               diferentes: el comprobante dice que el dinero salió; la factura
                hay que consignar; el comprobante prueba EL GIRO; los recibos
                llegan DESPUES y dicen en que se uso la plata. Amontonarlos
                borra esa diferencia. */
@@ -16011,25 +16500,26 @@ const Pruebas = {
             const arch = (nom, tipo) => Expediente.subir(
               [new File([new Uint8Array([37, 80, 68, 70, ++sem])], nom, { type: 'application/pdf' })],
               { cajaId: caja.id, tipo: tipo });
-            await arch('Factura taller 4821.pdf', TipoDocumento.FACTURA);
+            await arch('Factura taller 4821.pdf', TipoDocumento.SOPORTE_COMPRA);
             await arch('Recibo repuestos.pdf', TipoDocumento.SOPORTE_COMPRA);
             await arch('Comprobante Bancolombia.pdf', TipoDocumento.COMPROBANTE_CONSIGNACION);
 
             const docs = await CajaRepo.documentos(caja.id);
             Pruebas.igual(docs.length, 3, 'Los tres papeles cuelgan de la caja');
             const nombres = f => docs.filter(f).map(d => d.nombre).sort().join(', ');
-            Pruebas.igual(nombres(esDocAnticipo), 'Factura taller 4821.pdf',
-              'El anticipo lleva sólo lo que justifica el giro');
-            Pruebas.igual(nombres(esDocLegalizacion), 'Recibo repuestos.pdf',
-              'La legalización lleva sólo lo que se gastó');
+            /* La factura del taller y los recibos del líder van juntos: los dos
+               justifican en qué se gastó. Antes la factura tenía tarjeta propia
+               y había que subirla dos veces o la caja salía sin legalizar. */
+            Pruebas.igual(nombres(esDocLegalizacion), 'Factura taller 4821.pdf, Recibo repuestos.pdf',
+              'La legalización lleva todo lo que justifica el gasto');
             Pruebas.igual(nombres(esDocDelGiro), 'Comprobante Bancolombia.pdf',
               'Y el comprobante va aparte');
-            /* Ninguno cae en dos sitios ni se queda fuera. */
+            /* Ninguno cae en los dos sitios ni se queda fuera. */
             for (const d of docs) {
-              const en = [esDocAnticipo(d), esDocLegalizacion(d), esDocDelGiro(d)].filter(Boolean).length;
+              const en = [esDocLegalizacion(d), esDocDelGiro(d)].filter(Boolean).length;
               Pruebas.igual(en, 1, d.nombre + ' está en exactamente un grupo');
             }
-            /* El formato que genera el sistema no es de ninguno de los tres. */
+            /* El formato que genera el sistema no es de ninguno de los dos. */
             Pruebas.ok(!esDocLegalizacion({ tipo: TipoDocumento.FORMATO_CAJA }),
               'El formato generado no se cuela como legalización');
 
@@ -16039,11 +16529,11 @@ const Pruebas = {
             let html = '';
             try { await VistaCaja.render(div, [caja.id]); html = div.innerHTML; }
             finally { div.remove(); }
-            Pruebas.ok(html.indexOf(DESTINOS_DOC[0].titulo) >= 0,
-              'La caja tiene la tarjeta de lo que justifica el giro');
-            Pruebas.ok(html.indexOf(DESTINOS_DOC[2].titulo) >= 0, 'Y la del gasto ya hecho');
-            Pruebas.ok(/Antes de girar/.test(html) && /Después de gastar/.test(html),
-              'Cada una dice de qué momento es');
+            Pruebas.ok(html.indexOf(DESTINOS_DOC[1].titulo) >= 0,
+              'La caja tiene la tarjeta de lo que legaliza el gasto');
+            Pruebas.ok(/Después de gastar/.test(html), 'Y dice de qué momento es');
+            Pruebas.ok(!/Antes de girar/.test(html),
+              'Ya no hay tarjeta de antes de girar: era la misma factura');
           } },
 
         { nombre: 'La factura del taller se guarda en su caja', fn: async ctx => {
@@ -16057,10 +16547,11 @@ const Pruebas = {
             });
             const pdf = new File([new Uint8Array([37, 80, 68, 70])], 'Factura taller 4821.pdf',
               { type: 'application/pdf' });
-            await Expediente.subir([pdf], { cajaId: caja.id, tipo: TipoDocumento.FACTURA });
+            await Expediente.subir([pdf], { cajaId: caja.id, tipo: TipoDocumento.SOPORTE_COMPRA });
             const docs = await CajaRepo.documentos(caja.id);
             Pruebas.igual(docs.length, 1, 'La factura queda colgada de esta caja');
-            Pruebas.igual(docs[0].tipo, TipoDocumento.FACTURA, 'Y ya clasificada como factura');
+            Pruebas.igual(docs[0].tipo, TipoDocumento.SOPORTE_COMPRA,
+              'Y clasificada como legalización: la factura del taller es lo que justifica el gasto');
             Pruebas.igual(docs[0].cajaId, caja.id, 'Asociada a la caja correcta');
 
             /* Un comprobante de consignación NO debe aparecer entre los
@@ -16078,7 +16569,7 @@ const Pruebas = {
 
             const div = document.createElement('div');
             await VistaCaja.render(div, [caja.id]);
-            Pruebas.ok(div.innerHTML.indexOf(DESTINOS_DOC[0].titulo) >= 0,
+            Pruebas.ok(div.innerHTML.indexOf(DESTINOS_DOC[1].titulo) >= 0,
               'La caja tiene su tarjeta para las facturas');
             Pruebas.ok(/Factura taller 4821\.pdf/.test(div.innerHTML), 'Con la factura dentro');
           } },
@@ -16252,6 +16743,28 @@ const Pruebas = {
             const c = Importador.claveDuplicado({ fecha: '2026-03-10', ubicacion: 'Apartadó', concepto: 'Alirio Pardo',
               descripcion: 'Gasolina', total: 10000001 });
             Pruebas.ok(a !== c, 'Un valor distinto no es duplicado');
+          } },
+        { nombre: 'CRÍTICO · el importador no ve repetidos en otro contrato', fn: async ctx => {
+            /* El mismo archivo importado en un contrato nuevo salía con todas
+               las filas marcadas como repetidas: se comparaban contra las cajas
+               de TODA la base, incluido el contrato de al lado. Son gastos
+               distintos, de otra cuenta, aunque se parezcan. */
+            const propias = await Importador.cajasParaComparar();
+            const ctrId = ContratoRepo.activoId();
+            Pruebas.ok(propias.length > 0, 'En su contrato sí ve las suyas');
+            Pruebas.ok(propias.every(c => !c.contratoId || c.contratoId === ctrId),
+              'Y ninguna es de otro contrato');
+
+            const otro = await ContratoRepo.guardar({
+              nombre: 'CONTRATO PARA IMPORTAR', numero: 'CTO-IMP-1',
+              prefijoCaja: 'IM', prefijoConsignacion: 'IMC', fechaInicio: '2026-01-01'
+            });
+            try {
+              await ContratoRepo.cambiarActivo(otro.id);
+              const vacio = await Importador.cajasParaComparar();
+              Pruebas.igual(vacio.length, 0,
+                'En un contrato nuevo no hay nada contra qué comparar: el archivo entra entero');
+            } finally { await ContratoRepo.cambiarActivo(ctrId); }
           } },
         { nombre: 'Crear respaldo completo', fn: async ctx => {
             const { blob, manifiesto } = await Respaldo.crear({ incluirDocumentos: true });
@@ -16584,16 +17097,27 @@ const Semillas = {
         nC + ' cajas, ' + nD + ' detalles, ' + nK + ' consignaciones adoptadas.');
     }
 
+    /* Las reparaciones de aquí abajo miran casi siempre las mismas tablas.
+       Se piden UNA vez y se comparten: antes cada una pedía las suyas por su
+       cuenta y el arranque acababa trayendo la tabla de detalles dos veces y
+       la de cajas otras dos, contra el servidor, en cada apertura del
+       programa. La que escribe en una tabla la olvida, para que la siguiente
+       la lea de nuevo y no trabaje sobre una foto vieja. */
+    const _tablas = {};
+    const leer = col => (_tablas[col] || (_tablas[col] = db.getAll(col)));
+    const olvidar = col => { delete _tablas[col]; };
+
     /* --- migración v3: estados resumidos ---------------------------------
        Los seis estados anteriores se reducen a los tres pasos que ocurren de
        verdad. Se reescriben los que quedaron con el nombre viejo; los que ya
        están al día no se tocan, así que arrancar dos veces no cambia nada. */
     {
-      const cajas = await db.getAll('cajas');
+      const cajas = await leer('cajas');
       const aCambiar = cajas.filter(c => ESTADOS_ANTIGUOS[c.estado]);
       if (aCambiar.length) {
         await db.putMany('cajas', aCambiar.map(c =>
           Object.assign({}, c, { estado: ESTADOS_ANTIGUOS[c.estado] })));
+        olvidar('cajas');
         const cuenta = {};
         for (const c of aCambiar) {
           const k = c.estado + ' → ' + ESTADOS_ANTIGUOS[c.estado];
@@ -16613,17 +17137,36 @@ const Semillas = {
        catálogos de fábrica ya estén sembrados. Es idempotente: en el segundo
        arranque ya no queda nada sin dueño y no hace nada. */
     {
-      const primero = (await db.getAll('contratos')).slice().sort(U.by('creadoEn'))[0];
+      const primero = (await leer('contratos')).slice().sort(U.by('creadoEn'))[0];
       if (primero) {
         for (const col of ['personas', 'categorias', 'municipios']) {
-          const sinDueno = (await db.getAll(col)).filter(x => !x.contratoId);
+          const sinDueno = (await leer(col)).filter(x => !x.contratoId);
           if (!sinDueno.length) continue;
           sinDueno.forEach(x => { x.contratoId = primero.id; });
           await db.putMany(col, sinDueno);
+          olvidar(col);
           console.info('[migración v4] ' + sinDueno.length + ' ' + col +
             ' asignados a «' + primero.nombre + '».');
         }
       }
+    }
+
+    /* --- migración v7: la factura del proveedor pasa a legalización -------
+       Había tres tipos de adjunto y el primero, «Factura del proveedor», era
+       para el papel que llegaba ANTES de girar. En la práctica esa misma
+       factura es la que legaliza el gasto, así que tenerla aparte obligaba a
+       subirla dos veces o dejaba la caja marcada como sin legalizar teniendo
+       su soporte delante. Se convierten los que ya estaban subidos.
+
+       La comprobación es de una sola cuenta contra el índice de tipo: cuando
+       ya no queda ninguno —que es siempre, a partir del segundo arranque— no
+       se pide nada más. */
+    if (await db.count('documentos', 'tipo', 'FACTURA')) {
+      const viejos = await db.query('documentos', { indice: 'tipo', valor: 'FACTURA' });
+      await db.putMany('documentos', viejos.map(d =>
+        Object.assign({}, d, { tipo: TipoDocumento.SOPORTE_COMPRA })));
+      console.info('[migración v7] ' + viejos.length +
+        ' documento(s) de «factura del proveedor» pasaron a «legalización del gasto».');
     }
 
     /* --- reparación v6: catálogos sembrados por error ---------------------
@@ -16634,31 +17177,44 @@ const Semillas = {
        tenga movimientos detrás se toca, y lo que haya creado el usuario a mano
        tampoco (sólo se retira lo de origen SISTEMA). */
     {
-      const contratos = (await db.getAll('contratos')).slice().sort(U.by('creadoEn'));
+      const contratos = (await leer('contratos')).slice().sort(U.by('creadoEn'));
       const primero = contratos[0];
-      if (primero && contratos.length > 1) {
-        const cajas = await db.getAll('cajas');
-        const detalles = await db.getAll('detalles');
-        const conMovimiento = new Set(cajas.map(c => c.contratoId));
-        const catsEnUso = new Set(detalles.map(d => d.categoriaId).filter(Boolean));
-        const munsEnUso = new Set(cajas.map(c => c.municipioId).filter(Boolean));
-        let quitadas = 0;
-        for (const ctr of contratos.slice(1)) {
-          if (conMovimiento.has(ctr.id)) continue;   // contrato ya en uso: no se toca
-          /* Se lee de la BASE, no de la caché: durante el arranque la caché
-             todavía está vacía —se carga justo después— y esto no encontraba
-             nada que limpiar. */
-          for (const [col, enUso] of [['categorias', catsEnUso], ['municipios', munsEnUso]]) {
-            const sobran = (await db.getAll(col)).filter(x =>
-              x.contratoId === ctr.id && x.origen === Origen.SISTEMA && !enUso.has(x.id));
-            for (const x of sobran) {
-              await db.remove(col, x.id);
-              if (Cache[col]) Cache[col].delete(x.id);
-              quitadas++;
-            }
-          }
+      /* Se mira primero lo barato. Si en los contratos posteriores no queda ni
+         un catálogo de fábrica, no hay nada que retirar y no hace falta traer
+         cajas ni detalles enteros. Después de la primera limpieza éste es
+         siempre el caso, y el arranque se ahorra el trabajo completo. */
+      const posteriores = new Set(contratos.slice(1).map(c => c.id));
+      const candidatos = { categorias: [], municipios: [] };
+      let hayAlgo = false;
+      if (primero && posteriores.size) {
+        for (const col of ['categorias', 'municipios']) {
+          candidatos[col] = (await leer(col)).filter(x =>
+            posteriores.has(x.contratoId) && x.origen === Origen.SISTEMA);
+          if (candidatos[col].length) hayAlgo = true;
         }
-        if (quitadas) console.info('[reparación v6] ' + quitadas +
+      }
+      if (hayAlgo) {
+        const cajas = await leer('cajas');
+        const detalles = await leer('detalles');
+        /* Un contrato que ya mueve dinero no se toca, y tampoco se retira nada
+           que tenga un movimiento detrás: sólo lo que nadie llegó a usar. */
+        const conMovimiento = new Set(cajas.map(c => c.contratoId));
+        const enUso = {
+          categorias: new Set(detalles.map(d => d.categoriaId).filter(Boolean)),
+          municipios: new Set(cajas.map(c => c.municipioId).filter(Boolean))
+        };
+        let total = 0;
+        for (const col of ['categorias', 'municipios']) {
+          let n = 0;
+          for (const x of candidatos[col]) {
+            if (conMovimiento.has(x.contratoId) || enUso[col].has(x.id)) continue;
+            await db.remove(col, x.id);
+            if (Cache[col]) Cache[col].delete(x.id);
+            n++;
+          }
+          if (n) { olvidar(col); total += n; }
+        }
+        if (total) console.info('[reparación v6] ' + total +
           ' elemento(s) de catálogo sembrados por error se retiraron de los contratos nuevos.');
       }
     }
@@ -16675,9 +17231,9 @@ const Semillas = {
        nombre escrito, que es como estaba antes. Ni un dato se pierde: el
        nombre de la categoría vive en el propio movimiento. */
     {
-      const cats = await db.getAll('categorias');
+      const cats = await leer('categorias');
       const porId = new Map(cats.map(c => [c.id, c]));
-      const detalles = await db.getAll('detalles');
+      const detalles = await leer('detalles');
       const cruzados = detalles.filter(d => {
         if (!d.categoriaId || !d.contratoId) return false;
         const c = porId.get(d.categoriaId);
@@ -16694,6 +17250,7 @@ const Semillas = {
           return Object.assign({}, d, { categoriaId: null });
         });
         await db.putMany('detalles', arreglados);
+        olvidar('detalles');
         console.info('[reparación v5] ' + cruzados.length + ' movimiento(s) estaban ' +
           'enlazados a una categoría de otro contrato: ' + recolocados + ' recolocados, ' +
           sueltos + ' devueltos a texto escrito.');
@@ -16703,7 +17260,7 @@ const Semillas = {
     /* auto-reparación: si no hay financiador por defecto, proponer el primero
        que no sea la propia empresa (el usuario puede cambiarlo en Configuración) */
     if (!cfg.financiadorPorDefectoId) {
-      const personas = await db.getAll('personas');
+      const personas = await leer('personas');
       const cand = personas.filter(p => p.esFinanciador && p.estado === Estado.ACTIVO)
         .sort((a, b) => (Txt.norm(a.cargo) === 'empresa' ? 1 : 0) - (Txt.norm(b.cargo) === 'empresa' ? 1 : 0)
                         || a.nombre.localeCompare(b.nombre, 'es'))[0];
