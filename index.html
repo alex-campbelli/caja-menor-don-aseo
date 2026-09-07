@@ -3167,6 +3167,10 @@ const ContratoRepo = {
    * eso afecte a los demás contratos.
    */
   async sembrarCatalogos(contratoId) {
+    /* Sólo a un contrato SIN MOVIMIENTO. Uno en uso puede haberse quedado sin
+       algún municipio porque se borró a propósito, y no hay que resucitarlo. */
+    const conCajas = (await db.getAll('cajas')).some(c => c.contratoId === contratoId);
+    if (conCajas) return;
     const tiene = col => [...Cache[col].values()].some(x => x.contratoId === contratoId);
     if (!tiene('municipios')) {
       const lista = Semillas.MUNICIPIOS.map(n =>
@@ -3185,6 +3189,10 @@ const ContratoRepo = {
   async cambiarActivo(id) {
     if (!this.get(id)) throw new ErrorDominio('Contrato no encontrado.', 'NO_EXISTE');
     await ConfigRepo.guardar({ contratoActivoId: id });
+    /* Un contrato creado ANTES de que los catálogos fueran de cada contrato se
+       quedó sin ninguno: al entrar en él aparecía vacío, sin municipios donde
+       elegir. Se le instalan aquí, la primera vez que se entra. */
+    await this.sembrarCatalogos(id);
     Analitica.invalidar();
     Bus.emit('contrato:cambio', this.activo());
     return this.activo();
@@ -12809,7 +12817,9 @@ const Migracion = {
     T("  origen text default 'MANUAL', legacy jsonb,");
     T('  creado_en timestamptz default now(), actualizado_en timestamptz default now()');
     T(');');
-    T('create unique index if not exists ux_municipios_nombre on municipios (nombre_norm);');
+    T('-- el nombre es único DENTRO de cada contrato, no en toda la base:');
+    T('-- dos contratos pueden tener un «Caja menor» cada uno.');
+    T('create unique index if not exists ux_municipios_nombre on municipios (contrato_id, nombre_norm);');
     T('');
     T('create table if not exists personas (');
     T('  id text primary key, nombre text not null, nombre_norm text, cedula text,');
@@ -12823,7 +12833,9 @@ const Migracion = {
     T("  estado text not null default 'ACTIVO', origen text default 'MANUAL', legacy jsonb,");
     T('  creado_en timestamptz default now(), actualizado_en timestamptz default now()');
     T(');');
-    T('create unique index if not exists ux_personas_nombre on personas (nombre_norm);');
+    T('-- el nombre es único DENTRO de cada contrato, no en toda la base:');
+    T('-- dos contratos pueden tener un «Caja menor» cada uno.');
+    T('create unique index if not exists ux_personas_nombre on personas (contrato_id, nombre_norm);');
     T('create index if not exists ix_personas_estado on personas (estado);');
     T('');
     T('create table if not exists categorias (');
@@ -12834,7 +12846,9 @@ const Migracion = {
     T("  estado text not null default 'ACTIVO', sistema boolean default false, origen text default 'MANUAL',");
     T('  creado_en timestamptz default now(), actualizado_en timestamptz default now()');
     T(');');
-    T('create unique index if not exists ux_categorias_nombre on categorias (nombre_norm);');
+    T('-- el nombre es único DENTRO de cada contrato, no en toda la base:');
+    T('-- dos contratos pueden tener un «Caja menor» cada uno.');
+    T('create unique index if not exists ux_categorias_nombre on categorias (contrato_id, nombre_norm);');
     T('');
     T('create table if not exists cajas (');
     T('  id text primary key,');
@@ -15198,6 +15212,51 @@ const Pruebas = {
             for (const d of DESTINOS_DOC)
               Pruebas.igual(d.titulo, TIPO_DOC_META[d.tipo].label,
                 'El desplegable y la etiqueta del archivo dicen lo mismo: ' + d.titulo);
+          } },
+
+        { nombre: 'CRÍTICO · un contrato de antes, vacío, recibe sus catálogos al entrar', fn: async () => {
+            /* Los contratos creados ANTES de que los catálogos fueran de cada
+               contrato se quedaron sin ninguno: al entrar aparecían vacíos, sin
+               municipios donde elegir y sin categorías. */
+            const original = ContratoRepo.activoId();
+            /* Se crea a mano, saltándose el sembrado, para imitar a uno viejo. */
+            const viejo = Modelo.contrato({ nombre: 'CONTRATO ANTIGUO SIN CATÁLOGOS',
+              prefijoCaja: 'AN', prefijoConsignacion: 'ANC' });
+            await db.put('contratos', viejo);
+            Cache.contratos.set(viejo.id, viejo);
+            await Cache.cargar();
+            try {
+              await ContratoRepo.cambiarActivo(viejo.id);
+              Pruebas.ok(MunicipioRepo.todos().length > 0,
+                'Al entrar, el contrato viejo ya tiene municipios donde elegir');
+              Pruebas.ok(CategoriaRepo.todas().length > 0, 'Y sus categorías');
+
+              /* Y el nombre repetido entre contratos ya no choca: es el error
+                 «Ya existe un registro con ese nombre» que daba la base. */
+              const cB = await CategoriaRepo.guardar({ nombre: 'Caja menor',
+                descripcion: 'Gastos de este contrato' });
+              Pruebas.igual(cB.contratoId, viejo.id, 'La categoría queda sellada con su contrato');
+
+              await ContratoRepo.cambiarActivo(original);
+              const cA = await CategoriaRepo.obtenerOCrear('Caja menor');
+              Pruebas.ok(cA.id !== cB.id,
+                'El mismo nombre en dos contratos son DOS registros distintos');
+              Pruebas.igual((await db.getAll('categorias'))
+                .filter(c => c.nombreNorm === Txt.norm('Caja menor')).length, 2,
+                'Y las dos están guardadas');
+
+              /* El índice de la base también tiene que ser por contrato, o la
+                 nube rechazaría la segunda aunque el programa la permita. */
+              const sql = Migracion.generarDDL();
+              {
+                for (const tabla of ['personas', 'categorias', 'municipios'])
+                  Pruebas.ok(sql.indexOf('ux_' + tabla + '_nombre on ' + tabla +
+                    ' (contrato_id, nombre_norm)') >= 0,
+                    'El índice único de ' + tabla + ' es por contrato, no global');
+              }
+            } finally {
+              await ContratoRepo.cambiarActivo(original);
+            }
           } },
 
         { nombre: 'CRÍTICO · cada contrato tiene sus propios catálogos', fn: async ctx => {
