@@ -2288,6 +2288,34 @@ const Modelo = {
     };
   },
 
+  /**
+   * Lo que queda anotado de una importación.
+   *
+   * Estaba escrito a mano dentro del asistente, y por eso se le escapó al
+   * esquema: el código guardaba «categorías creadas» y la tabla no tenía esa
+   * columna. La importación entera funcionaba y luego fallaba al anotarla.
+   * Declarado aquí, la prueba que compara modelos y columnas lo alcanza.
+   */
+  importacion(p) {
+    p = p || {};
+    return {
+      id: p.id || ID.importacion(),
+      archivo: p.archivo || '',
+      hoja: p.hoja || '',
+      filasAnalizadas: p.filasAnalizadas || 0,
+      cajasCreadas: p.cajasCreadas || 0,
+      personasCreadas: p.personasCreadas || 0,
+      municipiosCreados: p.municipiosCreados || 0,
+      categoriasCreadas: p.categoriasCreadas || 0,
+      omitidas: p.omitidas || 0,
+      errores: p.errores || 0,
+      mapeo: p.mapeo || {},
+      opciones: p.opciones || {},
+      montoImportado: p.montoImportado || 0,
+      creadoEn: p.creadoEn || Modelo.ahora()
+    };
+  },
+
   documento(p) {
     p = p || {};
     return {
@@ -6759,12 +6787,12 @@ const VistaCajas = {
    * para comprobar que la suma cuadra, y debajo se dice con todas las letras
    * que gasolina y aceite no se suman aparte (§13).
    */
-  filaDetalle(c, dets) {
+  filaDetalle(c, dets, ncols) {
     const haySub = dets.some(d => d.rol === RolEstadistico.GASOLINA || d.rol === RolEstadistico.ACEITE);
     const hayReparto = dets.some(d => d.repartoId);
     const cols = hayReparto ? 4 : 3;
     const suma = U.sumBy(dets, d => d.valor);
-    return '<tr class="det-fila hidden" data-det="' + attr(c.id) + '"><td colspan="15">' +
+    return '<tr class="det-fila hidden" data-det="' + attr(c.id) + '"><td colspan="' + (ncols || 15) + '">' +
       '<div class="det-caja">' +
       (dets.length
         /* Las mismas columnas que dentro de la caja: al separar categoría y
@@ -6882,6 +6910,16 @@ const VistaCajas = {
 
     const q = Txt.norm(f.texto);
     const ctrId = ContratoRepo.activoId();
+    /* Las columnas de gasolina y aceite sólo si este contrato las analiza. En
+       un hospital eran dos columnas siempre vacías robándole sitio a lo que sí
+       importa. Manda el mismo interruptor que el panel y la plantilla: la
+       categoría marcada como medible. */
+    const roles = new Set(CategoriaRepo.estadisticas().map(c => c.rol));
+    const verGas = roles.has(RolEstadistico.GASOLINA);
+    const verAce = roles.has(RolEstadistico.ACEITE);
+    /* Cuántas columnas tiene la tabla, para que los colspan del pie y del
+       desglose no se queden cortos ni se pasen. */
+    const NCOLS = 13 + (verGas ? 1 : 0) + (verAce ? 1 : 0);
 
     /* La categoría y la descripción viven en los detalles, no en la caja. Se
        traen de una vez —una lectura, no una por fila— y en paralelo con las
@@ -7079,7 +7117,8 @@ const VistaCajas = {
       th('solicitante', 'Concepto', '', 'Como en el Excel. Es la persona que solicita el dinero.') +
       '<th title="Como en el Excel. Es el municipio de la operación.">Ubicación</th>' +
       '<th title="Quién adelantó el dinero. No es quien lo solicita.">Consignó</th>' + th('total', 'Total', 'num') +
-      '<th class="num">Gasolina</th><th class="num">Aceite</th>' +
+      (verGas ? '<th class="num">Gasolina</th>' : '') +
+      (verAce ? '<th class="num">Aceite</th>' : '') +
       '<th class="num" title="Del programa: cuánto falta por reponer de esta caja.">Pendiente</th>' +
       '<th title="Del programa: en qué punto va la caja.">Estado</th><th></th>' +
       '</tr></thead><tbody>' +
@@ -7153,8 +7192,8 @@ const VistaCajas = {
           '<td class="trunc" style="max-width:92px" title="' + attr(Comp.nombreConsigno(c)) + '">' +
             esc(Comp.nombreConsigno(c)) + '</td>' +
           '<td class="num"><b>' + Money.format(c.total) + '</b></td>' +
-          '<td class="num">' + (c.gasolina ? Money.format(c.gasolina) : '<span class="txt-3">—</span>') + '</td>' +
-          '<td class="num">' + (c.aceite ? Money.format(c.aceite) : '<span class="txt-3">—</span>') + '</td>' +
+          (verGas ? '<td class="num">' + (c.gasolina ? Money.format(c.gasolina) : '<span class="txt-3">—</span>') + '</td>' : '') +
+          (verAce ? '<td class="num">' + (c.aceite ? Money.format(c.aceite) : '<span class="txt-3">—</span>') + '</td>' : '') +
           /* Los días van pegados al pendiente y no en una columna propia: la
              tabla ya va justa y el dato sólo importa cuando hay algo esperando. */
           (() => {
@@ -7177,16 +7216,16 @@ const VistaCajas = {
           /* La descripción es texto largo: en una columna quedaría cortada y
              sin poder copiarse. Va en su propia fila, desplegable, con TODOS
              los detalles de la caja y su texto completo. */
-          (hayDesglose ? VistaCajas.filaDetalle(c, dets) : '');
+          (hayDesglose ? VistaCajas.filaDetalle(c, dets, NCOLS) : '');
       }).join('')
-        : '<tr><td colspan="15">' + Comp.vacio({ icono: 'caja', titulo: 'Sin resultados',
+        : '<tr><td colspan="' + NCOLS + '">' + Comp.vacio({ icono: 'caja', titulo: 'Sin resultados',
             texto: todas.length === 0 ? 'Aún no hay cajas menores registradas o los filtros no coinciden.' : 'Ajuste los filtros.',
             accion: 'nueva', textoAccion: 'Crear la primera caja', iconoAccion: 'plus' }) + '</td></tr>') +
       '</tbody>' +
       (pagina.length ? '<tfoot><tr><td colspan="9">Subtotal de la página</td>' +
         '<td class="num">' + Money.format(U.sumBy(pagina.filter(c => c.estado !== EstadoCaja.ANULADA), c => c.total)) + '</td>' +
-        '<td class="num">' + Money.format(U.sumBy(pagina, c => c.gasolina)) + '</td>' +
-        '<td class="num">' + Money.format(U.sumBy(pagina, c => c.aceite)) + '</td>' +
+        (verGas ? '<td class="num">' + Money.format(U.sumBy(pagina, c => c.gasolina)) + '</td>' : '') +
+        (verAce ? '<td class="num">' + Money.format(U.sumBy(pagina, c => c.aceite)) + '</td>' : '') +
         '<td colspan="3"></td></tr></tfoot>' : '') +
       '</table></div>' +
       Comp.pager({ total: todas.length, tam, pagina: f.pagina, actPag: 'irPagina', actTam: 'cambiarTam' }) +
@@ -12570,7 +12609,7 @@ const Importador = {
         if (s.progreso.hechos % 10 === 0) { this.pintarProgreso(); await new Promise(res => setTimeout(res, 0)); }
       }
 
-      await db.put('importaciones', {
+      await db.put('importaciones', Modelo.importacion({
         id: importId, archivo: s.archivo.name, hoja: s.hojaSel,
         filasAnalizadas: s.analisis.totales.analizados,
         cajasCreadas: s.progreso.creadas, personasCreadas: s.progreso.personas,
@@ -12580,7 +12619,7 @@ const Importador = {
         mapeo: s.mapeo, opciones: s.opciones,
         montoImportado: U.sumBy(aImportar, r => r.total),
         creadoEn: ahora
-      });
+      }));
       await Auditoria.registrar('importacion', importId, 'IMPORTAR',
         { archivo: s.archivo.name, cajas: s.progreso.creadas });
 
@@ -13306,7 +13345,7 @@ const Migracion = {
     T('');
     T('create table if not exists importaciones (');
     T('  id text primary key, archivo text, hoja text, filas_analizadas int, cajas_creadas int,');
-    T('  personas_creadas int, municipios_creados int, omitidas int, errores int,');
+    T('  personas_creadas int, municipios_creados int, categorias_creadas int, omitidas int, errores int,');
     T('  mapeo jsonb, opciones jsonb, monto_importado bigint, creado_en timestamptz default now()');
     T(');');
     T('');
@@ -13833,6 +13872,50 @@ const Pruebas = {
             Pruebas.ok(!ddl.includes('to anon'), 'Nada abierto al rol anónimo');
             Pruebas.ok(ddl.includes("'soportes'"), 'Bucket privado de soportes');
             Pruebas.ok(ddl.includes('contrato_id text references contratos(id)'), 'Las cajas apuntan al contrato');
+          } },
+        { nombre: 'CRÍTICO · ningún campo del modelo se queda sin columna', fn: () => {
+            /* La tabla de importaciones no tenía «categorias_creadas» y el
+               código sí la escribía: la importación entera funcionaba y luego
+               fallaba al anotarla, con un mensaje de Supabase que no dice qué
+               hacer. Nada lo vigilaba, porque las pruebas comprobaban que las
+               TABLAS existieran, no sus columnas. Esto recorre cada modelo y
+               exige que todos sus campos estén declarados. */
+            const ddl = Migracion.generarDDL();
+            const FABRICAS = {
+              contratos: Modelo.contrato, personas: Modelo.persona,
+              municipios: Modelo.municipio, categorias: Modelo.categoria,
+              cajas: Modelo.caja, detalles: Modelo.detalle,
+              consignaciones: Modelo.consignacion, aplicaciones: Modelo.aplicacion,
+              documentos: Modelo.documento, importaciones: Modelo.importacion,
+              configuracion: Modelo.configuracion
+            };
+            /* Se recorta el trozo de DDL de cada tabla para no confundir una
+               columna de una con la de otra: casi todas tienen «id». */
+            const bloqueDe = tabla => {
+              const i = ddl.indexOf('create table if not exists ' + tabla + ' (');
+              if (i < 0) return '';
+              return ddl.slice(i, ddl.indexOf(');', i));
+            };
+            let revisados = 0;
+            for (const [tabla, fabrica] of Object.entries(FABRICAS)) {
+              const bloque = bloqueDe(tabla);
+              Pruebas.ok(bloque, 'Existe la tabla ' + tabla);
+              for (const campo of Object.keys(fabrica({}))) {
+                const col = Nombres.snake(campo);
+                Pruebas.ok(new RegExp('(^|[\\s(,])' + col + '\\s').test(bloque),
+                  tabla + ' declara la columna ' + col);
+                revisados++;
+              }
+            }
+            Pruebas.ok(revisados > 100, 'Se revisaron ' + revisados + ' campos');
+          } },
+        { nombre: 'La importación anota sus catálogos creados', fn: async ctx => {
+            /* El campo concreto que faltaba, escrito y leído de vuelta. */
+            const r = Modelo.importacion({ archivo: 'x.xlsx', categoriasCreadas: 4, municipiosCreados: 2 });
+            await db.put('importaciones', r);
+            const leido = await db.get('importaciones', r.id);
+            Pruebas.igual(leido.categoriasCreadas, 4, 'Las categorías creadas se guardan y vuelven');
+            Pruebas.igual(leido.municipiosCreados, 2, 'Y los municipios también');
           } },
         { nombre: 'CRÍTICO · los booleanos viajan como boolean, no como 1/0', fn: () => {
             /* La base local guarda 1/0 (IndexedDB no indexa booleanos) pero las
@@ -14965,6 +15048,59 @@ const Pruebas = {
             Pruebas.ok(!html.includes('PARA CONSIGNAR A'), 'No debe aparecer el bloque de la cuenta');
             Pruebas.ok(html.includes('REEMBOLSAR'), 'Pero el resto del documento sigue igual');
           } },
+        { nombre: 'CRÍTICO · el listado no enseña columnas que el contrato no usa', fn: async ctx => {
+            /* En un contrato de hospital, Gasolina y Aceite eran dos columnas
+               siempre vacías robándole sitio a lo que sí importa. Manda el
+               mismo interruptor que el panel y la plantilla. */
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            const gas = CategoriaRepo.porRol(RolEstadistico.GASOLINA);
+            const ace = CategoriaRepo.porRol(RolEstadistico.ACEITE);
+            /* Se miran los ENCABEZADOS de la tabla, no el HTML entero: el
+               desplegable de filtros también lista la categoría «Gasolina» y
+               buscar el texto suelto daría por buena una columna que sigue ahí.
+               Y sólo los de la tabla de FUERA: las filas de desglose llevan su
+               propia tabla dentro, con su cabecera y su pie. */
+            const tablaDe = html => {
+              const t = document.createElement('div'); t.innerHTML = html;
+              return t.querySelector('table');
+            };
+            const encabezados = html => {
+              const tb = tablaDe(html);
+              return tb ? [...tb.querySelectorAll(':scope > thead > tr > th')].map(x => x.textContent.trim()) : [];
+            };
+            try {
+              await VistaCajas.render(div);
+              const conTodo = encabezados(div.innerHTML);
+              Pruebas.ok(conTodo.includes('Gasolina'), 'Con la categoría marcada, la columna está');
+              Pruebas.ok(conTodo.includes('Aceite'), 'Y la de aceite también');
+
+              await CategoriaRepo.guardar(Object.assign({}, gas, { estadistica: 0, rol: null }));
+              await CategoriaRepo.guardar(Object.assign({}, ace, { estadistica: 0, rol: null }));
+              await VistaCajas.render(div);
+              const sinNada = div.innerHTML;
+              const cabSin = encabezados(sinNada);
+              Pruebas.ok(!cabSin.includes('Gasolina'), 'Sin la categoría, la columna desaparece');
+              Pruebas.ok(!cabSin.includes('Aceite'), 'Y la otra también');
+              Pruebas.igual(cabSin.length, conTodo.length - 2, 'La tabla tiene dos columnas menos');
+
+              /* Y el pie no puede quedarse corrido: si el colspan no se ajusta,
+                 el subtotal aparece bajo la columna equivocada. */
+              const tb = tablaDe(sinNada);
+              const pie = tb && tb.querySelector(':scope > tfoot > tr');
+              if (pie) {
+                const celdas = [...pie.children]
+                  .reduce((n, td) => n + (Number(td.getAttribute('colspan')) || 1), 0);
+                Pruebas.igual(celdas, cabSin.length, 'El pie ocupa exactamente el ancho de la tabla');
+              }
+            } finally {
+              div.remove();
+              await CategoriaRepo.guardar(Object.assign({}, gas, { estadistica: 1, rol: RolEstadistico.GASOLINA }));
+              await CategoriaRepo.guardar(Object.assign({}, ace, { estadistica: 1, rol: RolEstadistico.ACEITE }));
+            }
+          } },
+
         { nombre: 'CRÍTICO · marcar por reembolsar sólo toca la página que se ve', fn: async ctx => {
             /* Marcaba todas las que pasaran el filtro, también las de las
                páginas siguientes: se pulsaba con veinticinco cajas delante y
