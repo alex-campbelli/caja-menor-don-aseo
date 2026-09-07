@@ -11005,21 +11005,29 @@ const Exportar = {
   hojasPlantilla() {
     const cfg = ConfigRepo.get() || {};
     const ctr = ContratoRepo.activo() || {};
+    /* Las columnas que este contrato necesita, no todas las que existen. Las
+       filas de ejemplo se recortan igual, para que sigan cuadrando con ellas. */
+    const campos = Importador.camposDePlantilla();
+    const quedan = campos.map(c => Importador.CAMPOS.indexOf(c));
+    const ejemplos = Importador.EJEMPLOS.map(f => quedan.map(i => f[i]));
+    const traeSub = campos.some(c => c.k === 'gasolina' || c.k === 'aceite');
     return [
       { nombre: (ctr.nombre || 'DATOS').slice(0, 31), titulo: null,
-        columnas: Importador.CAMPOS.map(c => ({ titulo: c.t, ancho: c.ancho || 20, tipo: c.celda })),
-        filas: Importador.EJEMPLOS },
+        columnas: campos.map(c => ({ titulo: c.t, ancho: c.ancho || 20, tipo: c.celda })),
+        filas: ejemplos },
       { nombre: 'INSTRUCCIONES', titulo: 'CÓMO DILIGENCIAR ESTA PLANTILLA',
         subtitulo: (cfg.empresa || APP.empresa) + (ctr.nombre ? ' · Contrato ' + ctr.nombre : '') +
                    ' · ' + APP.nombre + ' v' + APP.version,
         columnas: [{ titulo: 'Columna', ancho: 18 }, { titulo: 'Obligatoria', ancho: 12 },
           { titulo: 'Formato esperado', ancho: 30 }, { titulo: 'Explicación', ancho: 78 }],
-        filas: Importador.CAMPOS.map(c => [c.t, c.req ? 'SÍ' : 'No', c.formato || '', c.ayuda || '']).concat([
+        filas: campos.map(c => [c.t, c.req ? 'SÍ' : 'No', c.formato || '', c.ayuda || '']).concat([
             ['', '', '', ''],
             ['REGLAS GENERALES', '', '', ''],
             ['1', '', '', 'No borre ni renombre la fila de encabezados: el asistente la usa para detectar las columnas. Si cambia los nombres, podrá remapearlos manualmente.'],
             ['2', '', '', 'Los valores se escriben SIN separadores de miles ni símbolo $. Use 300000, no $300.000.'],
-            ['3', '', '', 'Si GASOLINA + ACEITE supera el Total, la fila se marcará como ADVERTENCIA y se importará sin modificar sus valores. El sistema nunca "corrige" datos por su cuenta.'],
+            ['3', '', '', traeSub
+              ? 'Si GASOLINA + ACEITE supera el Total, la fila se marcará como ADVERTENCIA y se importará sin modificar sus valores. El sistema nunca "corrige" datos por su cuenta.'
+              : 'Esta plantilla no trae columnas de subcomponentes: este contrato no analiza ninguna categoría por separado. Si quiere una, márquela como medible en Categorías y vuelva a descargarla.'],
             ['4', '', '', 'Las celdas vacías se dejan vacías o se registran como "No disponible". El sistema NO inventa bancos, cuentas, cédulas ni municipios.'],
             ['5', '', '', 'Cada fila importada conserva su archivo, hoja y número de fila de origen para poder auditarla después.'],
             ['6', '', '', 'El asistente detecta posibles duplicados comparando fecha, ubicación, concepto, descripción y valor. Usted decide si importarlos, omitirlos o revisarlos.'],
@@ -11737,6 +11745,22 @@ const Documento = {
        "¿de dónde salió este registro?".
      · El sistema NO decide qué texto es una persona: lo propone y usted confirma.
    ========================================================================== */
+/* Cambiar de contrato deja sin sentido una importación a medias: las filas se
+   compararon con los duplicados de OTRO contrato y las personas y municipios
+   que se iban a crear eran los de allí. Se descarta y se avisa; callarse y
+   dejarlo en pie fue lo que permitió que el proceso siguiera en pantalla
+   estando ya en otro contrato. */
+Bus.on('contrato:cambio', () => {
+  const s = Importador.st;
+  if (!s || !s.contratoId || s.contratoId === ContratoRepo.activoId()) return;
+  const teniaTrabajo = Boolean(s.archivo);
+  Importador.reset();
+  if (teniaTrabajo) {
+    Toast.warn('Se canceló la importación en curso: era para otro contrato. Vuelva a empezar aquí.');
+    if (String(location.hash || '').includes('importar')) Router.resolver();
+  }
+});
+
 const Importador = {
   /* Las columnas se declaran UNA sola vez. De aquí salen las tres cosas que
      antes se escribían por separado y acabaron separándose entre sí: lo que el
@@ -11791,6 +11815,24 @@ const Importador = {
              'aceite se descuentan de él, nunca se suman.' }
   ],
 
+  /**
+   * Las columnas de la plantilla para ESTE contrato.
+   *
+   * GASOLINA y ACEITE no le sirven a todo el mundo: en un hospital son dos
+   * columnas que sobran y que hay que explicar a quien rellene el archivo. Se
+   * incluyen sólo si el contrato tiene esa categoría marcada como medible, que
+   * es el mismo interruptor que decide si sale en el panel. Para quitarlas de
+   * la plantilla basta con borrar —o desmarcar— la categoría en Categorías.
+   *
+   * Al LEER un archivo se siguen entendiendo siempre: alguien puede mandar un
+   * Excel con esas columnas aunque su plantilla ya no las traiga.
+   */
+  camposDePlantilla() {
+    const seguidos = new Set(CategoriaRepo.estadisticas().map(c => c.rol));
+    const opcional = { gasolina: RolEstadistico.GASOLINA, aceite: RolEstadistico.ACEITE };
+    return this.CAMPOS.filter(c => !opcional[c.k] || seguidos.has(opcional[c.k]));
+  },
+
   /** Filas de ejemplo de la plantilla, en el mismo orden que CAMPOS */
   EJEMPLOS: [
     ['2026-08-15', 'Caja menor', 'FABIÁN', 'Apartadó', 'Alirio Pardo Porras', 100000, 40000,
@@ -11806,6 +11848,13 @@ const Importador = {
   reset() {
     this.st = {
       paso: 1, archivo: null, libro: null, hojaSel: '', datos: null,
+      /* El contrato al que va esta importación, fijado al elegir el archivo.
+         Sin esto, cambiar de contrato a mitad del asistente dejaba todo el
+         proceso en pie —las filas, el mapeo, los duplicados ya calculados— y
+         al pulsar Importar las cajas entraban en el contrato NUEVO, porque es
+         el activo en ese momento. Veinticuatro filas de un hospital dentro de
+         la contabilidad de otro contrato. */
+      contratoId: null,
       encabezados: [], filaEncabezado: 0, mapeo: {}, analisis: null,
       mapPersonas: new Map(),      // texto CONCEPTO → {accion:'persona'|'texto'|'ignorar', personaId, nombre}
       mapConsigno: new Map(),      // texto CONSIGNÓ → personaId | null
@@ -11907,6 +11956,7 @@ const Importador = {
       Toast.ok('Leyendo ' + file.name + '…');
       const libro = await Xlsx.leer(file);
       s.archivo = file; s.libro = libro;
+      s.contratoId = ContratoRepo.activoId();
       s.hojaSel = (libro.hojas.find(h => Txt.norm(h.nombre).includes('comfenalco')) || libro.hojas[0]).nombre;
       this.render($('#vista'));
     } catch (e) { manejarError(e); }
@@ -12371,6 +12421,15 @@ const Importador = {
   /* ---------------- PASO 5 · ejecución ---------------- */
   async ejecutar() {
     const s = this.st;
+    /* Última comprobación antes de escribir nada. El asistente se reinicia al
+       cambiar de contrato, así que esto no debería saltar nunca; está por si
+       algún camino se lo salta, porque lo que hay al otro lado es meter el
+       dinero de un contrato en la contabilidad de otro. */
+    if (s.contratoId && s.contratoId !== ContratoRepo.activoId()) {
+      throw new ErrorDominio('Esta importación se preparó para otro contrato. ' +
+        'Vuelva a «' + ((ContratoRepo.get(s.contratoId) || {}).nombre || 'el contrato de origen') +
+        '» o empiece de nuevo aquí.', 'CONTRATO_CAMBIADO');
+    }
     const aImportar = s.analisis.registros.filter(r => s.decisiones.get(r.fila) === 'importar' && !r.errores.length);
     if (!aImportar.length) { Toast.warn('No hay registros seleccionados para importar.'); return; }
 
@@ -12469,6 +12528,9 @@ const Importador = {
           }
 
           await CajaService.crear({
+            /* Explícito, no heredado del activo: si algo cambiara el contrato
+               mientras corren las filas, las de después no se irían a otro. */
+            contratoId: s.contratoId || ContratoRepo.activoId(),
             fecha: r.fecha,
             solicitanteId,
             solicitanteTexto: solicitanteId ? '' : (r.textoConcepto || ''),
@@ -16734,6 +16796,86 @@ const Pruebas = {
             Pruebas.igual(viejo.total, 9, 'Y su «Total con iva» también');
             Pruebas.ok(!('tipo' in viejo), 'La columna TIPO ya no se pide: sobra sin estorbar');
           } },
+        { nombre: 'CRÍTICO · una importación no se puede cambiar de contrato a media faena', fn: async ctx => {
+            /* Se preparó una importación y, antes de pulsar el botón final, se
+               cambió de contrato. Todo el proceso seguía en pie y las cajas
+               habrían entrado en el contrato NUEVO: es el activo en ese
+               momento y es de donde CajaService saca el contrato. */
+            const ctrOriginal = ContratoRepo.activoId();
+            const otro = await ContratoRepo.guardar({
+              nombre: 'CONTRATO DE AL LADO', numero: 'CTO-LADO-1',
+              prefijoCaja: 'LD', prefijoConsignacion: 'LDC', fechaInicio: '2026-01-01'
+            });
+            try {
+              Importador.reset();
+              /* Se simula el asistente a mitad: archivo elegido y filas listas. */
+              Importador.st.archivo = { name: 'algo.xlsx' };
+              Importador.st.contratoId = ctrOriginal;
+              Importador.st.analisis = { registros: [{ fila: 2, errores: [], total: 100 }] };
+              Importador.st.decisiones = new Map([[2, 'importar']]);
+
+              await ContratoRepo.cambiarActivo(otro.id);
+              /* El asistente se descarta solo: comparó duplicados contra otro
+                 contrato y las personas que iba a crear eran las de allí. */
+              Pruebas.igual(Importador.st.archivo, null,
+                'Al cambiar de contrato la importación en curso se descarta');
+              Pruebas.igual(Importador.st.contratoId, null, 'Y suelta el contrato que tenía');
+
+              /* Y si algún camino se saltara ese reinicio, ejecutar se niega. */
+              Importador.st.contratoId = ctrOriginal;
+              Importador.st.analisis = { registros: [{ fila: 2, errores: [], total: 100 }] };
+              Importador.st.decisiones = new Map([[2, 'importar']]);
+              const antes = await db.count('cajas');
+              await Pruebas.lanza(() => Importador.ejecutar(),
+                'Debe negarse a importar en un contrato distinto del que preparó');
+              Pruebas.igual(await db.count('cajas'), antes, 'Y no escribe ni una caja');
+            } finally {
+              Importador.reset();
+              await ContratoRepo.cambiarActivo(ctrOriginal);
+            }
+          } },
+
+        { nombre: 'CRÍTICO · la plantilla trae sólo las columnas del contrato', fn: async ctx => {
+            /* En un hospital, GASOLINA y ACEITE son dos columnas que sobran y
+               que hay que explicarle a quien rellene el archivo. Salen sólo si
+               el contrato tiene esa categoría marcada como medible, que es el
+               mismo interruptor que decide si sale en el panel. */
+            const nombres = () => Importador.camposDePlantilla().map(c => c.t);
+            Pruebas.ok(nombres().includes('GASOLINA'),
+              'Con la categoría marcada, la columna está');
+            Pruebas.ok(nombres().includes('ACEITE'), 'Y la de aceite también');
+
+            const gas = CategoriaRepo.porRol(RolEstadistico.GASOLINA);
+            try {
+              await CategoriaRepo.guardar(Object.assign({}, gas, { estadistica: 0, rol: null }));
+              Pruebas.ok(!nombres().includes('GASOLINA'),
+                'Sin la categoría, la columna desaparece de la plantilla');
+              Pruebas.ok(nombres().includes('ACEITE'), 'Sin llevarse la otra por delante');
+              Pruebas.ok(nombres().includes('FECHA') && nombres().includes('TOTAL'),
+                'Las obligatorias no se tocan nunca');
+
+              /* Las filas de ejemplo se recortan igual: si no, quedarían
+                 corridas una columna respecto a los encabezados. */
+              const hojas = Exportar.hojasPlantilla();
+              const cols = hojas[0].columnas.length;
+              Pruebas.ok(hojas[0].filas.every(f => f.length === cols),
+                'Cada fila de ejemplo tiene tantas celdas como columnas');
+              Pruebas.igual(hojas[0].columnas.map(c => c.titulo).join(','), nombres().join(','),
+                'Y los encabezados son los mismos');
+            } finally {
+              await CategoriaRepo.guardar(Object.assign({}, gas,
+                { estadistica: 1, rol: RolEstadistico.GASOLINA }));
+            }
+          } },
+
+        { nombre: 'Un archivo con esas columnas se sigue entendiendo', fn: () => {
+            /* Que la plantilla ya no las traiga no puede impedir leer un Excel
+               que sí las tenga: alguien puede mandar el suyo. */
+            const claves = Importador.CAMPOS.map(c => c.k);
+            Pruebas.ok(claves.includes('gasolina') && claves.includes('aceite'),
+              'El asistente sigue reconociéndolas al leer');
+          } },
+
         { nombre: 'Detección de duplicados del importador', fn: () => {
             const a = Importador.claveDuplicado({ fecha: '2026-03-10', ubicacion: 'Apartadó', concepto: 'Alirio Pardo',
               descripcion: 'Gasolina', total: 10000000 });
