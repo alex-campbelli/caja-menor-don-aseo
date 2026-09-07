@@ -3419,8 +3419,12 @@ const CategoriaRepo = {
   async adoptarTextoLibre(cat) {
     if (!cat || !cat.id || !cat.nombreNorm) return 0;
     const todos = await db.getAll('detalles');
+    /* SÓLO los de su propio contrato. Una categoría «Caja menor» creada en un
+       contrato nuevo se estaba llevando los 257 movimientos del contrato de al
+       lado, que se llamaban igual pero no eran suyos. */
     const sueltos = todos.filter(d => !d.categoriaId && d.categoriaNombre &&
-      Txt.norm(d.categoriaNombre) === cat.nombreNorm);
+      Txt.norm(d.categoriaNombre) === cat.nombreNorm &&
+      (!cat.contratoId || !d.contratoId || d.contratoId === cat.contratoId));
     if (!sueltos.length) return 0;
     await db.putMany('detalles', sueltos.map(d => Object.assign({}, d, { categoriaId: cat.id })));
     Analitica.invalidar();
@@ -15214,6 +15218,49 @@ const Pruebas = {
                 'El desplegable y la etiqueta del archivo dicen lo mismo: ' + d.titulo);
           } },
 
+        { nombre: 'CRÍTICO · una categoría nueva no se lleva los movimientos de otro contrato', fn: async ctx => {
+            /* Al crear una categoria, el programa enlaza los movimientos que ya
+               usaban ese nombre escrito a mano. Pero miraba TODA la base: una
+               «Caja menor» creada en un contrato nuevo se llevo 257 movimientos
+               del contrato de al lado, y despues no dejaba borrarla porque
+               «257 detalles la usan». */
+            const original = ContratoRepo.activoId();
+            const otro = await ContratoRepo.guardar({ nombre: 'CONTRATO VECINO',
+              prefijoCaja: 'VE', prefijoConsignacion: 'VEC' });
+            try {
+              /* Movimientos del contrato de origen con el nombre escrito a mano. */
+              for (let i = 0; i < 5; i++)
+                await CajaService.crear({
+                  fecha: '2026-09-19', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
+                  detalles: [{ categoriaNombre: 'Concepto Escrito A Mano', elemento: 'x', valor: 1000000 }]
+                });
+              const sueltosAntes = (await db.getAll('detalles'))
+                .filter(d => !d.categoriaId && Txt.norm(d.categoriaNombre) === Txt.norm('Concepto Escrito A Mano')).length;
+              Pruebas.igual(sueltosAntes, 5, 'Cinco movimientos con el nombre escrito a mano');
+
+              await ContratoRepo.cambiarActivo(otro.id);
+              const cat = await CategoriaRepo.guardar({ nombre: 'Concepto Escrito A Mano' });
+              const adoptados = await CategoriaRepo.adoptarTextoLibre(cat);
+              Pruebas.igual(adoptados, 0,
+                'La categoría del contrato nuevo NO se lleva los movimientos del otro');
+
+              /* Y por eso se puede borrar: no la usa nadie. */
+              await CategoriaRepo.eliminar(cat.id);
+              Pruebas.ok(!CategoriaRepo.get(cat.id), 'Se puede borrar, porque no la usa nadie');
+
+              await ContratoRepo.cambiarActivo(original);
+              const sueltosDespues = (await db.getAll('detalles'))
+                .filter(d => !d.categoriaId && Txt.norm(d.categoriaNombre) === Txt.norm('Concepto Escrito A Mano')).length;
+              Pruebas.igual(sueltosDespues, 5,
+                'Los cinco siguen intactos en su contrato, sin enlazar');
+
+              /* Y en SU propio contrato sí los adopta, que es para lo que sirve. */
+              const propia = await CategoriaRepo.guardar({ nombre: 'Concepto Escrito A Mano' });
+              Pruebas.igual(await CategoriaRepo.adoptarTextoLibre(propia), 5,
+                'En su propio contrato sí los adopta');
+            } finally { await ContratoRepo.cambiarActivo(original); }
+          } },
+
         { nombre: 'CRÍTICO · un contrato de antes, vacío, recibe sus catálogos al entrar', fn: async () => {
             /* Los contratos creados ANTES de que los catálogos fueran de cada
                contrato se quedaron sin ninguno: al entrar aparecían vacíos, sin
@@ -16367,6 +16414,43 @@ const Semillas = {
           console.info('[migración v4] ' + sinDueno.length + ' ' + col +
             ' asignados a «' + primero.nombre + '».');
         }
+      }
+    }
+
+    /* --- reparación v5: movimientos enlazados a una categoría de otro
+       contrato --------------------------------------------------------------
+       Al crear una categoría, el programa enlazaba los movimientos que ya
+       usaban ese nombre escrito a mano — pero miraba toda la base, no sólo el
+       contrato. Así, una «Caja menor» creada en un contrato nuevo se llevó los
+       movimientos del otro.
+
+       Se deshace: cada movimiento vuelve a la categoría del MISMO nombre en SU
+       contrato; si allí no existe, se le quita el enlace y se queda con el
+       nombre escrito, que es como estaba antes. Ni un dato se pierde: el
+       nombre de la categoría vive en el propio movimiento. */
+    {
+      const cats = await db.getAll('categorias');
+      const porId = new Map(cats.map(c => [c.id, c]));
+      const detalles = await db.getAll('detalles');
+      const cruzados = detalles.filter(d => {
+        if (!d.categoriaId || !d.contratoId) return false;
+        const c = porId.get(d.categoriaId);
+        return c && c.contratoId && c.contratoId !== d.contratoId;
+      });
+      if (cruzados.length) {
+        const buscar = (nombreNorm, ctrId) =>
+          cats.find(c => c.nombreNorm === nombreNorm && c.contratoId === ctrId) || null;
+        let recolocados = 0, sueltos = 0;
+        const arreglados = cruzados.map(d => {
+          const propia = buscar(Txt.norm(d.categoriaNombre), d.contratoId);
+          if (propia) { recolocados++; return Object.assign({}, d, { categoriaId: propia.id }); }
+          sueltos++;
+          return Object.assign({}, d, { categoriaId: null });
+        });
+        await db.putMany('detalles', arreglados);
+        console.info('[reparación v5] ' + cruzados.length + ' movimiento(s) estaban ' +
+          'enlazados a una categoría de otro contrato: ' + recolocados + ' recolocados, ' +
+          sueltos + ' devueltos a texto escrito.');
       }
     }
 
