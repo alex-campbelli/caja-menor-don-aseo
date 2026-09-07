@@ -525,6 +525,11 @@ table.tbl tbody tr.marcada > td:first-child{box-shadow:inset 3px 0 0 var(--brand
   white-space:normal;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
 .tip.on{opacity:1;transform:translateY(0)}
 html[data-theme="dark"] .tip{background:#e6edf3;color:#0e1419}
+/* Los días que lleva esperando una caja, debajo del importe pendiente. */
+.dias{font-size:10.5px;font-weight:600;line-height:1.3;color:var(--txt-3);cursor:help}
+.dias.d-aviso{color:var(--warn-700)}
+.dias.d-alarma{color:var(--dang-500)}
+html[data-theme="dark"] .dias.d-aviso{color:#f0b942}
 .col-marcas{width:76px;white-space:nowrap;padding-left:4px!important;padding-right:0!important}
 .marca{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;
   border-radius:4px;cursor:help;vertical-align:middle;outline-offset:1px}
@@ -1124,6 +1129,24 @@ const Fecha = (() => {
   return {
     MESES, MESES_C,
     hoy() { const d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); },
+    /**
+     * Días completos entre dos fechas ISO. Se cuenta a mediodía para que el
+     * cambio de horario de verano no reste ni sume un día de regalo.
+     */
+    diasEntre(desde, hasta) {
+      if (!desde) return 0;
+      const a = new Date(desde.slice(0, 10) + 'T12:00:00');
+      const b = new Date((hasta || this.hoy()).slice(0, 10) + 'T12:00:00');
+      if (isNaN(a) || isNaN(b)) return 0;
+      return Math.round((b - a) / 86400000);
+    },
+    /** «hoy», «ayer», «hace 24 días» — para leerlo sin hacer cuentas. */
+    haceCuanto(fecha, hasta) {
+      const d = this.diasEntre(fecha, hasta);
+      if (d <= 0) return 'hoy';
+      if (d === 1) return 'ayer';
+      return 'hace ' + d + ' días';
+    },
     ahora() { return new Date().toISOString(); },
     /** serial de Excel → ISO (epoch 1899-12-30, corrige el bug del año bisiesto 1900) */
     deSerialExcel(serial) {
@@ -2005,6 +2028,11 @@ const Modelo = {
       prefijoCaja: p.prefijoCaja || 'CM',
       prefijoConsignacion: p.prefijoConsignacion || 'CON',
       infoAdicional: p.infoAdicional || '',
+      /* Cuándo se hizo la última copia de seguridad. NULO = nunca —y nulo, no
+         cadena vacía: la columna es de fecha y PostgreSQL rechaza «». Se guarda
+         para poder recordarlo: el programa no puede hacer copias por su cuenta,
+         hace falta que alguien pulse el botón y guarde el archivo. */
+      ultimaCopia: p.ultimaCopia || null,
       esquemaVersion: APP.esquema,
       creadoEn: p.creadoEn || Modelo.ahora(),
       actualizadoEn: Modelo.ahora()
@@ -3160,39 +3188,15 @@ const ContratoRepo = {
   activoId() { const c = this.activo(); return c ? c.id : null; },
   nombre(id) { const c = this.get(id); return c ? c.nombre : ''; },
 
-  /**
-   * Un contrato recién creado no tiene catálogos propios y arrancaría vacío:
-   * sin municipios donde elegir y sin categorías. Se le instalan los mismos de
-   * fábrica, que a partir de ahí son suyos y puede cambiar a su gusto sin que
-   * eso afecte a los demás contratos.
-   */
-  async sembrarCatalogos(contratoId) {
-    /* Sólo a un contrato SIN MOVIMIENTO. Uno en uso puede haberse quedado sin
-       algún municipio porque se borró a propósito, y no hay que resucitarlo. */
-    const conCajas = (await db.getAll('cajas')).some(c => c.contratoId === contratoId);
-    if (conCajas) return;
-    const tiene = col => [...Cache[col].values()].some(x => x.contratoId === contratoId);
-    if (!tiene('municipios')) {
-      const lista = Semillas.MUNICIPIOS.map(n =>
-        Modelo.municipio({ nombre: n, origen: Origen.SISTEMA, contratoId }));
-      lista.push(Modelo.municipio({ nombre: VALOR_NO_APLICA, origen: Origen.SISTEMA,
-        esNoAplica: 1, departamento: '', contratoId }));
-      await db.putMany('municipios', lista);
-    }
-    if (!tiene('categorias')) {
-      await db.putMany('categorias', Semillas.CATEGORIAS.map(c =>
-        Modelo.categoria(Object.assign({ origen: Origen.SISTEMA, contratoId }, c))));
-    }
-    await Cache.cargar();
-  },
+  /* Un contrato nuevo empieza LIMPIO: sin municipios, sin categorías y sin
+     personas. Se probó a instalarle los de fábrica para que no arrancara vacío
+     y resultó peor: llegaban «Gasolina» y «Aceite» —que no se pueden borrar por
+     ser del sistema— y una lista de municipios que no tenían nada que ver.
+     Cada contrato se arma con lo suyo desde cero. */
 
   async cambiarActivo(id) {
     if (!this.get(id)) throw new ErrorDominio('Contrato no encontrado.', 'NO_EXISTE');
     await ConfigRepo.guardar({ contratoActivoId: id });
-    /* Un contrato creado ANTES de que los catálogos fueran de cada contrato se
-       quedó sin ninguno: al entrar en él aparecía vacío, sin municipios donde
-       elegir. Se le instalan aquí, la primera vez que se entra. */
-    await this.sembrarCatalogos(id);
     Analitica.invalidar();
     Bus.emit('contrato:cambio', this.activo());
     return this.activo();
@@ -3207,7 +3211,6 @@ const ContratoRepo = {
     if (dup && dup.id !== c.id) throw new ErrorDominio('Ya existe un contrato llamado "' + c.nombre + '".', 'DUPLICADO');
     await db.put('contratos', c);
     Cache.contratos.set(c.id, c);
-    if (!previo) await this.sembrarCatalogos(c.id);
     await Auditoria.registrar('contrato', c.id, previo ? 'ACTUALIZAR' : 'CREAR', { nombre: c.nombre });
     Bus.emit('contratos:cambio', c);
     return c;
@@ -3433,7 +3436,12 @@ const CategoriaRepo = {
   },
   async eliminar(id) {
     const c = this.get(id);
-    if (c && c.sistema) throw new ErrorDominio('Las categorías del sistema no se pueden eliminar. Desactívela.', 'SISTEMA');
+    /* Antes ninguna categoría del sistema se podía borrar nunca. Pero en un
+       contrato donde no se usan —«Gasolina» y «Aceite» en uno que no maneja
+       vehículos— eso deja basura imborrable. Se protege lo que de verdad hay
+       que proteger: lo que ESTÁ EN USO, que es la comprobación de abajo.
+       Gasolina y aceite no dependen de la categoría para sus estadísticas: el
+       papel estadístico vive en cada movimiento. */
     const usos = await db.count('detalles', 'categoriaId', id);
     if (usos > 0) throw new ErrorDominio('No se puede eliminar: ' + usos + ' detalle(s) la usan. Desactívela.', 'EN_USO');
     await db.remove('categorias', id);
@@ -3658,6 +3666,28 @@ const Finanzas = {
     return [...m.values()].map(o => ({ clave: o.clave, ref: o.ref, etiqueta: o.etiqueta,
       total: o.total, gasolina: o.gasolina, aceite: o.aceite, n: o._cajas.size,
       repuesto: o.repuesto, pendiente: o.pendiente })).sort(U.by('total', 'desc'));
+  },
+
+  /**
+   * Cuánto lleva esperando una caja y si eso ya es demasiado.
+   *
+   * Una caja consignada hace tres semanas y sin reembolsar se veía igual que la
+   * de ayer: nada en el programa sabía contar el tiempo. Los plazos van aquí,
+   * en un solo sitio, para que el listado y el panel no digan cosas distintas.
+   */
+  /* A partir de aquí conviene recordar la copia de seguridad. */
+  DIAS_SIN_COPIA: 15,
+  DIAS_AVISO: 15,
+  DIAS_ALARMA: 30,
+  antiguedad(caja, repuesto) {
+    const pend = this.pendienteDe(caja, repuesto || 0);
+    /* Sólo cuenta el tiempo de lo que sigue esperando algo. Una caja saldada o
+       anulada no lleva días de nada. */
+    if (pend <= 0 || caja.estado === EstadoCaja.ANULADA ||
+        caja.estado === EstadoCaja.BORRADOR) return { dias: 0, nivel: '', pendiente: pend };
+    const dias = Fecha.diasEntre(caja.fecha);
+    const nivel = dias >= this.DIAS_ALARMA ? 'alarma' : dias >= this.DIAS_AVISO ? 'aviso' : '';
+    return { dias, nivel, pendiente: pend };
   },
 
   calcular(detalles, retencion) {
@@ -5740,6 +5770,16 @@ const Combo = {
 };
 
 /* --- Entrada de dinero: formatea al escribir, guarda centavos ------------- */
+/** Frase que explica el semáforo, igual en el listado y en el panel. */
+Comp.textoAntiguedad = function (caja, a) {
+  const que = caja.estado === EstadoCaja.PENDIENTE
+    ? 'Lleva ' + a.dias + ' día(s) esperando que se le consigne'
+    : 'Se consignó ' + Fecha.haceCuanto(caja.fecha) + ' y todavía no se ha reembolsado';
+  if (a.nivel === 'alarma') return que + '. Son más de ' + Finanzas.DIAS_ALARMA + ' días.';
+  if (a.nivel === 'aviso') return que + '. Ya pasó de ' + Finanzas.DIAS_AVISO + ' días.';
+  return que + '.';
+};
+
 const MoneyInput = {
   montar(input, alCambiar) {
     input.classList.add('inp-money');
@@ -6212,6 +6252,11 @@ const AccionesGlobales = {
     try { await Nube.salir(); } catch (e) { console.warn(e); }
     location.reload();
   },
+  /* Se calla hasta mañana, no para siempre: el dato sigue haciendo falta. */
+  ocultarCopia() {
+    Prefs.set('copiaOculta', Fecha.hoy());
+    Router.resolver();
+  },
   tema() {
     const nuevo = Prefs.get('tema') === 'dark' ? 'light' : 'dark';
     Prefs.set('tema', nuevo);
@@ -6343,6 +6388,24 @@ const VistaDashboard = {
         'importación (por ejemplo, gasolina + aceite superior al total declarado). ' +
         '<span class="link" data-act="verRevisiones">Ver listado</span></div></div>' : '') +
 
+      /* Recordatorio de la copia de seguridad. Sale sólo cuando de verdad hace
+         falta y se puede callar por hoy: un aviso que sale siempre deja de
+         leerse, y entonces no sirve para nada. */
+      (() => {
+        const c = ConfigRepo.get() || {};
+        if (Prefs.get('copiaOculta') === Fecha.hoy()) return '';
+        const dias = c.ultimaCopia ? Fecha.diasEntre(c.ultimaCopia) : null;
+        if (dias !== null && dias < Finanzas.DIAS_SIN_COPIA) return '';
+        return '<div class="alert a-warn mb16">' + Icon('db') + '<div style="flex:1">' +
+          '<b>' + (dias === null
+            ? 'Todavía no ha hecho ninguna copia de seguridad.'
+            : 'Hace ' + dias + ' días que no hace una copia de seguridad.') + '</b> ' +
+          'Guarda todo en un archivo suyo, aparte de la nube. ' +
+          '<span class="link" data-ir="respaldos">Hacer una ahora</span></div>' +
+          '<button class="btn btn-sm btn-ghost btn-icon" data-gact="ocultarCopia" ' +
+          'data-tip="No recordármelo hoy">' + Icon('x', '', 13) + '</button></div>';
+      })() +
+
       '<div class="grid g4 mb16">' +
         Comp.kpi({ label: 'Total gastado', valor: Money.format(res.gastoOperativo), icono: 'money',
           color: 'var(--brand-500)', meta: '<span>' + res.numeroCajas + ' cajas · promedio ' + Money.compact(res.promedioCaja) + '</span>',
@@ -6430,15 +6493,20 @@ const VistaDashboard = {
         '<div class="card"><div class="card-h"><h3>Cajas pendientes de reposición</h3>' +
           '<span class="ch-sub">Más antiguas primero</span></div>' +
           '<div class="card-b flush"><div class="tbl-wrap"><table class="tbl">' +
-          '<thead><tr><th>Número</th><th>Fecha</th><th>Concepto</th><th class="num">Total</th><th class="num">Pendiente</th></tr></thead>' +
+          '<thead><tr><th>Número</th><th>Fecha</th><th>Concepto</th><th class="num">Días</th>' +
+          '<th class="num">Total</th><th class="num">Pendiente</th></tr></thead>' +
           '<tbody>' + (pendientes.length ? pendientes.map(x =>
             '<tr class="row-click" data-ir="caja/' + attr(x.c.id) + '">' +
             '<td class="mono">' + esc(x.c.numero) + '</td>' +
             '<td class="nowrap">' + Fecha.corta(x.c.fecha) + '</td>' +
             '<td class="trunc" style="max-width:150px">' + esc(Comp.nombreSolicitante(x.c)) + '</td>' +
+            (() => { const a = Finanzas.antiguedad(x.c, x.c.total - x.pend);
+              return '<td class="num"><span class="dias' + (a.nivel ? ' d-' + a.nivel : '') +
+                '" tabindex="0" data-tip="' + attr(Comp.textoAntiguedad(x.c, a)) + '">' +
+                a.dias + '</span></td>'; })() +
             '<td class="num">' + Money.format(x.c.total) + '</td>' +
             '<td class="num" style="color:var(--dang-500);font-weight:650">' + Money.format(x.pend) + '</td></tr>').join('')
-            : '<tr><td colspan="5"><div class="empty" style="padding:26px">' + Icon('check') +
+            : '<tr><td colspan="6"><div class="empty" style="padding:26px">' + Icon('check') +
               '<h4>Todo repuesto</h4><p>No hay saldos pendientes en el período.</p></div></td></tr>') +
           '</tbody></table></div></div>' +
           (pendientes.length ? '<div class="card-f flex aic jcsb"><span>Total pendiente: <b>' +
@@ -6929,8 +6997,17 @@ const VistaCajas = {
           '<td class="num"><b>' + Money.format(c.total) + '</b></td>' +
           '<td class="num">' + (c.gasolina ? Money.format(c.gasolina) : '<span class="txt-3">—</span>') + '</td>' +
           '<td class="num">' + (c.aceite ? Money.format(c.aceite) : '<span class="txt-3">—</span>') + '</td>' +
-          '<td class="num">' + (pend > 0 ? '<span style="color:var(--dang-500);font-weight:650">' + Money.format(pend) + '</span>'
-            : '<span class="txt-3">—</span>') + '</td>' +
+          /* Los días van pegados al pendiente y no en una columna propia: la
+             tabla ya va justa y el dato sólo importa cuando hay algo esperando. */
+          (() => {
+            if (pend <= 0) return '<td class="num"><span class="txt-3">—</span></td>';
+            const a = Finanzas.antiguedad(c, rep);
+            return '<td class="num"><span style="color:var(--dang-500);font-weight:650">' +
+              Money.format(pend) + '</span>' +
+              (a.dias > 0 ? '<div class="dias' + (a.nivel ? ' d-' + a.nivel : '') + '" tabindex="0" ' +
+                'data-tip="' + attr(Comp.textoAntiguedad(c, a)) + '">' + a.dias + ' d</div>' : '') +
+              '</td>';
+          })() +
           '<td class="td-estado">' + Comp.selectorEstadoCaja(c, 'estadoRapido') + '</td>' +
           '<td class="nowrap">' +
             '<button class="btn btn-sm btn-ghost btn-icon" data-act="verFormato" data-id="' + attr(c.id) +
@@ -9301,7 +9378,11 @@ const VistaCategorias = {
         '<div class="field"><label>Estado</label><select class="inp" id="cEstado">' +
         '<option value="ACTIVO"' + (c.estado !== 'INACTIVO' ? ' selected' : '') + '>Activo</option>' +
         '<option value="INACTIVO"' + (c.estado === 'INACTIVO' ? ' selected' : '') + '>Inactivo</option></select></div>',
-      pie: (!esNueva && !c.sistema ? '<button class="btn btn-danger mf-left" id="cEliminar">' + Icon('trash', '', 14) + 'Eliminar</button>' : '') +
+      /* El botón se dibuja también para las de sistema: en un contrato que no
+         maneja vehículos, «Gasolina» y «Aceite» son basura imborrable. Quien
+         decide si se puede es el dominio, y allí lo que protege es que ESTÉ EN
+         USO, no la etiqueta de sistema. */
+      pie: (!esNueva ? '<button class="btn btn-danger mf-left" id="cEliminar">' + Icon('trash', '', 14) + 'Eliminar</button>' : '') +
         '<button class="btn" data-cerrar>Cancelar</button><button class="btn btn-primary" id="cGuardar">Guardar</button>',
       alMontar(m) {
         m.querySelector('#cGuardar').onclick = async () => {
@@ -12693,7 +12774,12 @@ const VistaRespaldos = {
     setAcciones({
       crear: async () => {
         const inc = $('#rbDocs') ? $('#rbDocs').checked : true;
-        try { await Respaldo.descargar({ incluirDocumentos: inc }); } catch (e) { manejarError(e); }
+        try {
+          await Respaldo.descargar({ incluirDocumentos: inc });
+          /* Se anota SÓLO si la descarga salió bien: si falla, el recordatorio
+             tiene que seguir dando la lata. */
+          await ConfigRepo.guardar({ ultimaCopia: Fecha.ahora() });
+        } catch (e) { manejarError(e); }
       },
       exportarJson: () => Migracion.exportarJson(),
       restaurarReemplazar: () => restaurar('reemplazar'),
@@ -12798,6 +12884,8 @@ const Migracion = {
     T('  comprimir_adjuntos int default 1, nivel_compresion text,');
     T('  prefijo_caja text, prefijo_consignacion text, financiador_por_defecto_id text,');
     T('  info_adicional text, esquema_version int,');
+    T('  -- cuando se hizo la ultima copia de seguridad, para poder recordarla');
+    T('  ultima_copia timestamptz,');
     T('  creado_en timestamptz default now(), actualizado_en timestamptz default now()');
     T(');');
     T('');
@@ -13840,11 +13928,26 @@ const Pruebas = {
             Pruebas.ok(html.includes('ALCALDÍA DE APARTADÓ'),
               'Debe imprimir el contrato de la caja aunque el activo sea otro');
           } },
-        { nombre: 'Los catálogos se comparten entre contratos', fn: async ctx => {
-            await ContratoRepo.cambiarActivo(ctx.ctrB.id);
-            Pruebas.ok(PersonaRepo.get(ctx.lider.id), 'La persona existe en ambos contratos');
-            Pruebas.ok(CategoriaRepo.porRol(RolEstadistico.GASOLINA), 'Las categorías también');
-            await ContratoRepo.cambiarActivo(ctx.ctrA.id);
+        { nombre: 'CRÍTICO · los catálogos NO se comparten entre contratos', fn: async ctx => {
+            /* Antes eran listas comunes. Ahora cada contrato tiene las suyas y
+               un contrato nuevo empieza LIMPIO: sin municipios, sin categorías
+               y sin personas. Se arma con lo suyo desde cero.
+
+               El cambio de contrato va en `finally`: si una comprobación falla,
+               dejar activo el contrato equivocado arrastraría a todas las
+               pruebas siguientes. */
+            try {
+              await ContratoRepo.cambiarActivo(ctx.ctrB.id);
+              Pruebas.igual(PersonaRepo.todas().length, 0, 'El contrato nuevo no hereda personas');
+              Pruebas.igual(CategoriaRepo.todas().length, 0, 'Ni categorías');
+              Pruebas.igual(MunicipioRepo.todos().length, 0, 'Ni municipios');
+              /* Pero lo del otro contrato se sigue resolviendo por identificador,
+                 que es lo que necesita el histórico para enseñar los nombres. */
+              Pruebas.ok(PersonaRepo.get(ctx.lider.id),
+                'La persona del otro contrato se resuelve por identificador');
+            } finally { await ContratoRepo.cambiarActivo(ctx.ctrA.id); }
+            Pruebas.ok(CategoriaRepo.porRol(RolEstadistico.GASOLINA),
+              'Y en su propio contrato las categorías siguen ahí');
           } }
       ]
     },
@@ -15274,9 +15377,11 @@ const Pruebas = {
             await Cache.cargar();
             try {
               await ContratoRepo.cambiarActivo(viejo.id);
-              Pruebas.ok(MunicipioRepo.todos().length > 0,
-                'Al entrar, el contrato viejo ya tiene municipios donde elegir');
-              Pruebas.ok(CategoriaRepo.todas().length > 0, 'Y sus categorías');
+              /* Se probó a instalarle catálogos de fábrica «para que no
+                 arrancara vacío» y resultó peor: llegaban Gasolina y Aceite,
+                 que no se podían borrar. Un contrato se arma con lo suyo. */
+              Pruebas.igual(MunicipioRepo.todos().length, 0, 'El contrato empieza limpio');
+              Pruebas.igual(CategoriaRepo.todas().length, 0, 'Sin categorías de nadie');
 
               /* Y el nombre repetido entre contratos ya no choca: es el error
                  «Ya existe un registro con ese nombre» que daba la base. */
@@ -15306,6 +15411,112 @@ const Pruebas = {
             }
           } },
 
+        { nombre: 'CRÍTICO · gasolina y aceite sin usar se pueden borrar', fn: async ctx => {
+            /* En un contrato que no maneja vehiculos son basura imborrable. Se
+               quito el candado del dominio pero el boton NI SE DIBUJABA para
+               las de sistema, asi que por pantalla seguia sin poder borrarse:
+               la mitad del arreglo no servia de nada. */
+            /* Se fabrica una del sistema SIN ESTRENAR, para no depender de si
+               otras pruebas ya usaron la gasolina de verdad. */
+            const sinUsar = await CategoriaRepo.guardar({ nombre: 'Gasolina De Otro Contrato',
+              sistema: 1, estadistica: 1, rol: 'GASOLINA_PRUEBA' });
+            Pruebas.igual(sinUsar.sistema, 1, 'Es una categoría del sistema');
+            Pruebas.igual(await db.count('detalles', 'categoriaId', sinUsar.id), 0,
+              'Y no la usa ningún movimiento');
+            await CategoriaRepo.eliminar(sinUsar.id);
+            Pruebas.ok(!CategoriaRepo.get(sinUsar.id), 'Se borra aunque sea del sistema');
+
+            /* Y el botón tiene que estar en la pantalla, no sólo permitido por
+               dentro: es lo que fallaba. */
+            const src = VistaCategorias.modal.toString();
+            Pruebas.ok(/id="cEliminar"/.test(src), 'La ventana tiene botón de Eliminar');
+            Pruebas.ok(!/!c\.sistema \? '<button class="btn btn-danger/.test(src),
+              'Y ya no se esconde para las categorías del sistema');
+
+            /* Pero una en uso sigue protegida: eso es lo que hay que cuidar. */
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            await CajaService.crear({
+              fecha: '2026-09-20', solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
+              detalles: [{ categoriaId: cm.id, elemento: 'x', valor: 1000000 }]
+            });
+            await Pruebas.lanza(() => CategoriaRepo.eliminar(cm.id),
+              'Una categoría en uso sigue sin poder borrarse');
+
+            /* Y las estadísticas de gasolina no dependen de la categoría. */
+            const calc = Finanzas.calcular(
+              [{ valor: 10000000, rol: RolEstadistico.GASOLINA }, { valor: 5000000, rol: null }], 0);
+            Pruebas.igual(calc.gasolina, 10000000,
+              'La gasolina se sigue midiendo sin la categoría: el papel vive en el movimiento');
+          } },
+
+        { nombre: 'CRÍTICO · el programa sabe cuánto lleva esperando cada caja', fn: async ctx => {
+            /* Nada sabía contar el tiempo: una caja consignada hace tres
+               semanas se veía igual que la de ayer. */
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const hace = d => { const x = new Date(); x.setDate(x.getDate() - d);
+              return x.toISOString().slice(0, 10); };
+            const crear = async (dias, estado) => CajaService.crear({
+              fecha: hace(dias), solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
+              estado: estado, detalles: [{ categoriaId: cm.id, elemento: 'x', valor: 10000000 }] });
+
+            Pruebas.igual(Fecha.diasEntre(hace(0)), 0, 'Hoy son cero días');
+            Pruebas.igual(Fecha.diasEntre(hace(41)), 41, 'Cuarenta y un días son 41');
+            Pruebas.igual(Fecha.haceCuanto(hace(1)), 'ayer', 'Un día es «ayer»');
+
+            const nueva = await crear(2, EstadoCaja.CONSIGNADA);
+            const media = await crear(18, EstadoCaja.CONSIGNADA);
+            const vieja = await crear(41, EstadoCaja.CONSIGNADA);
+            Pruebas.igual(Finanzas.antiguedad(nueva, 0).nivel, '', 'Dos días: sin aviso');
+            Pruebas.igual(Finanzas.antiguedad(media, 0).nivel, 'aviso', 'Dieciocho días: aviso');
+            Pruebas.igual(Finanzas.antiguedad(vieja, 0).nivel, 'alarma', 'Cuarenta y uno: alarma');
+            Pruebas.igual(Finanzas.antiguedad(vieja, 0).dias, 41, 'Y cuenta los días exactos');
+
+            /* Una caja ya saldada no lleva días de nada: lo que se cuenta es la
+               espera, no la edad. */
+            Pruebas.igual(Finanzas.antiguedad(vieja, vieja.total).dias, 0,
+              'Una caja ya repuesta no lleva días esperando');
+            Pruebas.igual(Finanzas.antiguedad(vieja, vieja.total).nivel, '', 'Ni semáforo');
+            const borrador = await crear(60, EstadoCaja.BORRADOR);
+            Pruebas.igual(Finanzas.antiguedad(borrador, 0).dias, 0,
+              'Un borrador tampoco: todavía no se le debe nada a nadie');
+          } },
+
+        { nombre: 'El programa recuerda la copia de seguridad', fn: async () => {
+            /* Las copias hay que acordarse de hacerlas, y nadie se acuerda. */
+            const antes = (ConfigRepo.get() || {}).ultimaCopia;
+            const oculto = Prefs.get('copiaOculta');
+            try {
+              Prefs.set('copiaOculta', '');
+              const sinCopia = () => {
+                const c = ConfigRepo.get() || {};
+                const d = c.ultimaCopia ? Fecha.diasEntre(c.ultimaCopia) : null;
+                return d === null || d >= Finanzas.DIAS_SIN_COPIA;
+              };
+              await ConfigRepo.guardar({ ultimaCopia: '' });
+              Pruebas.ok(sinCopia(), 'Sin ninguna copia hecha, hay que recordarlo');
+
+              await ConfigRepo.guardar({ ultimaCopia: Fecha.ahora() });
+              Pruebas.ok(!sinCopia(), 'Recién hecha, no se molesta');
+
+              const viejo = new Date();
+              viejo.setDate(viejo.getDate() - (Finanzas.DIAS_SIN_COPIA + 5));
+              await ConfigRepo.guardar({ ultimaCopia: viejo.toISOString() });
+              Pruebas.ok(sinCopia(), 'Pasados los días, vuelve a recordarse');
+              Pruebas.igual(Fecha.diasEntre(viejo.toISOString()), Finanzas.DIAS_SIN_COPIA + 5,
+                'Y dice los días exactos');
+
+              /* La fecha se anota SÓLO si la descarga salió bien. */
+              const src = VistaRespaldos.render.toString();
+              const iDesc = src.indexOf('Respaldo.descargar');
+              Pruebas.ok(iDesc >= 0, 'El botón sigue descargando');
+              Pruebas.ok(/ultimaCopia/.test(src.slice(iDesc, iDesc + 400)),
+                'Y justo después anota la fecha, dentro del mismo try');
+            } finally {
+              await ConfigRepo.guardar({ ultimaCopia: antes || '' });
+              Prefs.set('copiaOculta', oculto || '');
+            }
+          } },
+
         { nombre: 'CRÍTICO · cada contrato tiene sus propios catálogos', fn: async ctx => {
             /* Personas, categorias y municipios eran listas compartidas. Ahora
                cada contrato tiene las suyas: dos contratos pueden tener el
@@ -15331,12 +15542,10 @@ const Pruebas = {
               Pruebas.ok(Boolean(PersonaRepo.get(propia.id)),
                 'Aunque por identificador se sigue resolviendo, para el histórico');
 
-              /* Un contrato nuevo nace con sus propios catálogos de fábrica. */
-              Pruebas.ok(MunicipioRepo.todos().length > 0,
-                'El contrato nuevo nace con sus municipios');
-              Pruebas.ok(CategoriaRepo.todas().length > 0, 'Y con sus categorías');
-              Pruebas.igual(PersonaRepo.todas().length, 0,
-                'Pero sin personas: ésas se crean para cada contrato');
+              /* Un contrato nuevo nace LIMPIO: nada de nadie. */
+              Pruebas.igual(MunicipioRepo.todos().length, 0, 'Sin municipios heredados');
+              Pruebas.igual(CategoriaRepo.todas().length, 0, 'Sin categorías heredadas');
+              Pruebas.igual(PersonaRepo.todas().length, 0, 'Y sin personas');
 
               /* Y el mismo nombre en los dos ya no choca. */
               const gemela = await PersonaRepo.guardar({ nombre: 'Persona Sólo Del Primero',
@@ -16414,6 +16623,43 @@ const Semillas = {
           console.info('[migración v4] ' + sinDueno.length + ' ' + col +
             ' asignados a «' + primero.nombre + '».');
         }
+      }
+    }
+
+    /* --- reparación v6: catálogos sembrados por error ---------------------
+       Durante una versión, al crear o entrar en un contrato se le instalaban
+       municipios y categorías de fábrica «para que no arrancara vacío». Fue una
+       mala idea: un contrato nuevo debe estar LIMPIO. Se retira lo sembrado en
+       los contratos que NO son el primero, y sólo si no se ha usado: nada que
+       tenga movimientos detrás se toca, y lo que haya creado el usuario a mano
+       tampoco (sólo se retira lo de origen SISTEMA). */
+    {
+      const contratos = (await db.getAll('contratos')).slice().sort(U.by('creadoEn'));
+      const primero = contratos[0];
+      if (primero && contratos.length > 1) {
+        const cajas = await db.getAll('cajas');
+        const detalles = await db.getAll('detalles');
+        const conMovimiento = new Set(cajas.map(c => c.contratoId));
+        const catsEnUso = new Set(detalles.map(d => d.categoriaId).filter(Boolean));
+        const munsEnUso = new Set(cajas.map(c => c.municipioId).filter(Boolean));
+        let quitadas = 0;
+        for (const ctr of contratos.slice(1)) {
+          if (conMovimiento.has(ctr.id)) continue;   // contrato ya en uso: no se toca
+          /* Se lee de la BASE, no de la caché: durante el arranque la caché
+             todavía está vacía —se carga justo después— y esto no encontraba
+             nada que limpiar. */
+          for (const [col, enUso] of [['categorias', catsEnUso], ['municipios', munsEnUso]]) {
+            const sobran = (await db.getAll(col)).filter(x =>
+              x.contratoId === ctr.id && x.origen === Origen.SISTEMA && !enUso.has(x.id));
+            for (const x of sobran) {
+              await db.remove(col, x.id);
+              if (Cache[col]) Cache[col].delete(x.id);
+              quitadas++;
+            }
+          }
+        }
+        if (quitadas) console.info('[reparación v6] ' + quitadas +
+          ' elemento(s) de catálogo sembrados por error se retiraron de los contratos nuevos.');
       }
     }
 
