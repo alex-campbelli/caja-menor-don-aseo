@@ -1890,8 +1890,6 @@ const ESTADO_CAJA_META = {
 /** Estados que representan dinero realmente comprometido (entran en el gasto) */
 const ESTADOS_VIVOS = [EstadoCaja.BORRADOR, EstadoCaja.PENDIENTE,
                        EstadoCaja.CONSIGNADA, EstadoCaja.REEMBOLSADA];
-/** Estados que pueden recibir reposición */
-const ESTADOS_REPONIBLES = [EstadoCaja.PENDIENTE, EstadoCaja.CONSIGNADA, EstadoCaja.REEMBOLSADA];
 /** Alguien puso el dinero y todavía no se le ha devuelto: es lo que se le debe */
 const ESTADOS_POR_REEMBOLSAR = [EstadoCaja.CONSIGNADA];
 /** Cajas que aún no están cerradas: se resaltan en el listado */
@@ -3742,9 +3740,12 @@ const Finanzas = {
   antiguedad(caja, repuesto) {
     const pend = this.pendienteDe(caja, repuesto || 0);
     /* Sólo cuenta el tiempo de lo que sigue esperando algo. Una caja saldada o
-       anulada no lleva días de nada. */
-    if (pend <= 0 || caja.estado === EstadoCaja.ANULADA ||
-        caja.estado === EstadoCaja.BORRADOR) return { dias: 0, nivel: '', pendiente: pend };
+       anulada no lleva días de nada.
+       Una PENDIENTE no debe dinero a nadie, pero sí espera: que alguien le
+       consigne. Veinte días así es justo lo que el semáforo tiene que enseñar,
+       así que cuenta aunque su pendiente sea cero. */
+    const esperaGiro = caja.estado === EstadoCaja.PENDIENTE;
+    if (!esperaGiro && pend <= 0) return { dias: 0, nivel: '', pendiente: pend };
     const dias = Fecha.diasEntre(caja.fecha);
     const nivel = dias >= this.DIAS_ALARMA ? 'alarma' : dias >= this.DIAS_AVISO ? 'aviso' : '';
     return { dias, nivel, pendiente: pend };
@@ -3808,15 +3809,21 @@ const Finanzas = {
 
   /**
    * Saldo pendiente por reponer de una caja (§21, §23).
-   * Regla única, usada por el detalle, el listado, el dashboard y las estadísticas:
-   *   · ANULADA o BORRADOR      → 0 (no hay dinero comprometido a reponer)
-   *   · REPUESTA                → 0 (se declara saldada, con o sin consignación)
-   *   · resto                   → total − suma de aplicaciones
+   * Regla única, usada por el detalle, el listado, el dashboard, la
+   * consignación y las estadísticas. «Pendiente por reponer» es LO QUE SE LE
+   * DEBE A QUIEN PUSO EL DINERO, y eso sólo existe en una caja CONSIGNADA:
+   *   · CONSIGNADA              → total − suma de aplicaciones
+   *   · PENDIENTE               → 0 (nadie ha puesto el dinero todavía)
+   *   · REEMBOLSADA             → 0 (ya se le devolvió)
+   *   · BORRADOR o ANULADA      → 0 (no hay dinero comprometido)
+   *
+   * Antes sólo se descartaban borradores, anuladas y reembolsadas, así que una
+   * caja PENDIENTE entraba con su total entero: el panel, la tarjeta de quien
+   * consignó y el formulario de consignación sumaban como deuda un dinero que
+   * nadie había adelantado. Se ciñe a la constante que ya lo decía.
    */
   pendienteDe(caja, repuesto) {
-    if (!caja) return 0;
-    if (caja.estado === EstadoCaja.ANULADA || caja.estado === EstadoCaja.BORRADOR) return 0;
-    if (caja.estado === EstadoCaja.REEMBOLSADA) return 0;
+    if (!caja || !ESTADOS_POR_REEMBOLSAR.includes(caja.estado)) return 0;
     return Math.max(0, (caja.total || 0) - (repuesto || 0));
   },
   pendiente(caja, aplicaciones) {
@@ -4307,6 +4314,13 @@ const ConsignacionService = {
       const caja = await CajaRepo.get(a.cajaId);
       if (!caja) { errores.push('La caja ' + a.cajaId + ' no existe.'); continue; }
       if (caja.estado === EstadoCaja.ANULADA) { errores.push('La caja ' + caja.numero + ' está anulada y no puede reponerse.'); continue; }
+      /* Reponer es devolverle a alguien lo que adelantó. Si la caja todavía no
+         se ha consignado, nadie adelantó nada. El formulario ya no las ofrece;
+         esto es por si algún otro camino lo intentara. */
+      if (caja.estado === EstadoCaja.PENDIENTE || caja.estado === EstadoCaja.BORRADOR) {
+        errores.push('La caja ' + caja.numero + ' todavía no se ha consignado: no hay nada que reembolsar.');
+        continue;
+      }
       if (contratoDeLaConsignacion && caja.contratoId && caja.contratoId !== contratoDeLaConsignacion) {
         errores.push('La caja ' + caja.numero + ' pertenece a otro contrato: no puede repartirse dinero entre contratos.');
         continue;
@@ -7197,13 +7211,14 @@ const VistaCajas = {
           /* Los días van pegados al pendiente y no en una columna propia: la
              tabla ya va justa y el dato sólo importa cuando hay algo esperando. */
           (() => {
-            if (pend <= 0) return '<td class="num"><span class="txt-3">—</span></td>';
             const a = Finanzas.antiguedad(c, rep);
+            const dias = a.dias > 0 ? '<div class="dias' + (a.nivel ? ' d-' + a.nivel : '') + '" tabindex="0" ' +
+              'data-tip="' + attr(Comp.textoAntiguedad(c, a)) + '">' + a.dias + ' d</div>' : '';
+            /* Una caja PENDIENTE no debe nada —de ahí la raya— pero sí lleva
+               días esperando que le consignen, y eso se sigue viendo. */
+            if (pend <= 0) return '<td class="num"><span class="txt-3">—</span>' + dias + '</td>';
             return '<td class="num"><span style="color:var(--dang-500);font-weight:650">' +
-              Money.format(pend) + '</span>' +
-              (a.dias > 0 ? '<div class="dias' + (a.nivel ? ' d-' + a.nivel : '') + '" tabindex="0" ' +
-                'data-tip="' + attr(Comp.textoAntiguedad(c, a)) + '">' + a.dias + ' d</div>' : '') +
-              '</td>';
+              Money.format(pend) + '</span>' + dias + '</td>';
           })() +
           '<td class="td-estado">' + Comp.selectorEstadoCaja(c, 'estadoRapido') + '</td>' +
           '<td class="nowrap">' +
@@ -7451,9 +7466,16 @@ const VistaCaja = {
           meta: '<span>' + U.pct(caja.gasolina, caja.total).toFixed(1).replace('.', ',') + '% del total</span>' }) +
         Comp.kpi({ label: 'Aceite', valor: Money.format(caja.aceite), color: '#6d4aca', icono: 'drop',
           meta: '<span>' + U.pct(caja.aceite, caja.total).toFixed(1).replace('.', ',') + '% del total</span>' }) +
-        Comp.kpi({ label: pendiente > 0 ? 'Pendiente por reponer' : 'Repuesto', color: pendiente > 0 ? 'var(--dang-500)' : 'var(--ok-500)',
-          valor: Money.format(pendiente > 0 ? pendiente : repuesto), icono: pendiente > 0 ? 'clock' : 'check',
-          meta: '<span>' + (repuesto ? 'Repuesto ' + Money.format(repuesto) + ' de ' + Money.format(caja.total) : 'Sin reposición registrada') + '</span>' }) +
+        /* Con el pendiente en cero, una caja PENDIENTE habría salido como
+           «Repuesto $ 0» en verde: como si estuviera saldada, cuando lo que
+           pasa es que nadie ha puesto el dinero todavía. */
+        (caja.estado === EstadoCaja.PENDIENTE
+          ? Comp.kpi({ label: 'Esperando consignación', color: 'var(--warn-500)',
+              valor: Money.format(caja.total), icono: 'clock',
+              meta: '<span>Nadie ha puesto el dinero todavía: no hay nada que reponer</span>' })
+          : Comp.kpi({ label: pendiente > 0 ? 'Pendiente por reponer' : 'Repuesto', color: pendiente > 0 ? 'var(--dang-500)' : 'var(--ok-500)',
+              valor: Money.format(pendiente > 0 ? pendiente : repuesto), icono: pendiente > 0 ? 'clock' : 'check',
+              meta: '<span>' + (repuesto ? 'Repuesto ' + Money.format(repuesto) + ' de ' + Money.format(caja.total) : 'Sin reposición registrada') + '</span>' })) +
       '</div>' +
 
       '<div class="grid g32 mb16">' +
@@ -7541,8 +7563,12 @@ const VistaCaja = {
           '</td></tr></tfoot></table></div>' +
           (pendiente > 0 ? '<div class="alert a-warn mt12" style="padding:8px 11px">' + Icon('warn', '', 13) +
             '<div>Reposición parcial. Saldo pendiente: <b>' + Money.format(pendiente) + '</b></div></div>' : '')
-          : '<div class="empty" style="padding:20px">' + Icon('clock') +
-            '<h4>Sin reposición</h4><p>Pendiente por reponer: <b>' + Money.format(pendiente) + '</b></p></div>') +
+          : (caja.estado === EstadoCaja.PENDIENTE
+              ? '<div class="empty" style="padding:20px">' + Icon('clock') +
+                '<h4>Todavía no se ha consignado</h4><p>Cuando alguien ponga el dinero y la caja pase a ' +
+                '<b>Consignada</b>, aquí se verá lo que hay que devolverle.</p></div>'
+              : '<div class="empty" style="padding:20px">' + Icon('clock') +
+                '<h4>Sin reposición</h4><p>Pendiente por reponer: <b>' + Money.format(pendiente) + '</b></p></div>')) +
 
         /* Comprobante de la transferencia. Va aquí, junto a la reposición, y no
            perdido entre los soportes de compra: es la prueba de que el dinero
@@ -14908,6 +14934,82 @@ const Pruebas = {
     {
       nombre: 'Consignaciones y reposición',
       casos: [
+        { nombre: 'CRÍTICO · una caja PENDIENTE no suma como deuda', fn: async ctx => {
+            /* El panel, la tarjeta de quien consignó y el formulario de
+               consignación sumaban una caja PENDIENTE con su total entero, como
+               si alguien hubiera adelantado ese dinero. Nadie lo había hecho. */
+            const fin = PersonaRepo.porNombre('Financiador de Pendientes') ||
+              await PersonaRepo.guardar({ nombre: 'Financiador de Pendientes', esFinanciador: 1 });
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const nueva = estado => CajaService.crear({
+              fecha: '2026-09-05', solicitanteId: ctx.fernando.id, consignoId: fin.id, estado,
+              detalles: [{ categoriaId: cm.id, descripcion: 'deuda ' + estado, valor: Money.parse('200.000') }]
+            });
+            const pend = await nueva(EstadoCaja.PENDIENTE);
+            const cons = await nueva(EstadoCaja.CONSIGNADA);
+            ctx.cajaSinConsignar = pend; ctx.cajaConsignada = cons; ctx.finPendientes = fin;
+
+            Pruebas.igual(Finanzas.pendienteDe(pend, 0), 0, 'Una PENDIENTE no le debe nada a nadie');
+            Pruebas.igual(Finanzas.pendienteDe(cons, 0), Money.parse('200.000'),
+              'Una CONSIGNADA sí: todo lo que se adelantó');
+            Pruebas.igual(Finanzas.pendienteDe(cons, Money.parse('50.000')), Money.parse('150.000'),
+              'Y con una reposición parcial, lo que falta');
+
+            const r = Finanzas.resumen([pend, cons], new Map());
+            Pruebas.igual(r.pendienteReponer, Money.parse('200.000'),
+              'El total del panel suma sólo la consignada, no las dos');
+          } },
+        { nombre: 'CRÍTICO · la tarjeta de quien consignó no cuenta las pendientes', fn: async ctx => {
+            Analitica.invalidar();
+            const fila = (await Analitica.pendientePorFinanciador())
+              .find(p => p.clave === ctx.finPendientes.id);
+            Pruebas.ok(fila, 'El financiador aparece: tiene una caja consignada');
+            Pruebas.igual(fila.n, 1, 'Con UNA caja, no dos');
+            Pruebas.igual(fila.pendiente, Money.parse('200.000'), 'Y su saldo es sólo el de esa');
+          } },
+        { nombre: 'CRÍTICO · el formulario de consignación no ofrece cajas sin consignar', fn: async ctx => {
+            const ofrecidas = await CajaService.pendientesDeReposicion({
+              contratoId: ContratoRepo.activoId(), consignoId: ctx.finPendientes.id });
+            const ids = new Set(ofrecidas.map(c => c.id));
+            Pruebas.ok(ids.has(ctx.cajaConsignada.id), 'La consignada sí se ofrece');
+            Pruebas.ok(!ids.has(ctx.cajaSinConsignar.id),
+              'La pendiente no: no hay nada que devolver a nadie');
+          } },
+        { nombre: 'El dominio no deja reponer una caja sin consignar', fn: async ctx => {
+            /* El formulario ya no la ofrece; esto vigila cualquier otro camino. */
+            await Pruebas.lanza(() => ConsignacionService.crear({
+              fecha: '2026-09-06', beneficiarioId: ctx.finPendientes.id, valor: Money.parse('200.000'),
+              asignaciones: [{ cajaId: ctx.cajaSinConsignar.id, monto: Money.parse('200.000') }]
+            }), 'Debe negarse a reembolsar lo que nadie adelantó');
+            Pruebas.igual((await CajaRepo.get(ctx.cajaSinConsignar.id)).estado, EstadoCaja.PENDIENTE,
+              'Y la caja sigue pendiente, sin tocar');
+          } },
+        { nombre: 'Una caja pendiente sigue contando sus días de espera', fn: async ctx => {
+            /* No es deuda, pero sí espera: veinte días sin que nadie consigne
+               es justo lo que el semáforo tiene que enseñar. */
+            const vieja = Object.assign({}, ctx.cajaSinConsignar, { fecha: Fecha.sumarDias
+              ? Fecha.sumarDias(Fecha.hoy(), -20) : '2020-01-01' });
+            const a = Finanzas.antiguedad(vieja, 0);
+            Pruebas.ok(a.dias >= 20, 'Cuenta los días que lleva esperando');
+            Pruebas.igual(a.pendiente, 0, 'Sin convertirlos en deuda');
+            Pruebas.ok(/esperando que se le consigne/.test(Comp.textoAntiguedad(vieja, a)),
+              'Y la frase dice qué está esperando');
+          } },
+        { nombre: 'La ficha de una caja pendiente no dice «Repuesto» en verde', fn: async ctx => {
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            let etiquetas = [];
+            try {
+              await VistaCaja.render(div, [ctx.cajaSinConsignar.id]);
+              etiquetas = [...div.querySelectorAll('.kpi-l')].map(x => x.textContent.trim());
+              Pruebas.ok(/Todavía no se ha consignado/.test(div.innerHTML),
+                'La tarjeta de reposición explica que falta consignar');
+            } finally { div.remove(); }
+            Pruebas.ok(etiquetas.includes('Esperando consignación'), 'Dice que espera consignación');
+            Pruebas.ok(!etiquetas.includes('Repuesto'),
+              'Y no «Repuesto», que la haría pasar por saldada');
+          } },
         { nombre: 'Crear 4 cajas para reponer', fn: async ctx => {
             ctx.cuatro = [];
             const valores = ['300.000', '450.000', '200.000', '350.000'];
