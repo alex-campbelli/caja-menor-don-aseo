@@ -1622,7 +1622,7 @@ class StorageAdapter {
   async removeWhere(coleccion, indice, valor) { throw new Error('no implementado'); }
   async clear(coleccion) { throw new Error('no implementado'); }
   async count(coleccion, indice, valor) { throw new Error('no implementado'); }
-  /** consulta por índice: valor exacto, rango {desde,hasta} o null (todo) */
+  /** consulta por índice: valor exacto, varios {valores:[...]}, rango {desde,hasta} o null (todo) */
   async query(coleccion, opts) { throw new Error('no implementado'); }
   /** transacción atómica multi-colección: fn(tx) con tx.put/tx.remove/tx.get */
   async transaccion(colecciones, fn) { throw new Error('no implementado'); }
@@ -1790,6 +1790,21 @@ class IndexedDBAdapter extends StorageAdapter {
    */
   async query(col, opts) {
     const o = opts || {};
+    /* Varios valores del mismo índice en una sola llamada: «los detalles de
+       estas veinte cajas». Aquí, en local, se resuelve con una lectura por
+       valor dentro de la misma transacción —es instantáneo—; lo que importa es
+       que quien llama pueda pedirlo de una vez, porque contra el servidor eso
+       es UNA petición en vez de veinte. */
+    if (o.valores) {
+      if (!o.valores.length) return [];
+      const st0 = this._tx([col]).objectStore(col);
+      const idx = o.indice ? st0.index(o.indice) : st0;
+      const trozos = await Promise.all(o.valores.map(v =>
+        this._wrap(idx.getAll(IDBKeyRange.only(v)))));
+      let filas = [].concat(...trozos.map(x => x || []));
+      if (o.filtro) filas = filas.filter(o.filtro);
+      return filas;
+    }
     const st = this._tx([col]).objectStore(col);
     const src = o.indice ? st.index(o.indice) : st;
     let rango = null;
@@ -2818,6 +2833,27 @@ class SupabaseAdapter extends StorageAdapter {
 
   async query(col, opts) {
     const o = opts || {};
+    /* Varios valores del mismo índice en UNA petición: `campo=in.(...)`.
+       De aquí sale la diferencia de verdad — pedir los detalles de veinte
+       cajas era veinte viajes al servidor, uno detrás de otro. */
+    if (o.valores) {
+      if (!o.valores.length) return [];
+      const campo = Nombres.snake(o.indice);
+      const out = [];
+      const TAMID = 100, TAM = 1000;
+      for (let i = 0; i < o.valores.length; i += TAMID) {
+        const lote = o.valores.slice(i, i + TAMID).map(x => '"' + x + '"').join(',');
+        const base = col + '?select=*&' + campo + '=in.(' + encodeURIComponent(lote) + ')';
+        /* PostgREST corta en 1.000 filas: se recorre hasta agotar el lote. */
+        for (let desde = 0; ; desde += TAM) {
+          const f = await this._pedir(base + '&order=id.asc&limit=' + TAM + '&offset=' + desde);
+          if (!f || !f.length) break;
+          out.push(...f.map(x => Nombres.filaEntrada(x)));
+          if (f.length < TAM) break;
+        }
+      }
+      return o.filtro ? out.filter(o.filtro) : out;
+    }
     const p = ['select=*'];
     if (o.indice) {
       const campo = Nombres.snake(o.indice);
@@ -4168,19 +4204,57 @@ const CajaService = {
   },
 
   /** Reevalúa el estado según lo efectivamente repuesto */
-  async recalcularReposicion(cajaId) {
-    const caja = await CajaRepo.get(cajaId);
-    if (!caja) return null;
-    const apls = await CajaRepo.aplicaciones(cajaId);
-    const repuesto = Finanzas.repuesto(apls);
-    const nuevo = Finanzas.estadoPorReposicion(caja, repuesto);
-    if (nuevo && nuevo !== caja.estado) {
+  /**
+   * Reevalúa el estado de reposición de VARIAS cajas con un puñado de
+   * peticiones, en vez de seis por caja.
+   *
+   * Guardar una consignación que repone veinte cajas costaba 123 viajes al
+   * servidor, uno detrás de otro: leía cada caja dos veces, preguntaba sus
+   * aplicaciones una por una y reescribía los detalles de cada caja por
+   * separado. De ahí los segundos de espera, y crecía con cada caja añadida.
+   * Ahora se lee todo junto y se escribe todo junto.
+   *
+   * Hace exactamente lo mismo que hacía de una en una: mismo estado nuevo,
+   * mismo sello de fecha en los detalles. Lo único que cambia es el número de
+   * peticiones —y que el aviso de cambio se emite una vez y no veinte.
+   */
+  async recalcularReposicionLote(cajaIds) {
+    const ids = U.uniq((cajaIds || []).filter(Boolean));
+    if (!ids.length) return new Map();
+    const cajas = await db.getMany('cajas', ids);
+    const apls = await db.query('aplicaciones', { indice: 'cajaId', valores: ids });
+    const repuestoPor = new Map();
+    for (const a of apls) repuestoPor.set(a.cajaId, (repuestoPor.get(a.cajaId) || 0) + (a.monto || 0));
+
+    const porId = new Map();
+    const cambiadas = [];
+    for (const caja of cajas) {
+      porId.set(caja.id, caja);
+      const nuevo = Finanzas.estadoPorReposicion(caja, repuestoPor.get(caja.id) || 0);
+      if (!nuevo || nuevo === caja.estado) continue;
       caja.estado = nuevo; caja.actualizadoEn = Modelo.ahora();
-      await db.put('cajas', caja);
-      await this._sincronizarDetalles(cajaId, { estadoCaja: nuevo });
-      Bus.emit('cajas:cambio', caja);
+      cambiadas.push(caja);
     }
-    return caja;
+    if (cambiadas.length) {
+      /* Los detalles llevan copiado el estado de su caja. Sólo se tocan los de
+         las cajas que de verdad cambiaron. */
+      const idsCambiadas = cambiadas.map(c => c.id);
+      const nuevoPorCaja = new Map(cambiadas.map(c => [c.id, c.estado]));
+      const dets = await db.query('detalles', { indice: 'cajaId', valores: idsCambiadas });
+      await db.putMany('cajas', cambiadas);
+      if (dets.length) {
+        const sello = Modelo.ahora();
+        dets.forEach(d => Object.assign(d, { estadoCaja: nuevoPorCaja.get(d.cajaId), actualizadoEn: sello }));
+        await db.putMany('detalles', dets);
+      }
+      Bus.emit('cajas:cambio', cambiadas.length === 1 ? cambiadas[0] : null);
+    }
+    return porId;
+  },
+
+  async recalcularReposicion(cajaId) {
+    const porId = await this.recalcularReposicionLote([cajaId]);
+    return porId.get(cajaId) || null;
   },
 
   /** Cajas con saldo pendiente por reponer, listas para asociar a una consignación */
@@ -4241,7 +4315,7 @@ const ConsignacionService = {
       tx.put('consignaciones', con);
       asigns.forEach(a => tx.put('aplicaciones', a));
     });
-    for (const a of asigns) await CajaService.recalcularReposicion(a.cajaId);
+    await CajaService.recalcularReposicionLote(asigns.map(a => a.cajaId));
     await Auditoria.registrar('consignacion', con.id, 'CREAR', { numero: con.numero, valor: con.valor, cajas: asigns.length });
     Bus.emit('consignaciones:cambio', con);
     return con;
@@ -4282,7 +4356,7 @@ const ConsignacionService = {
         asigns.forEach(a => tx.put('aplicaciones', a));
       }
     });
-    for (const cid of cajasAfectadas) await CajaService.recalcularReposicion(cid);
+    await CajaService.recalcularReposicionLote([...cajasAfectadas]);
     await Auditoria.registrar('consignacion', id, 'ACTUALIZAR', { numero: con.numero, valor: con.valor });
     Bus.emit('consignaciones:cambio', con);
     return con;
@@ -4299,7 +4373,7 @@ const ConsignacionService = {
       docs.forEach(d => { tx.remove('documentos', d.id); tx.remove('archivos', d.id); });
       tx.remove('consignaciones', id);
     });
-    for (const cid of cajas) await CajaService.recalcularReposicion(cid);
+    await CajaService.recalcularReposicionLote(cajas);
     await Auditoria.registrar('consignacion', id, 'ELIMINAR', { numero: con.numero, valor: con.valor });
     Bus.emit('consignaciones:cambio', null);
   },
@@ -4309,9 +4383,13 @@ const ConsignacionService = {
     const out = [];
     const errores = [];
     const todas = await db.getAll('aplicaciones');
+    /* Las cajas, de una vez. Antes se pedía una por una —y luego otra vez al
+       recalcular—, así que veinte cajas eran cuarenta lecturas en fila. */
+    const porId = new Map((await db.getMany('cajas',
+      U.uniq(lista.map(a => a.cajaId).filter(Boolean)))).map(c => [c.id, c]));
     for (const a of lista) {
       if (!a.cajaId || !a.monto || a.monto <= 0) continue;
-      const caja = await CajaRepo.get(a.cajaId);
+      const caja = porId.get(a.cajaId);
       if (!caja) { errores.push('La caja ' + a.cajaId + ' no existe.'); continue; }
       if (caja.estado === EstadoCaja.ANULADA) { errores.push('La caja ' + caja.numero + ' está anulada y no puede reponerse.'); continue; }
       /* Reponer es devolverle a alguien lo que adelantó. Si la caja todavía no
@@ -11720,22 +11798,58 @@ const Documento = {
     Cargando.iniciar();
     try {
       const orden = cajas.slice().sort((a, b) => (a.fecha + a.numero).localeCompare(b.fecha + b.numero));
+      /* Todo lo que hace falta, de una vez. Antes se recorría caja por caja
+         preguntando al servidor sus detalles, sus aplicaciones y sus
+         documentos: veinte cajas eran unos ciento veinte viajes en fila. */
+      const ids = orden.map(c => c.id);
+      const [todosDets, todasApls, docsDeCaja] = await Promise.all([
+        db.query('detalles', { indice: 'cajaId', valores: ids }),
+        db.query('aplicaciones', { indice: 'cajaId', valores: ids }),
+        db.query('documentos', { indice: 'cajaId', valores: ids })
+      ]);
+      const agrupar = (filas, campo) => {
+        const m = new Map();
+        for (const f of filas) { if (!m.has(f[campo])) m.set(f[campo], []); m.get(f[campo]).push(f); }
+        return m;
+      };
+      const detsPorCaja = agrupar(todosDets, 'cajaId');
+      const aplsPorCaja = agrupar(todasApls, 'cajaId');
+      const activos = d => d.estado === Estado.ACTIVO;
+      const docsPorCaja = agrupar(docsDeCaja.filter(activos), 'cajaId');
+      const consIds = U.uniq(todasApls.map(a => a.consignacionId).filter(Boolean));
+      const docsPorCons = agrupar(
+        (consIds.length ? await db.query('documentos', { indice: 'consignacionId', valores: consIds }) : [])
+          .filter(activos), 'consignacionId');
+
+      /* Primero se decide QUÉ comprobante lleva cada caja. El comprobante
+         puede estar colgado de la caja o de la consignación que la repone: se
+         miran los dos sitios, igual que en su detalle. */
+      const compDe = new Map();
+      for (const c of orden) {
+        const idsCons = U.uniq((aplsPorCaja.get(c.id) || []).map(a => a.consignacionId));
+        let docs = (docsPorCaja.get(c.id) || []).slice();
+        for (const i of idsCons) docs = docs.concat(docsPorCons.get(i) || []);
+        const comp = docs.filter(d => d.tipo === TipoDocumento.COMPROBANTE_CONSIGNACION);
+        if (comp.length) compDe.set(c.id, comp);
+      }
+      /* Y después se piden TODOS los archivos a la vez. Cada uno es un binario
+         distinto y hay que traerlo aparte, pero pedirlos dentro del recorrido
+         los ponía en fila: veinte cajas eran veinte esperas seguidas. */
+      const todosComp = [].concat(...[...compDe.values()]);
+      const urlPorDoc = new Map();
+      (await Promise.all(todosComp.map(d => DocumentoService.url(d.id).catch(() => null))))
+        .forEach((u, i) => urlPorDoc.set(todosComp[i].id, u));
+
       const partes = [];
       let conComprobante = 0;
       for (const c of orden) {
-        partes.push(await this.construir(c));
-        /* El comprobante puede estar colgado de la caja o de la consignación
-           que la repone: se buscan los dos sitios, igual que en su detalle. */
-        const apls = await CajaRepo.aplicaciones(c.id);
-        const ids = U.uniq(apls.map(a => a.consignacionId));
-        let docs = await CajaRepo.documentos(c.id);
-        for (const i of ids) docs = docs.concat(await ConsignacionRepo.documentos(i));
-        const comp = docs.filter(d => d.tipo === TipoDocumento.COMPROBANTE_CONSIGNACION);
-        if (!comp.length) continue;
+        partes.push(await this.construir(c, { detalles: (detsPorCaja.get(c.id) || []).slice().sort(U.by('orden')) }));
+        const comp = compDe.get(c.id);
+        if (!comp) continue;
         conComprobante++;
         const imgs = [];
         for (const d of comp) {
-          const url = await DocumentoService.url(d.id);
+          const url = urlPorDoc.get(d.id);
           if (!url) continue;
           imgs.push(U.esImagen(d.mime)
             ? '<figure class="doc-comp"><img src="' + attr(url) + '" alt="">' +
@@ -11754,9 +11868,35 @@ const Documento = {
       window.addEventListener('afterprint', limpiar);
       if (conComprobante < orden.length)
         Toast.warn((orden.length - conComprobante) + ' caja(s) van sin comprobante: todavía no se les ha adjuntado.', 7000);
-      setTimeout(() => { window.print(); setTimeout(limpiar, 3000); }, 400);
+      /* Se espera a que las imágenes estén cargadas ANTES de abrir el diálogo.
+         Antes se esperaba un tiempo fijo de 400 ms daba igual cuántas hubiera:
+         con muchos comprobantes traídos del servidor, alguno podía llegar al
+         papel en blanco. */
+      await this.esperarImagenes($('#printRoot'));
+      setTimeout(() => { window.print(); setTimeout(limpiar, 3000); }, 60);
     } catch (e) { manejarError(e); }
     finally { Cargando.terminar(); }
+  },
+
+  /**
+   * Espera a que todas las imágenes de un trozo de página estén cargadas.
+   *
+   * Con un tope: si una no llega —el archivo ya no está, la red se cayó— es
+   * preferible imprimir sin ella que dejar a la persona mirando una ventana
+   * que no termina nunca.
+   */
+  esperarImagenes(raiz, msMax) {
+    const imgs = raiz ? [...raiz.querySelectorAll('img')] : [];
+    const pendientes = imgs.filter(i => !i.complete || !i.naturalWidth);
+    if (!pendientes.length) return Promise.resolve(0);
+    const todas = Promise.all(pendientes.map(i => new Promise(res => {
+      const fin = () => { i.removeEventListener('load', fin); i.removeEventListener('error', fin); res(); };
+      i.addEventListener('load', fin); i.addEventListener('error', fin);
+    })));
+    return Promise.race([
+      todas.then(() => pendientes.length),
+      new Promise(res => setTimeout(() => res(-1), msMax || 12000))
+    ]);
   },
 
   async imprimir(caja) {
@@ -14916,13 +15056,54 @@ const Pruebas = {
               'Que es exactamente el que usa una caja menor');
           } },
         { nombre: 'CRÍTICO · la relación de reembolso ordena y suma lo marcado', fn: async ctx => {
-            const src = Documento.pdfConComprobantes.toString();
-            Pruebas.ok(/\(a\.fecha \+ a\.numero\)\.localeCompare/.test(src),
-              'El PDF va de la más antigua a la más reciente');
-            Pruebas.ok(/COMPROBANTE_CONSIGNACION/.test(src),
-              'Y detrás de cada caja pone su comprobante');
-            Pruebas.ok(/ConsignacionRepo\.documentos/.test(src),
-              'Buscándolo también en la consignación que la repone');
+            /* Esto miraba el CÓDIGO de la función con expresiones regulares:
+               bastaba reescribirla —igual de bien— para que fallara, y es justo
+               lo que pasó al agrupar las lecturas. Una prueba así no vigila el
+               programa, vigila cómo está escrito. Ahora se comprueba lo que de
+               verdad importa: que el impreso salga ordenado y que cada caja
+               lleve su comprobante, venga de donde venga. */
+            const cmDoc = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const nuevaDoc = (fecha, desc) => CajaService.crear({
+              fecha, solicitanteId: ctx.fernando.id, estado: EstadoCaja.CONSIGNADA,
+              detalles: [{ categoriaId: cmDoc.id, descripcion: desc, valor: Money.parse('100.000') }]
+            });
+            const vieja = await nuevaDoc('2026-07-01', 'la primera');
+            const reciente = await nuevaDoc('2026-07-20', 'la segunda');
+            const pngComp = n => new File([Uint8Array.from(atob(
+              'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='),
+              c => c.charCodeAt(0)).slice(), new Uint8Array([n, 200])],
+              'comp-' + n + '.png', { type: 'image/png' });
+            /* A una caja se le cuelga el comprobante directamente; la otra sólo
+               lo tiene en la consignación que la repuso. Las dos deben salir. */
+            await Expediente.subir([pngComp(1)],
+              { cajaId: vieja.id, tipo: TipoDocumento.COMPROBANTE_CONSIGNACION });
+            const finDoc = PersonaRepo.financiadores()[0];
+            const conDoc = await ConsignacionService.crear({
+              fecha: '2026-07-21', beneficiarioId: finDoc.id, valor: reciente.total,
+              asignaciones: [{ cajaId: reciente.id, monto: reciente.total }]
+            });
+            await Expediente.subir([pngComp(2)],
+              { consignacionId: conDoc.id, tipo: TipoDocumento.COMPROBANTE_CONSIGNACION });
+
+            const imprimirOrig = window.print;
+            window.print = () => {};
+            let salida = '';
+            try {
+              await Documento.pdfConComprobantes([reciente, vieja]);   // al revés a propósito
+              salida = $('#printRoot').innerHTML;
+            } finally { window.print = imprimirOrig; }
+
+            const dondeVieja = salida.indexOf(vieja.numero);
+            const dondeReciente = salida.indexOf(reciente.numero);
+            Pruebas.ok(dondeVieja >= 0 && dondeReciente >= 0, 'Las dos cajas salen en el impreso');
+            Pruebas.ok(dondeVieja < dondeReciente,
+              'De la más antigua a la más reciente, aunque se marcaran al revés');
+            Pruebas.igual((salida.match(/Comprobante de /g) || []).length, 2,
+              'Las dos llevan su comprobante: la que lo tiene colgado y la que sólo lo tiene en su consignación');
+            /* Se cuentan las figuras del comprobante, no todas las imágenes:
+               cada formato de caja lleva además el logo de la empresa. */
+            Pruebas.igual((salida.match(/class="doc-comp"/g) || []).length, 2,
+              'Con la imagen de cada comprobante');
             const res = Documento.resumenReembolso.toString();
             Pruebas.ok(/nombreConsigno/.test(res),
               'La relación agrupa por quien puso el dinero');
@@ -14934,6 +15115,160 @@ const Pruebas = {
     {
       nombre: 'Consignaciones y reposición',
       casos: [
+        { nombre: 'CRÍTICO · guardar una consignación no va caja por caja', fn: async ctx => {
+            /* Guardar una consignación que repone veinte cajas costaba 123
+               viajes al servidor, uno detrás de otro: leía cada caja dos veces,
+               pedía sus aplicaciones una a una y reescribía sus detalles por
+               separado. De ahí los segundos de espera, y crecía con cada caja.
+               Esta prueba cuenta las peticiones: si alguien vuelve a meter un
+               bucle que pregunta por cada caja, salta. */
+            const fin = PersonaRepo.financiadores()[0];
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const cajas = [];
+            for (let i = 0; i < 12; i++) cajas.push(await CajaService.crear({
+              fecha: '2026-10-' + String(i + 1).padStart(2, '0'),
+              solicitanteId: ctx.fernando.id, consignoId: fin.id, estado: EstadoCaja.CONSIGNADA,
+              detalles: [{ categoriaId: cm.id, descripcion: 'lote ' + i, valor: Money.parse('100.000') }]
+            }));
+
+            const METODOS = ['get', 'getMany', 'getAll', 'put', 'putMany', 'query', 'count', 'remove', 'transaccion'];
+            let peticiones = 0;
+            const originales = {};
+            METODOS.forEach(n => {
+              if (typeof db[n] !== 'function') return;
+              originales[n] = db[n];
+              db[n] = function (...a) { peticiones++; return originales[n].apply(this, a); };
+            });
+            let con;
+            try {
+              con = await ConsignacionService.crear({
+                fecha: '2026-11-01', beneficiarioId: fin.id,
+                valor: U.sumBy(cajas, c => c.total),
+                asignaciones: cajas.map(c => ({ cajaId: c.id, monto: c.total }))
+              });
+            } finally { METODOS.forEach(n => { if (originales[n]) db[n] = originales[n]; }); }
+
+            Pruebas.ok(peticiones <= 15,
+              'Doce cajas deben costar un puñado de peticiones, no una por caja: fueron ' + peticiones);
+            /* Y el resultado tiene que ser el mismo de siempre. */
+            for (const c of cajas)
+              Pruebas.igual((await CajaRepo.get(c.id)).estado, EstadoCaja.REEMBOLSADA,
+                'La caja ' + c.numero + ' queda reembolsada');
+            ctx.conLote = con; ctx.cajasLote = cajas;
+          } },
+
+        { nombre: 'CRÍTICO · reponer de a muchas da el mismo resultado que de a una', fn: async ctx => {
+            /* Lo que importa no es la velocidad sino que el estado quede igual:
+               completa → reembolsada, parcial → consignada, y los detalles con
+               el estado de su caja copiado. */
+            const fin = PersonaRepo.financiadores()[0];
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const hacer = d => CajaService.crear({
+              fecha: '2026-10-2' + d, solicitanteId: ctx.fernando.id, consignoId: fin.id,
+              estado: EstadoCaja.CONSIGNADA,
+              detalles: [{ categoriaId: cm.id, descripcion: 'mezcla ' + d, valor: Money.parse('100.000') }]
+            });
+            const entera = await hacer(1), mitad = await hacer(2);
+            await ConsignacionService.crear({
+              fecha: '2026-11-02', beneficiarioId: fin.id,
+              valor: entera.total + Money.parse('40.000'),
+              asignaciones: [{ cajaId: entera.id, monto: entera.total },
+                             { cajaId: mitad.id, monto: Money.parse('40.000') }]
+            });
+            Pruebas.igual((await CajaRepo.get(entera.id)).estado, EstadoCaja.REEMBOLSADA,
+              'La que se repuso entera queda reembolsada');
+            Pruebas.igual((await CajaRepo.get(mitad.id)).estado, EstadoCaja.CONSIGNADA,
+              'La que se repuso a medias sigue consignada');
+            const dets = await CajaRepo.detalles(entera.id);
+            Pruebas.ok(dets.every(d => d.estadoCaja === EstadoCaja.REEMBOLSADA),
+              'Y sus detalles llevan copiado el estado nuevo');
+          } },
+
+        { nombre: 'CRÍTICO · imprimir un lote no consulta caja por caja', fn: async ctx => {
+            /* Sus propias cajas. Antes tomaba prestadas las de la prueba de
+               al lado y, si aquélla fallaba, ésta fallaba detrás por un motivo
+               que no era el suyo: dos fallos para un solo problema. */
+            const finImp = PersonaRepo.financiadores()[0];
+            const cmImp = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const cajas = [];
+            for (let i = 0; i < 6; i++) cajas.push(await CajaService.crear({
+              fecha: '2026-12-0' + (i + 1), solicitanteId: ctx.fernando.id, consignoId: finImp.id,
+              estado: EstadoCaja.CONSIGNADA,
+              detalles: [{ categoriaId: cmImp.id, descripcion: 'impresion ' + i, valor: Money.parse('100.000') }]
+            }));
+            const bytes = Uint8Array.from(atob(
+              'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='),
+              c => c.charCodeAt(0));
+            for (let i = 0; i < cajas.length; i++)
+              await Expediente.subir([new File([bytes.slice(), new Uint8Array([i, 99])],
+                'cmp' + i + '.png', { type: 'image/png' })],
+                { cajaId: cajas[i].id, tipo: TipoDocumento.COMPROBANTE_CONSIGNACION });
+
+            const cuenta = {};
+            const METODOS = ['get', 'getMany', 'getAll', 'put', 'putMany', 'query', 'count', 'remove', 'transaccion'];
+            const originales = {};
+            METODOS.forEach(n => {
+              if (typeof db[n] !== 'function') return;
+              originales[n] = db[n];
+              db[n] = function (...a) {
+                const k = n + (typeof a[0] === 'string' ? ':' + a[0] : '');
+                cuenta[k] = (cuenta[k] || 0) + 1;
+                return originales[n].apply(this, a);
+              };
+            });
+            const imprimirOrig = window.print;
+            window.print = () => {};
+            try {
+              const frescas = [];
+              for (const c of cajas) frescas.push(await CajaRepo.get(c.id));
+              Object.keys(cuenta).forEach(k => delete cuenta[k]);
+              await Documento.pdfConComprobantes(frescas);
+            } finally {
+              METODOS.forEach(n => { if (originales[n]) db[n] = originales[n]; });
+              window.print = imprimirOrig;
+              const pr = $('#printRoot'); if (pr) pr.innerHTML = '';
+            }
+            Pruebas.igual(cuenta['query:detalles'] || 0, 1, 'Los detalles de las seis, en UNA consulta');
+            Pruebas.igual(cuenta['query:aplicaciones'] || 0, 1, 'Sus aplicaciones, en otra');
+            Pruebas.ok((cuenta['query:documentos'] || 0) <= 2,
+              'Y los documentos en dos como mucho: los de las cajas y los de sus consignaciones');
+          } },
+
+        { nombre: 'CRÍTICO · no se imprime hasta que las imágenes estén', fn: async () => {
+            /* Antes se esperaba un tiempo fijo de 400 ms, hubiera una imagen o
+               veinte: con muchos comprobantes traídos del servidor, alguno
+               podía llegar al papel en blanco. */
+            const falsa = (msCarga) => {
+              const oyentes = {};
+              return {
+                complete: false, naturalWidth: 0,
+                addEventListener(ev, fn) {
+                  oyentes[ev] = fn;
+                  if (ev === 'load' && msCarga != null) setTimeout(() => fn(), msCarga);
+                },
+                removeEventListener() {}
+              };
+            };
+            const raizCon = imgs => ({ querySelectorAll: () => imgs });
+
+            const t0 = performance.now();
+            const n = await Documento.esperarImagenes(raizCon([falsa(90), falsa(40)]), 4000);
+            const tardo = performance.now() - t0;
+            Pruebas.igual(n, 2, 'Espera a las dos imágenes');
+            Pruebas.ok(tardo >= 80, 'Y de verdad espera a la más lenta: tardó ' + Math.round(tardo) + ' ms');
+
+            /* Si una nunca llega, no puede dejar la ventana colgada para siempre. */
+            const t1 = performance.now();
+            const r = await Documento.esperarImagenes(raizCon([falsa(null)]), 120);
+            Pruebas.igual(r, -1, 'Con una imagen que no llega, se rinde');
+            Pruebas.ok(performance.now() - t1 < 1000, 'Y se rinde pronto, sin colgar la impresión');
+
+            /* Sin imágenes pendientes, no espera nada. */
+            const ya = await Documento.esperarImagenes(
+              raizCon([{ complete: true, naturalWidth: 5, addEventListener() {}, removeEventListener() {} }]), 4000);
+            Pruebas.igual(ya, 0, 'Si ya están cargadas, no espera');
+          } },
+
         { nombre: 'CRÍTICO · una caja PENDIENTE no suma como deuda', fn: async ctx => {
             /* El panel, la tarjeta de quien consignó y el formulario de
                consignación sumaban una caja PENDIENTE con su total entero, como
@@ -16644,12 +16979,19 @@ const Pruebas = {
             const div = document.createElement('div');
             div.style.cssText = 'position:fixed;left:-99999px;top:0';
             document.body.appendChild(div);
+            /* Se filtra por su número. El listado pagina de 25 en 25 y otras
+               pruebas crean cajas con fechas posteriores que la empujan fuera
+               de la primera página: lo que se comprueba es SU fila, no en qué
+               página cae. */
+            const filtrosPrevios = Estado_App.filtrosCajas;
             let fila = '';
             try {
+              Estado_App.filtrosCajas = Object.assign({}, filtrosPrevios,
+                { texto: caja.numero, estado: '', pagina: 1 });
               await VistaCajas.render(div);
               const tr = [...div.querySelectorAll('tr')].find(x => x.textContent.includes(caja.numero));
               fila = tr ? tr.innerHTML : '';
-            } finally { div.remove(); }
+            } finally { div.remove(); Estado_App.filtrosCajas = filtrosPrevios; }
             Pruebas.ok(fila, 'La caja aparece en el listado');
             Pruebas.ok(!/m-sinlegal/.test(fila),
               'No puede reclamar legalización: la tiene');
