@@ -6524,7 +6524,8 @@ const Shell = {
           Conexion.insignia() +
           '<button class="btn btn-icon" data-gact="tema" title="Cambiar tema">' +
             Icon(Prefs.get('tema') === 'dark' ? 'sun' : 'moon', '', 15) + '</button>' +
-          '<button class="btn btn-primary" data-ir="caja-nueva">' + Icon('plus', '', 14) + 'Nueva caja</button>' +
+          '<button class="btn btn-primary' + (this.conBotonPropio() ? ' hidden' : '') +
+            '" id="tbNuevaCaja" data-ir="caja-nueva">' + Icon('plus', '', 14) + 'Nueva caja</button>' +
         '</header>' +
         '<main class="content" id="vista"></main>' +
       '</div>';
@@ -6577,7 +6578,24 @@ const Shell = {
       '<a data-ir="contratos">Administrar</a></div>';
   },
 
+  /* Pantallas que ya tienen su propio «Nueva caja» en la cabecera: ahí el de
+     la barra de arriba sobra. En el listado de cajas salían dos iguales, uno
+     encima del otro. En las demás —el panel, por ejemplo— el de arriba es el
+     único que hay, y se queda. */
+  CON_BOTON_PROPIO: ['cajas'],
+  conBotonPropio(vista) {
+    const v = vista !== undefined ? vista : (Router.actual() || {}).vista;
+    return this.CON_BOTON_PROPIO.includes(v);
+  },
+  /* Con la clase `hidden` y no con el atributo: `.btn` fuerza su propio
+     `display`, y el atributo no lo ocultaría. */
+  ajustarBotonNuevaCaja(boton, vista) {
+    const b = boton || $('#tbNuevaCaja');
+    if (b) b.classList.toggle('hidden', this.conBotonPropio(vista));
+  },
+
   pintarNav() {
+    this.ajustarBotonNuevaCaja();
     const nav = $('#sbnav'); if (!nav) return;
     const activa = (Router.actual() || {}).vista || 'dashboard';
     const alias = { caja: 'cajas', 'caja-editar': 'cajas', persona: 'personas', consignacion: 'consignaciones',
@@ -6848,7 +6866,11 @@ function manejarError(err) {
 const VistaDashboard = {
   async render(cont) {
     const cfg = ConfigRepo.get();
-    Shell.titulo('Dashboard', (cfg.contratoNombre || '') + ' · ' + (cfg.empresa || ''));
+    /* El contrato ACTIVO, no el nombre que guardaba la configuración de cuando
+       había un solo contrato: estando en el hospital, el panel decía
+       «Contrato COMFENALCO · inicio 29/10/2025». */
+    const ctrActivo = ContratoRepo.activo() || {};
+    Shell.titulo('Dashboard', (ctrActivo.nombre || '') + ' · ' + (cfg.empresa || ''));
     cont.innerHTML = Comp.cargando('Calculando indicadores…');
 
     const f = Estado_App.filtrosDashboard;
@@ -6925,8 +6947,8 @@ const VistaDashboard = {
     cont.innerHTML =
       '<div class="page-head">' +
         '<div><h1>Control de Caja Menor</h1>' +
-        '<div class="ph-sub">Contrato ' + esc(cfg.contratoNombre || '—') + ' · ' + esc(Comp.etiquetaPeriodo(f)) +
-        (cfg.fechaInicio ? ' · inicio ' + Fecha.corta(cfg.fechaInicio) : '') + '</div></div>' +
+        '<div class="ph-sub">Contrato ' + esc(ctrActivo.nombre || '—') + ' · ' + esc(Comp.etiquetaPeriodo(f)) +
+        (ctrActivo.fechaInicio ? ' · inicio ' + Fecha.corta(ctrActivo.fechaInicio) : '') + '</div></div>' +
         '<div class="ph-actions">' +
           '<button class="btn" data-ir="estadisticas">' + Icon('chart', '', 14) + 'Estadísticas</button>' +
           '<button class="btn" data-ir="consignaciones">' + Icon('banco', '', 14) + 'Consignaciones</button>' +
@@ -14837,6 +14859,49 @@ const Pruebas = {
             Pruebas.ok(html.includes('ALCALDÍA DE APARTADÓ'),
               'Debe imprimir el contrato de la caja aunque el activo sea otro');
           } },
+        { nombre: 'CRÍTICO · el panel dice el contrato activo, no el de la configuración', fn: async ctx => {
+            /* En el hospital el panel decía «Contrato COMFENALCO · inicio
+               29/10/2025»: tomaba el nombre que guardaba la configuración de
+               cuando había un solo contrato. */
+            const tituloOrig = Shell.titulo;
+            let barra = '';
+            Shell.titulo = (t, sub) => { barra = sub || ''; };
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0;width:1400px';
+            document.body.appendChild(div);
+            try {
+              await ContratoRepo.cambiarActivo(ctx.ctrB.id);
+              Analitica.invalidar();
+              await VistaDashboard.render(div);
+              const sub = ((div.querySelector('.page-head .ph-sub') || {}).textContent || '');
+              Pruebas.ok(sub.includes(ctx.ctrB.nombre), 'La página dice el contrato activo: ' + sub);
+              Pruebas.ok(sub.includes(Fecha.corta(ctx.ctrB.fechaInicio)), 'Con su fecha de inicio');
+              Pruebas.ok(barra.includes(ctx.ctrB.nombre), 'Y la barra de arriba también: ' + barra);
+              const otro = ContratoRepo.get(ctx.ctrA.id).nombre;
+              Pruebas.ok(!sub.includes(otro) && !barra.includes(otro), 'Sin rastro del otro contrato');
+            } finally {
+              Shell.titulo = tituloOrig; div.remove();
+              await ContratoRepo.cambiarActivo(ctx.ctrA.id);
+            }
+          } },
+
+        { nombre: 'El «Nueva caja» de arriba se oculta sólo donde la pantalla tiene el suyo', fn: () => {
+            /* En el listado de cajas salían dos iguales. En el panel el de
+               arriba es el único: ahí no se puede quitar. Se mide que de verdad
+               no se vea, porque `.btn` fuerza su propio `display`. */
+            const b = document.createElement('button');
+            b.className = 'btn btn-primary';
+            document.body.appendChild(b);
+            try {
+              Shell.ajustarBotonNuevaCaja(b, 'cajas');
+              Pruebas.igual(getComputedStyle(b).display, 'none', 'En el listado de cajas no se ve');
+              for (const v of ['dashboard', 'caja', 'caja-nueva', 'consignaciones', 'personas']) {
+                Shell.ajustarBotonNuevaCaja(b, v);
+                Pruebas.ok(getComputedStyle(b).display !== 'none', 'En «' + v + '» sigue a la vista');
+              }
+            } finally { b.remove(); }
+          } },
+
         { nombre: 'CRÍTICO · los catálogos NO se comparten entre contratos', fn: async ctx => {
             /* Antes eran listas comunes. Ahora cada contrato tiene las suyas y
                un contrato nuevo empieza LIMPIO: sin municipios, sin categorías
