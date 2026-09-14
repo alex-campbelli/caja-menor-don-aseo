@@ -684,6 +684,9 @@ html[data-theme="dark"] .preview-shell{background:#0a0f13}
 /* La cuenta donde hay que consignar, debajo del total. */
 .rr-cta td{background:#fff;font-size:8pt;font-weight:400;line-height:1.5;padding:1.6mm 1.8mm}
 .rr-num{font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:700;letter-spacing:.2px}
+/* «HGM-2026-00001» es más largo que «CM-2026-00341» y se partía en dos
+   renglones: el número de una caja se lee de un vistazo o no se lee. */
+.rr-numero{white-space:nowrap}
 
 @media print{
   @page{size:letter;margin:0}
@@ -5336,13 +5339,31 @@ const Buscador = {
    §8  UI KIT — componentes reutilizables
    ========================================================================== */
 const Comp = {
+  /* Quien SOLICITA se ve siempre con la copia guardada en la caja, y así debe
+     seguir. Su copia lleva el banco, la cuenta y la cédula que salen impresos
+     en el formato: es el registro de a dónde se mandó el dinero ese día, y si
+     la ficha cambia después, el papel de entonces no puede cambiar con ella. */
   nombreSolicitante(caja) {
     if (!caja) return '';
     if (caja.solicitante && caja.solicitante.nombre) return caja.solicitante.nombre;
     return caja.solicitanteTexto || 'Sin solicitante';
   },
+  /* Quien CONSIGNÓ, en cambio, se ve con el nombre ACTUAL de su ficha.
+     Cada caja guarda una copia del nombre tal como era al hacerla. En el
+     contrato del hospital la ficha decía «Fabian Castro» y se corrigió a
+     «Fabián Castro»: las cajas de antes seguían diciendo «Fabian» en el
+     listado, en su ficha, en el Excel y en la línea de firma del formato, y
+     volver a guardarlas no servía, porque la copia sólo se renueva si cambia
+     la persona. De esa copia sólo se muestra el nombre —nada de banco ni
+     cuenta—, así que una tilde corregida no es un dato histórico que valga la
+     pena congelar.
+     La copia se sigue guardando intacta por dentro, y es la que se usa si la
+     ficha ya no existe. Lo escrito a mano, sin ficha, se ve tal cual. */
   nombreConsigno(caja) {
     if (!caja) return '';
+    const id = caja.consignoId || (caja.consigno && caja.consigno.personaId);
+    const ficha = id ? PersonaRepo.get(id) : null;
+    if (ficha && ficha.nombre) return ficha.nombre;
     if (caja.consigno && caja.consigno.nombre) return caja.consigno.nombre;
     return caja.consignoTexto || '—';
   },
@@ -11666,11 +11687,22 @@ const Documento = {
 
     /* Se agrupa por quien puso el dinero: si en la semana consignaron dos
        personas distintas, cada una recibe su propio corte. */
+    /* Se agrupa por la PERSONA, no por cómo quedó escrito su nombre en cada
+       caja. Cada caja guarda una copia del nombre tal como era al hacerla, y
+       eso está bien para el histórico; pero para saber a quién se le debe no
+       sirve: si la ficha decía «Fabian» y luego se corrigió a «Fabián», las
+       cajas de antes y las de después salían como dos personas distintas, con
+       dos subtotales y dos veces su cuenta. Así se agrupa igual que el panel:
+       por identificador, y con el nombre de HOY. Lo escrito a mano, sin
+       ficha, se agrupa por el texto sin tildes ni mayúsculas. */
     const grupos = new Map();
     for (const c of orden) {
-      const k = Comp.nombreConsigno(c) || 'Sin registrar';
-      if (!grupos.has(k)) grupos.set(k, []);
-      grupos.get(k).push(c);
+      const ficha = c.consignoId ? PersonaRepo.get(c.consignoId) : null;
+      const texto = Comp.nombreConsigno(c);
+      const k = c.consignoId || ('txt:' + Txt.norm(texto || 'Sin registrar'));
+      if (!grupos.has(k)) grupos.set(k, {
+        etiqueta: (ficha && ficha.nombre) || texto || 'Sin registrar', lista: [] });
+      grupos.get(k).lista.push(c);
     }
     const totalGeneral = U.sumBy(orden, c => c.total);
     const pendGeneral = U.sumBy(orden, c => pendDe(c));
@@ -11706,11 +11738,11 @@ const Documento = {
       (variosGrupos ? '<div class="dp-sec"><div class="dp-sec-t">Consignó: ' + esc(quien) +
         '</div></div>' : '') +
       '<table class="dp-tbl rr-tbl"><thead><tr>' +
-        '<th style="width:26mm">NÚMERO</th><th style="width:17mm">FECHA</th>' +
+        '<th class="rr-numero" style="width:26mm">NÚMERO</th><th style="width:17mm">FECHA</th>' +
         '<th>CONCEPTO</th><th style="width:28mm">CATEGORÍA</th><th style="width:34mm">UBICACIÓN</th>' +
         '<th style="width:26mm">TOTAL</th><th style="width:26mm">PENDIENTE</th></tr></thead><tbody>' +
       lista.map(c => '<tr>' +
-        '<td>' + esc(c.numero) + '</td>' +
+        '<td class="rr-numero">' + esc(c.numero) + '</td>' +
         '<td class="c">' + Fecha.corta(c.fecha) + '</td>' +
         '<td>' + esc(Comp.nombreSolicitante(c)) + '</td>' +
         '<td>' + esc(categoriaDe(c)) + '</td>' +
@@ -11722,10 +11754,14 @@ const Documento = {
           '<td class="n">' + Money.format(U.sumBy(lista, c => c.total)) + '</td>' +
           '<td class="n">' + Money.format(U.sumBy(lista, c => pendDe(c))) + '</td></tr>'
         : '') +
-      '<tr class="rr-tot"><td colspan="5">TOTAL PENDIENTE POR REEMBOLSAR' +
-        (variosGrupos ? '' : ' A ' + esc(quien.toUpperCase())) + '</td>' +
-        '<td class="n">' + Money.format(variosGrupos ? U.sumBy(lista, c => c.total) : totalGeneral) + '</td>' +
-        '<td class="n">' + Money.format(variosGrupos ? U.sumBy(lista, c => pendDe(c)) : pendGeneral) + '</td></tr>' +
+      /* Con una sola persona, su total. Con varias, cada bloque ya lleva su
+         subtotal y el total general va una sola vez al final: antes cada
+         bloque repetía la misma cifra en dos renglones seguidos. */
+      (variosGrupos ? '' :
+        '<tr class="rr-tot"><td colspan="5">TOTAL PENDIENTE POR REEMBOLSAR A ' +
+          esc(quien.toUpperCase()) + '</td>' +
+          '<td class="n">' + Money.format(totalGeneral) + '</td>' +
+          '<td class="n">' + Money.format(pendGeneral) + '</td></tr>') +
       /* Justo debajo del total: se lee la cifra y enseguida a dónde va. */
       cuentaDe(lista) +
       '</tbody></table>';
@@ -11747,12 +11783,12 @@ const Documento = {
         '<div class="dp-num"><div>CAJAS<b>' + orden.length + '</b></div>' +
           '<div>PENDIENTE<b>' + Money.format(pendGeneral) + '</b></div></div>' +
       '</div>' +
-      [...grupos.entries()].map(([k, l]) => bloque(k, l)).join('') +
+      [...grupos.values()].map(g => bloque(g.etiqueta, g.lista)).join('') +
       (variosGrupos
         ? '<table class="dp-tbl rr-tbl"><tbody><tr class="rr-tot">' +
           '<td>TOTAL GENERAL · ' + orden.length + ' CAJA(S)</td>' +
-          '<td class="n" style="width:24mm">' + Money.format(totalGeneral) + '</td>' +
-          '<td class="n" style="width:24mm">' + Money.format(pendGeneral) + '</td></tr></tbody></table>'
+          '<td class="n" style="width:26mm">' + Money.format(totalGeneral) + '</td>' +
+          '<td class="n" style="width:26mm">' + Money.format(pendGeneral) + '</td></tr></tbody></table>'
         : '') +
       '</div>';
 
@@ -11872,7 +11908,7 @@ const Documento = {
          Antes se esperaba un tiempo fijo de 400 ms daba igual cuántas hubiera:
          con muchos comprobantes traídos del servidor, alguno podía llegar al
          papel en blanco. */
-      await this.esperarImagenes($('#printRoot'));
+      await this.esperarImagenes($('#printRoot'), this.ESPERA_IMAGENES_MS);
       setTimeout(() => { window.print(); setTimeout(limpiar, 3000); }, 60);
     } catch (e) { manejarError(e); }
     finally { Cargando.terminar(); }
@@ -11885,6 +11921,9 @@ const Documento = {
    * preferible imprimir sin ella que dejar a la persona mirando una ventana
    * que no termina nunca.
    */
+  /** Tope, en milisegundos, para esperar a las imágenes antes de imprimir. */
+  ESPERA_IMAGENES_MS: 12000,
+
   esperarImagenes(raiz, msMax) {
     const imgs = raiz ? [...raiz.querySelectorAll('img')] : [];
     const pendientes = imgs.filter(i => !i.complete || !i.naturalWidth);
@@ -15086,12 +15125,14 @@ const Pruebas = {
               { consignacionId: conDoc.id, tipo: TipoDocumento.COMPROBANTE_CONSIGNACION });
 
             const imprimirOrig = window.print;
+            const esperaOrig = Documento.ESPERA_IMAGENES_MS;
             window.print = () => {};
+            Documento.ESPERA_IMAGENES_MS = 400;
             let salida = '';
             try {
               await Documento.pdfConComprobantes([reciente, vieja]);   // al revés a propósito
               salida = $('#printRoot').innerHTML;
-            } finally { window.print = imprimirOrig; }
+            } finally { window.print = imprimirOrig; Documento.ESPERA_IMAGENES_MS = esperaOrig; }
 
             const dondeVieja = salida.indexOf(vieja.numero);
             const dondeReciente = salida.indexOf(reciente.numero);
@@ -15217,7 +15258,9 @@ const Pruebas = {
               };
             });
             const imprimirOrig = window.print;
+            const esperaOrig = Documento.ESPERA_IMAGENES_MS;
             window.print = () => {};
+            Documento.ESPERA_IMAGENES_MS = 400;
             try {
               const frescas = [];
               for (const c of cajas) frescas.push(await CajaRepo.get(c.id));
@@ -15226,6 +15269,7 @@ const Pruebas = {
             } finally {
               METODOS.forEach(n => { if (originales[n]) db[n] = originales[n]; });
               window.print = imprimirOrig;
+              Documento.ESPERA_IMAGENES_MS = esperaOrig;
               const pr = $('#printRoot'); if (pr) pr.innerHTML = '';
             }
             Pruebas.igual(cuenta['query:detalles'] || 0, 1, 'Los detalles de las seis, en UNA consulta');
@@ -15434,6 +15478,154 @@ const Pruebas = {
     {
       nombre: 'Documentos y formato',
       casos: [
+        { nombre: 'CRÍTICO · quien consignó se ve con el nombre actual de su ficha', fn: async ctx => {
+            /* El caso real: la ficha decía «Fabian» y se corrigió a «Fabián».
+               Las cajas de antes tienen que verse corregidas sin que haya que
+               abrirlas y guardarlas una por una. */
+            const sol = await PersonaRepo.guardar({ nombre: 'Solicitante Nombre Vivo',
+              esSolicitante: 1, banco: 'Banco Viejo' });
+            const pag = await PersonaRepo.guardar({ nombre: 'Fabian Vivo', esFinanciador: 1 });
+            const caja = await CajaService.crear({
+              fecha: '2026-12-30', solicitanteId: sol.id, consignoId: pag.id, estado: EstadoCaja.CONSIGNADA,
+              detalles: [{ categoriaNombre: 'Caja menor', descripcion: 'nombre-vivo-7731', valor: Money.parse('10.000') }]
+            });
+            await PersonaRepo.guardar(Object.assign({}, PersonaRepo.get(pag.id), { nombre: 'Fabián Vivo' }));
+            const fresca = await CajaRepo.get(caja.id);
+            ctx.cajaVivo = fresca; ctx.solVivo = sol;
+            Pruebas.igual(fresca.consigno.nombre, 'Fabian Vivo',
+              'Por dentro la caja conserva la copia de entonces: el histórico no se toca');
+            Pruebas.igual(Comp.nombreConsigno(fresca), 'Fabián Vivo',
+              'Pero se muestra el nombre de hoy, sin tener que volver a guardarla');
+          } },
+
+        { nombre: 'El formato impreso y su línea de firma llevan el nombre corregido', fn: async ctx => {
+            const html = await Documento.construir(ctx.cajaVivo);
+            Pruebas.ok(html.includes('Fabián Vivo'), 'Sale el nombre corregido');
+            Pruebas.ok(!html.includes('Fabian Vivo'), 'Y ni rastro del viejo, tampoco en la firma');
+          } },
+
+        { nombre: 'El listado y el Excel también muestran el nombre corregido', fn: async ctx => {
+            const filtrosPrevios = Estado_App.filtrosCajas;
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            let fila = null;
+            try {
+              Estado_App.filtrosCajas = Object.assign({}, filtrosPrevios,
+                { texto: 'nombre-vivo-7731', estado: '', pagina: 1 });
+              await VistaCajas.render(div);
+              fila = [...div.querySelectorAll('tr.row-click')]
+                .find(tr => tr.textContent.includes(ctx.cajaVivo.numero));
+              Pruebas.ok(fila, 'La caja aparece en el listado');
+              Pruebas.ok(fila && fila.textContent.includes('Fabián Vivo'), 'Su columna Consignó dice el nombre de hoy');
+              Pruebas.ok(fila && !fila.textContent.includes('Fabian Vivo'), 'Y no el viejo');
+            } finally { div.remove(); Estado_App.filtrosCajas = filtrosPrevios; }
+
+            const filas = JSON.stringify(Exportar.filasCajas([ctx.cajaVivo], new Map()));
+            Pruebas.ok(filas.includes('Fabián Vivo') && !filas.includes('Fabian Vivo'),
+              'Y el Excel exportado igual');
+          } },
+
+        { nombre: 'Sin ficha, quien consignó se ve como quedó escrito', fn: () => {
+            Pruebas.igual(Comp.nombreConsigno({ consignoTexto: 'Escrito a mano' }), 'Escrito a mano',
+              'El nombre escrito a mano, sin ficha, se ve tal cual');
+            Pruebas.igual(Comp.nombreConsigno({ consignoId: 'per_no_existe',
+              consigno: { personaId: 'per_no_existe', nombre: 'Copia guardada' } }), 'Copia guardada',
+              'Si la ficha ya no existe, se usa la copia guardada');
+            Pruebas.igual(Comp.nombreConsigno({}), '—', 'Y sin nada, una raya');
+          } },
+
+        { nombre: 'CRÍTICO · quien SOLICITA conserva los datos de entonces', fn: async ctx => {
+            /* Con el solicitante no se hace lo mismo, a propósito: su copia lleva
+               el banco y la cuenta impresos en el formato, que son el registro
+               de a dónde se mandó el dinero ese día. */
+            await PersonaRepo.guardar(Object.assign({}, PersonaRepo.get(ctx.solVivo.id),
+              { nombre: 'Solicitante Renombrado', banco: 'Banco Nuevo' }));
+            const caja = await CajaRepo.get(ctx.cajaVivo.id);
+            Pruebas.igual(Comp.nombreSolicitante(caja), 'Solicitante Nombre Vivo',
+              'El solicitante se sigue viendo como era cuando se hizo la caja');
+            const html = await Documento.construir(caja);
+            Pruebas.ok(html.includes('Banco Viejo'), 'Y el formato conserva el banco de entonces');
+            Pruebas.ok(!html.includes('Banco Nuevo'), 'Sin colarse el banco de la ficha nueva');
+          } },
+
+        { nombre: 'CRÍTICO · la misma persona sale una vez aunque se corrigiera su nombre', fn: async ctx => {
+            /* En el contrato del hospital, la ficha decía «Fabian Castro» y se
+               corrigió a «Fabián Castro». Las cajas guardan el nombre como era
+               al hacerse, así que la relación —que agrupaba por ese texto—
+               sacaba a la misma persona dos veces: dos subtotales y dos veces
+               su cuenta. El panel sí la unía, porque agrupa por identificador. */
+            const sol = PersonaRepo.porNombre('Solicitante de Relación') ||
+              await PersonaRepo.guardar({ nombre: 'Solicitante de Relación', esSolicitante: 1 });
+            const pagador = await PersonaRepo.guardar({
+              nombre: 'Fabian Relacion', esFinanciador: 1, banco: 'Bancolombia' });
+            const hacer = fecha => CajaService.crear({
+              fecha, solicitanteId: sol.id, consignoId: pagador.id, estado: EstadoCaja.CONSIGNADA,
+              detalles: [{ categoriaNombre: 'Caja menor', descripcion: 'tilde', valor: Money.parse('40.000') }]
+            });
+            const antes = await hacer('2026-09-11');
+            await PersonaRepo.guardar(Object.assign({}, PersonaRepo.get(pagador.id),
+              { nombre: 'Fabián Relación' }));
+            const despues = await hacer('2026-09-12');
+            ctx.relSol = sol; ctx.relAntes = antes; ctx.relDespues = despues;
+
+            /* Por dentro cada caja conserva la copia del nombre tal como era al
+               hacerla: eso es el histórico y no se toca. (Lo que se MUESTRA es
+               el nombre de hoy; eso lo vigila otra prueba.) */
+            Pruebas.ok(antes.consigno.nombre !== despues.consigno.nombre,
+              'Las dos cajas guardan la copia del nombre como era al hacerse (así debe ser)');
+            const html = Documento.resumenReembolso([antes, despues], new Map(), new Map());
+            Modal.cerrarTop();
+            Pruebas.igual((html.match(/Consignó: /g) || []).length, 0,
+              'No se parte en dos grupos: es la misma persona');
+            Pruebas.igual((html.match(/PARA CONSIGNAR A/g) || []).length, 1, 'Una sola cuenta');
+            Pruebas.ok(html.includes('A FABIÁN RELACIÓN'), 'Y con el nombre de hoy, el corregido');
+          } },
+
+        { nombre: 'CRÍTICO · dos personas distintas van aparte, sin repetir su total', fn: async ctx => {
+            const otra = await PersonaRepo.guardar({ nombre: 'Otra Persona Relación', esFinanciador: 1 });
+            const tercera = await CajaService.crear({
+              fecha: '2026-09-13', solicitanteId: ctx.relSol.id, consignoId: otra.id,
+              estado: EstadoCaja.CONSIGNADA,
+              detalles: [{ categoriaNombre: 'Caja menor', descripcion: 'otra', valor: Money.parse('25.000') }]
+            });
+            const html = Documento.resumenReembolso([ctx.relAntes, ctx.relDespues, tercera], new Map(), new Map());
+            Modal.cerrarTop();
+            Pruebas.igual((html.match(/Consignó: /g) || []).length, 2, 'Dos grupos, uno por persona');
+            Pruebas.igual((html.match(/Subtotal de /g) || []).length, 2, 'Cada uno con su subtotal');
+            Pruebas.igual((html.match(/TOTAL PENDIENTE POR REEMBOLSAR/g) || []).length, 0,
+              'Sin repetir la misma cifra en otro renglón debajo del subtotal');
+            Pruebas.igual((html.match(/TOTAL GENERAL/g) || []).length, 1,
+              'Y el total general una sola vez, al final');
+            Pruebas.igual((html.match(/width:24mm/g) || []).length, 0,
+              'Con las columnas del mismo ancho que las de arriba');
+          } },
+
+        { nombre: 'Con una sola persona la relación queda como siempre', fn: async ctx => {
+            /* Es el caso de COMFENALCO, que funciona bien: no debe cambiar. */
+            const html = Documento.resumenReembolso([ctx.relAntes], new Map(), new Map());
+            Modal.cerrarTop();
+            Pruebas.ok(/TOTAL PENDIENTE POR REEMBOLSAR A /.test(html), 'Su total con el nombre');
+            Pruebas.igual((html.match(/Subtotal de /g) || []).length, 0, 'Sin subtotales');
+            Pruebas.igual((html.match(/TOTAL GENERAL/g) || []).length, 0, 'Ni total general');
+            Pruebas.igual((html.match(/PARA CONSIGNAR A/g) || []).length, 1, 'Y su cuenta');
+          } },
+
+        { nombre: 'El número de la caja no se parte en dos renglones', fn: async ctx => {
+            const html = Documento.resumenReembolso([ctx.relAntes], new Map(), new Map());
+            Modal.cerrarTop();
+            const div = document.createElement('div');
+            div.className = 'doc-vista';
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            div.innerHTML = html;
+            document.body.appendChild(div);
+            try {
+              const td = div.querySelector('td.rr-numero');
+              Pruebas.ok(td, 'La celda del número está marcada');
+              Pruebas.igual(getComputedStyle(td).whiteSpace, 'nowrap', 'Y no admite salto de renglón');
+            } finally { div.remove(); }
+          } },
+
         { nombre: 'CRÍTICO · la relación dice a qué cuenta consignar', fn: async ctx => {
             /* El papel existe para que alguien pague. Antes sólo decía «TOTAL
                PENDIENTE POR REEMBOLSAR A FABIÁN CASTRO» y quien iba a girar
