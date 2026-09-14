@@ -140,6 +140,40 @@ html[data-theme="dark"] ::-webkit-scrollbar-thumb{background:#37454f}
 .sb-salir{flex:0 0 auto;width:26px;height:26px;border:0;border-radius:6px;background:transparent;color:#7b8b97;cursor:pointer;display:grid;place-items:center}
 .sb-salir:hover{background:rgba(220,76,76,.18);color:#ff8a8a}
 .sb-ver{color:#4a5a66;font-size:10px;margin-top:7px;text-align:center}
+/* Barra lateral contraída: una columna de iconos. Da 172 px más a la vista, y
+   el listado de cajas los convierte en nombres más completos. En móvil no se
+   aplica: allí la barra ya se esconde y sale deslizándose. */
+/* La flecha para contraer, arriba a la derecha del logo. */
+.sb-brand{padding-right:10px}
+.sb-name{flex:1;min-width:0}
+.sb-toggle{flex:0 0 auto;display:grid;place-items:center;width:26px;height:26px;margin-left:auto;padding:0;
+  border:0;border-radius:6px;background:transparent;color:#7b8b97;cursor:pointer}
+.sb-toggle:hover{background:rgba(255,255,255,.08);color:#dfe8ee}
+.sb-toggle .sb-toggle-ic{transform:rotate(180deg)}
+.sb-ctr-mini{display:none}
+@media (min-width:861px){
+  html.sb-mini{--sidebar-w:64px}
+  html.sb-mini .sb-brand{padding:0 5px 0 8px;justify-content:space-between;gap:3px}
+  html.sb-mini .sb-logo{width:28px;height:28px;flex:0 0 28px}
+  html.sb-mini .sb-name,
+  html.sb-mini .sb-ctr,
+  html.sb-mini .sb-item > span,
+  html.sb-mini .sb-user-tx,
+  html.sb-mini .sb-user-ic,
+  html.sb-mini .sb-ver{display:none}
+  html.sb-mini .sb-ctr-mini{display:grid;place-items:center;height:26px;margin:9px 10px;border-radius:6px;
+    background:rgba(255,255,255,.08);color:#cfdae2;font-size:10.5px;font-weight:700;letter-spacing:.04em;
+    cursor:pointer;user-select:none}
+  html.sb-mini .sb-ctr-mini:hover{background:rgba(255,255,255,.14)}
+  html.sb-mini .sb-nav{padding:6px 8px 16px}
+  html.sb-mini .sb-sec{font-size:0;height:1px;padding:0;margin:9px 8px;background:rgba(255,255,255,.08)}
+  html.sb-mini .sb-item{justify-content:center;padding:9px 0}
+  html.sb-mini .sb-toggle{width:20px;height:26px;margin-left:0}
+  html.sb-mini .sb-toggle .sb-toggle-ic{transform:none}
+  html.sb-mini .sb-foot{padding:8px 8px 10px}
+  html.sb-mini .sb-user{justify-content:center;background:transparent;padding:4px 0}
+}
+@media (max-width:860px){ .sb-toggle{display:none} }
 .main{flex:1;min-width:0;margin-left:var(--sidebar-w);display:flex;flex-direction:column}
 .topbar{height:var(--topbar-h);background:var(--surface);border-bottom:1px solid var(--border);
   display:flex;align-items:center;gap:14px;padding:0 20px;position:sticky;top:0;z-index:40}
@@ -318,14 +352,38 @@ table.tbl.compacta.lista-cajas th{letter-spacing:0;font-size:10px}
 table.tbl.compacta.lista-cajas td.td-estado{white-space:nowrap;width:1%}
 table.tbl.compacta.lista-cajas select.sel-estado{width:auto;max-width:none;letter-spacing:0;font-size:10px;
   padding:2px 15px 2px 6px;background-position:right 4px center}
-@media (max-width:1340px){
+/* Los nombres se recortan a un tope que CRECE con el sitio que tiene la
+   tabla —no con el ancho de la pantalla—. Con la barra lateral contraída o en
+   una pantalla grande se leen más completos; en un portátil con la barra
+   abierta, la tabla sigue cabiendo sin desplazarse de lado. Los umbrales se
+   fijaron midiendo la tabla ancho por ancho, no a ojo. */
+.wrap-lista-cajas{container:lista-cajas / inline-size}
+table.tbl.compacta.lista-cajas td.c-cat{max-width:90px!important}
+table.tbl.compacta.lista-cajas td.c-con{max-width:100px!important}
+table.tbl.compacta.lista-cajas td.c-ubi{max-width:82px!important}
+table.tbl.compacta.lista-cajas td.c-cons{max-width:76px!important}
+@container lista-cajas (max-width:1069px){
   table.tbl.compacta.lista-cajas{font-size:11px}
   table.tbl.compacta.lista-cajas th,
   table.tbl.compacta.lista-cajas td{padding-left:4px;padding-right:4px}
   table.tbl.compacta.lista-cajas .col-sel{padding-left:5px;padding-right:1px}
   table.tbl.compacta.lista-cajas .col-exp{padding-left:3px;padding-right:0}
-  table.tbl.compacta.lista-cajas select.sel-estado{max-width:none}
-  table.tbl.compacta.lista-cajas td.trunc{max-width:80px!important}
+  table.tbl.compacta.lista-cajas td.c-cat,
+  table.tbl.compacta.lista-cajas td.c-con,
+  table.tbl.compacta.lista-cajas td.c-ubi,
+  table.tbl.compacta.lista-cajas td.c-cons{max-width:76px!important}
+}
+@container lista-cajas (min-width:1180px){
+  table.tbl.compacta.lista-cajas td.c-cat{max-width:110px!important}
+  table.tbl.compacta.lista-cajas td.c-con{max-width:130px!important}
+  table.tbl.compacta.lista-cajas td.c-ubi{max-width:100px!important}
+  table.tbl.compacta.lista-cajas td.c-cons{max-width:92px!important}
+}
+@container lista-cajas (min-width:1400px){
+  table.tbl.compacta.lista-cajas td.c-cat{max-width:160px!important}
+  table.tbl.compacta.lista-cajas td.c-con{max-width:200px!important}
+  table.tbl.compacta.lista-cajas td.c-ubi{max-width:140px!important}
+  table.tbl.compacta.lista-cajas td.c-cons{max-width:120px!important}
 }
 .tbl-wrap{overflow-x:auto;overflow-y:visible}
 .tbl-scroll{max-height:520px;overflow:auto}
@@ -6500,11 +6558,11 @@ const Shell = {
     const app = $('#app');
     app.innerHTML =
       '<aside class="sidebar" id="sidebar">' +
-        '<div class="sb-brand">' +
-          '<div class="sb-logo">' + (Shell.marca(cfg) ? '<img src="' + attr(Shell.marca(cfg)) + '" alt="">' : 'DA') + '</div>' +
-          '<div class="sb-name">' + esc(cfg.empresa || APP.empresa) +
-            '<small>' + esc(cfg.nit ? 'NIT ' + cfg.nit : 'Caja menor') + '</small></div>' +
-        '</div>' +
+        this.htmlMarca(cfg) +
+        /* Contraída no cabe el selector de contrato, pero el contrato activo
+           tiene que seguir a la vista: trabajar en el equivocado sin notarlo
+           es de los errores caros. Salen sus iniciales, y el nombre al pasar. */
+        '<div class="sb-ctr-mini" id="sbctrmini" data-gact="alternarMenu"></div>' +
         '<div class="sb-ctr" id="sbctr"></div>' +
         '<nav class="sb-nav" id="sbnav"></nav>' +
         this.pieSesion() +
@@ -6529,6 +6587,7 @@ const Shell = {
         '</header>' +
         '<main class="content" id="vista"></main>' +
       '</div>';
+    this.ajustarMenu();
     this.pintarNav();
     this.pintarSelectorContrato();
     this.montarBuscador();
@@ -6563,6 +6622,13 @@ const Shell = {
     const el = $('#sbctr'); if (!el) return;
     const lista = ContratoRepo.todos();
     const act = ContratoRepo.activo();
+    const chip = $('#sbctrmini');
+    if (chip) {
+      chip.textContent = this.inicialesContrato(act && act.nombre);
+      chip.setAttribute('data-tip', act
+        ? 'Contrato activo: ' + act.nombre + '. Pulse para abrir el menú y cambiarlo.'
+        : 'No hay contrato activo');
+    }
     if (!lista.length) {
       el.innerHTML = '<label>Contrato</label>' +
         '<div class="sb-ctr-pie"><a data-ir="contratos">Crear el primer contrato</a></div>';
@@ -6594,19 +6660,66 @@ const Shell = {
     if (b) b.classList.toggle('hidden', this.conBotonPropio(vista));
   },
 
+  /* La cabecera de la barra: el logo, la empresa y, a su derecha, la flecha
+     para contraer el menú. Arriba, junto al logo, es donde se busca; abajo
+     quedaba perdida al final de la lista. Contraída quedan el logo y la flecha
+     lado a lado, sin que la cabecera cambie de alto: así sigue alineada con la
+     barra de arriba. */
+  htmlMarca(cfg) {
+    const c = cfg || {};
+    return '<div class="sb-brand">' +
+      '<div class="sb-logo">' + (Shell.marca(c) ? '<img src="' + attr(Shell.marca(c)) + '" alt="">' : 'DA') + '</div>' +
+      '<div class="sb-name">' + esc(c.empresa || APP.empresa) +
+        '<small>' + esc(c.nit ? 'NIT ' + c.nit : 'Caja menor') + '</small></div>' +
+      '<button class="sb-toggle" id="sbToggle" data-gact="alternarMenu" aria-label="Contraer el menú">' +
+        Icon('chevR', 'sb-toggle-ic', 15) + '</button>' +
+      '</div>';
+  },
+
+  /* Iniciales del contrato para la barra contraída: «HOSPITAL GENERAL DE
+     MEDELLÍN» → HG, «COMFENALCO» → CO. Se saltan las palabras cortas. */
+  inicialesContrato(nombre) {
+    const palabras = String(nombre || '').trim().split(/\s+/).filter(p => p.length > 2);
+    if (!palabras.length) return '—';
+    if (palabras.length === 1) return palabras[0].slice(0, 2).toUpperCase();
+    return (palabras[0][0] + palabras[1][0]).toUpperCase();
+  },
+
+  /* Contraer o expandir la barra de la izquierda. La clase va en <html> para
+     que sobreviva a cada repintado de la carcasa, y se recuerda en este equipo. */
+  menuContraido() { return Boolean(Prefs.get('menuContraido')); },
+  ajustarMenu() {
+    const mini = this.menuContraido();
+    document.documentElement.classList.toggle('sb-mini', mini);
+    const t = $('#sbToggle');
+    if (t) {
+      t.setAttribute('data-tip', mini ? 'Expandir el menú' : 'Contraer el menú para dar más espacio a la vista');
+      t.setAttribute('aria-label', mini ? 'Expandir el menú' : 'Contraer el menú');
+    }
+  },
+
+  /* El menú, aparte de pintarlo, para poder comprobarlo. Contraído, cada icono
+     lleva su nombre —y su cuenta— en la burbuja: sin texto al lado, un icono
+     suelto no siempre se reconoce. */
+  htmlNav(activa, mini) {
+    const alias = { caja: 'cajas', 'caja-editar': 'cajas', persona: 'personas', consignacion: 'consignaciones',
+                    municipio: 'municipios', categoria: 'categorias' };
+    const act = alias[activa] || activa;
+    return this.NAV.map(n => {
+      if (n.sec) return '<div class="sb-sec">' + esc(n.sec) + '</div>';
+      const cuenta = n.badge && this.conteos[n.badge] ? this.conteos[n.badge].toLocaleString('es-CO') : '';
+      const b = cuenta ? '<span class="sb-badge">' + cuenta + '</span>' : '';
+      const tip = mini ? ' data-tip="' + attr(n.txt + (cuenta ? ' · ' + cuenta : '')) + '"' : '';
+      return '<a class="sb-item' + (act === n.id ? ' active' : '') + '" data-ir="' + attr(n.ruta) + '"' + tip + '>' +
+        Icon(n.icono, 'sb-ico', 17) + '<span>' + esc(n.txt) + '</span>' + b + '</a>';
+    }).join('');
+  },
+
   pintarNav() {
     this.ajustarBotonNuevaCaja();
     const nav = $('#sbnav'); if (!nav) return;
     const activa = (Router.actual() || {}).vista || 'dashboard';
-    const alias = { caja: 'cajas', 'caja-editar': 'cajas', persona: 'personas', consignacion: 'consignaciones',
-                    municipio: 'municipios', categoria: 'categorias' };
-    const act = alias[activa] || activa;
-    nav.innerHTML = this.NAV.map(n => {
-      if (n.sec) return '<div class="sb-sec">' + esc(n.sec) + '</div>';
-      const b = n.badge && this.conteos[n.badge] ? '<span class="sb-badge">' + this.conteos[n.badge].toLocaleString('es-CO') + '</span>' : '';
-      return '<a class="sb-item' + (act === n.id ? ' active' : '') + '" data-ir="' + attr(n.ruta) + '">' +
-        Icon(n.icono, 'sb-ico', 17) + '<span>' + esc(n.txt) + '</span>' + b + '</a>';
-    }).join('');
+    nav.innerHTML = this.htmlNav(activa, this.menuContraido());
   },
 
   titulo(t, sub) {
@@ -6727,6 +6840,13 @@ const AccionesGlobales = {
     if (!ok) return;
     try { await Nube.salir(); } catch (e) { console.warn(e); }
     location.reload();
+  },
+  /* Contraer o expandir la barra de la izquierda. */
+  alternarMenu() {
+    Prefs.set('menuContraido', !Shell.menuContraido());
+    Tip.ocultar();
+    Shell.ajustarMenu();
+    Shell.pintarNav();
   },
   /* Revisar y corregir, con vista previa, los enlaces a personas de otro
      contrato. No cambia nada hasta que se confirma. */
@@ -7482,7 +7602,7 @@ const VistaCajas = {
         : '') +
       '</div></div>' +
 
-      '<div class="card"><div class="card-b flush"><div class="tbl-wrap"><table class="tbl compacta lista-cajas">' +
+      '<div class="card"><div class="card-b flush"><div class="tbl-wrap wrap-lista-cajas"><table class="tbl compacta lista-cajas">' +
       '<thead><tr>' +
       '<th style="width:30px" title="Marcar todas las de esta página">' +
         '<input type="checkbox" data-act="selPagina"' + (todasMarcadas ? ' checked' : '') + '></th>' +
@@ -7549,22 +7669,22 @@ const VistaCajas = {
               'no cuadraban y se dejaron tal cual" style="color:var(--warn-500);cursor:help">⚠</span>' : '') +
             '</td>' +
           '<td class="nowrap">' + Fecha.corta(c.fecha) + '</td>' +
-          '<td class="trunc" style="max-width:90px" title="' + attr(cats.join(' · ')) + '">' +
+          '<td class="trunc c-cat" title="' + attr(cats.join(' · ')) + '">' +
             (cats.length ? esc(cats[0]) + (cats.length > 1
               ? ' <span class="txt-3 fs11">+' + (cats.length - 1) + '</span>' : '')
               : '<span class="txt-3">—</span>') + '</td>' +
-          '<td class="trunc" style="max-width:100px" title="' + attr(Comp.nombreSolicitante(c)) + '">' +
+          '<td class="trunc c-con" title="' + attr(Comp.nombreSolicitante(c)) + '">' +
             esc(Comp.nombreSolicitante(c)) + '</td>' +
           /* Cuando el gasto se repartió, la ubicación de la caja ya no lo
              cuenta todo: se avisa de cuántos municipios más hay detrás. */
           (() => {
             const otros = munsDe(c).filter(n => n && n !== c.municipioNombre);
             const tit = [c.municipioNombre || '—'].concat(otros).join(' · ');
-            return '<td class="trunc" style="max-width:82px" data-tip="' + attr(tit) + '">' +
+            return '<td class="trunc c-ubi" data-tip="' + attr(tit) + '">' +
               esc(c.municipioNombre || '—') +
               (otros.length ? ' <span class="txt-3 fs11">+' + otros.length + '</span>' : '') + '</td>';
           })() +
-          '<td class="trunc" style="max-width:76px" title="' + attr(Comp.nombreConsigno(c)) + '">' +
+          '<td class="trunc c-cons" title="' + attr(Comp.nombreConsigno(c)) + '">' +
             esc(Comp.nombreConsigno(c)) + '</td>' +
           '<td class="num"><b>' + Money.format(c.total) + '</b></td>' +
           (verGas ? '<td class="num">' + (c.gasolina ? Money.format(c.gasolina) : '<span class="txt-3">—</span>') + '</td>' : '') +
@@ -14692,6 +14812,104 @@ const Pruebas = {
     {
       nombre: 'Navegación y tiempos de espera',
       casos: [
+        { nombre: 'La barra de la izquierda se contrae y se recuerda', fn: () => {
+            const antes = Prefs.get('menuContraido');
+            try {
+              Prefs.set('menuContraido', false); Shell.ajustarMenu();
+              AccionesGlobales.alternarMenu();
+              Pruebas.ok(document.documentElement.classList.contains('sb-mini'), 'Al pulsar, la barra se contrae');
+              Pruebas.igual(Prefs.get('menuContraido'), true, 'Y se recuerda para la próxima vez');
+              AccionesGlobales.alternarMenu();
+              Pruebas.ok(!document.documentElement.classList.contains('sb-mini'), 'Al volver a pulsar, se expande');
+              Pruebas.igual(Prefs.get('menuContraido'), false, 'Y eso también se recuerda');
+            } finally { Prefs.set('menuContraido', antes); Shell.ajustarMenu(); Shell.pintarNav(); }
+          } },
+
+        { nombre: 'CRÍTICO · contraída, la barra le deja 172 px más a la vista', fn: () => {
+            const antes = Prefs.get('menuContraido');
+            const ancho = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sidebar-w'));
+            try {
+              Prefs.set('menuContraido', false); Shell.ajustarMenu();
+              const abierta = ancho();
+              Prefs.set('menuContraido', true); Shell.ajustarMenu();
+              const contraida = ancho();
+              if (matchMedia('(min-width:861px)').matches) {
+                Pruebas.igual(abierta, 236, 'Abierta mide 236 px');
+                Pruebas.igual(contraida, 64, 'Contraída, 64 px: 172 px más para la vista');
+              } else {
+                Pruebas.ok(true, 'Ventana muy estrecha: la barra contraída no se aplica aquí');
+              }
+            } finally { Prefs.set('menuContraido', antes); Shell.ajustarMenu(); }
+          } },
+
+        { nombre: 'Contraída, cada icono dice su nombre y el contrato sigue a la vista', fn: () => {
+            const mini = Shell.htmlNav('cajas', true), abierta = Shell.htmlNav('cajas', false);
+            Pruebas.ok(/data-tip="Cajas menores/.test(mini), 'Contraída, el icono de Cajas menores dice su nombre');
+            Pruebas.ok(!/data-tip=/.test(abierta), 'Abierta no hacen falta burbujas: el nombre ya se lee');
+            Pruebas.ok(/sb-item active[^>]*data-ir="cajas"/.test(mini), 'Y sigue marcando dónde se está');
+            /* Contraída no cabe el selector: el contrato activo sale en iniciales. */
+            Pruebas.igual(Shell.inicialesContrato('HOSPITAL GENERAL DE MEDELLÍN LUZ CASTRO'), 'HG', 'Hospital → HG');
+            Pruebas.igual(Shell.inicialesContrato('COMFENALCO'), 'CO', 'COMFENALCO → CO');
+            Pruebas.igual(Shell.inicialesContrato('ALCALDÍA DE APARTADÓ'), 'AA', 'Se saltan las palabras cortas');
+            Pruebas.igual(Shell.inicialesContrato(''), '—', 'Sin contrato, una raya');
+          } },
+
+        { nombre: 'La flecha para contraer va arriba, a la derecha del logo', fn: () => {
+            const t = document.createElement('div');
+            t.innerHTML = Shell.htmlMarca(ConfigRepo.get() || {});
+            const marca = t.querySelector('.sb-brand');
+            Pruebas.ok(marca && marca.querySelector('.sb-logo') && marca.querySelector('#sbToggle'),
+              'El logo y la flecha están en la misma cabecera');
+            const clases = marca ? [...marca.children].map(h => h.className) : [];
+            Pruebas.ok(clases.indexOf('sb-logo') >= 0 && clases.indexOf('sb-logo') < clases.indexOf('sb-toggle'),
+              'Y la flecha va a la derecha del logo');
+          } },
+
+        { nombre: 'CRÍTICO · el listado aprovecha el sitio que gana, sin salirse ni cortar estados', fn: async ctx => {
+            /* Si la tabla sólo mirara el ancho de la pantalla, contraer la barra
+               daría hueco en blanco y los nombres seguirían igual de cortados.
+               Mira su propio sitio: con más, enseña más. */
+            const fin = PersonaRepo.financiadores()[0];
+            const sol = await PersonaRepo.guardar({ nombre: 'Isabella de Koller Arango Ancho', esSolicitante: 1 });
+            const cat = await CategoriaRepo.obtenerOCrear('Mantenimiento/Arreglo');
+            /* Nombre propio: otra prueba crea «Santa Fe de Antioquia» y espera que no exista. */
+            const mun = await MunicipioRepo.obtenerOCrear('Santa Rosa de Osos Ancho', Origen.MANUAL);
+            for (let i = 0; i < 10; i++) {
+              await CajaService.crear({ fecha: '2026-06-' + String(i + 1).padStart(2, '0'), solicitanteId: sol.id,
+                consignoId: fin ? fin.id : undefined, municipioId: mun.id,
+                estado: i % 2 ? EstadoCaja.REEMBOLSADA : EstadoCaja.CONSIGNADA,
+                detalles: [{ categoriaId: cat.id, descripcion: 'ancho-lista-5521', valor: Money.parse(String(1500000 + i * 377777)) }] });
+            }
+            const filtrosPrevios = Estado_App.filtrosCajas;
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0;width:1000px';
+            document.body.appendChild(div);
+            const lienzo = document.createElement('canvas').getContext('2d');
+            const medir = w => {
+              div.style.width = w + 'px'; void div.offsetWidth;
+              const wrap = div.querySelector('.wrap-lista-cajas');
+              const cortados = [...div.querySelectorAll('select.sel-estado')].filter(s => {
+                const cs = getComputedStyle(s);
+                lienzo.font = cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
+                const txt = s.options[s.selectedIndex].text;
+                return lienzo.measureText(txt).width + parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) +
+                  parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth) - s.getBoundingClientRect().width > 0.5;
+              }).length;
+              return { tope: parseFloat(getComputedStyle(div.querySelector('td.c-con')).maxWidth),
+                desborde: wrap.scrollWidth - wrap.clientWidth, cortados };
+            };
+            try {
+              Estado_App.filtrosCajas = Object.assign({}, filtrosPrevios, { texto: 'ancho-lista-5521', estado: '', pagina: 1 });
+              await VistaCajas.render(div);
+              const poco = medir(1040), medio = medir(1220), mucho = medir(1450);
+              Pruebas.ok(poco.tope < medio.tope && medio.tope < mucho.tope,
+                'Con más sitio, los nombres se leen más completos: ' + [poco.tope, medio.tope, mucho.tope].join(' < '));
+              Pruebas.igual(medio.desborde, 0, 'Con sitio medio la tabla no se sale de lado');
+              Pruebas.igual(mucho.desborde, 0, 'Ni con mucho sitio');
+              Pruebas.igual(poco.cortados + medio.cortados + mucho.cortados, 0, 'Y ningún estado se corta en ningún ancho');
+            } finally { div.remove(); Estado_App.filtrosCajas = filtrosPrevios; }
+          } },
+
         { nombre: 'CRÍTICO · los conteos del almacén no hacen cola', fn: async () => {
             /* Trece conteos en serie costaban 3.493 ms medidos contra el servidor
                real; en paralelo, 655 ms. Lo que se comprueba aquí no es el
