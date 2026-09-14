@@ -296,6 +296,37 @@ table.tbl.compacta td{padding-top:4px;padding-bottom:4px}
      El nombre completo sigue saliendo al pasar el ratón. */
   table.tbl.compacta td.trunc{max-width:116px!important}
 }
+/* Listado de cajas: el ESTADO no se corta nunca.
+   El desplegable iba a todo el ancho de su celda, y en una tabla automática
+   eso deja la columna comprimible casi a cero: cuando faltaba sitio, el
+   navegador apretaba justo la columna que no admite recortes. Medido a 1366 px
+   con quince columnas, «Reembolsada» tenía 43 px de los 93 que necesita, y
+   aun así la tabla se salía 124 px por la derecha.
+   Ahora el estado toma el ancho de su palabra más larga y no cede, y el sitio
+   sale de donde sí se puede recortar: los nombres, que ya terminan en «…» y
+   se leen enteros al pasar el ratón; los títulos, que ensanchaban las columnas
+   de dinero más que sus propias cifras; y un poco de aire entre columnas.
+   No se quita ninguna columna. Sólo afecta a esta tabla. */
+table.tbl.compacta.lista-cajas{font-size:11.5px}
+table.tbl.compacta.lista-cajas .mono{font-size:10.5px}
+table.tbl.compacta.lista-cajas th,
+table.tbl.compacta.lista-cajas td{padding-left:5px;padding-right:5px}
+/* La casilla y la flecha conservan su relleno propio, más ajustado. */
+table.tbl.compacta.lista-cajas .col-sel{padding-left:6px;padding-right:2px}
+table.tbl.compacta.lista-cajas .col-exp{padding-left:4px;padding-right:0}
+table.tbl.compacta.lista-cajas th{letter-spacing:0;font-size:10px}
+table.tbl.compacta.lista-cajas td.td-estado{white-space:nowrap;width:1%}
+table.tbl.compacta.lista-cajas select.sel-estado{width:auto;max-width:none;letter-spacing:0;font-size:10px;
+  padding:2px 15px 2px 6px;background-position:right 4px center}
+@media (max-width:1340px){
+  table.tbl.compacta.lista-cajas{font-size:11px}
+  table.tbl.compacta.lista-cajas th,
+  table.tbl.compacta.lista-cajas td{padding-left:4px;padding-right:4px}
+  table.tbl.compacta.lista-cajas .col-sel{padding-left:5px;padding-right:1px}
+  table.tbl.compacta.lista-cajas .col-exp{padding-left:3px;padding-right:0}
+  table.tbl.compacta.lista-cajas select.sel-estado{max-width:none}
+  table.tbl.compacta.lista-cajas td.trunc{max-width:80px!important}
+}
 .tbl-wrap{overflow-x:auto;overflow-y:visible}
 .tbl-scroll{max-height:520px;overflow:auto}
 
@@ -3336,6 +3367,25 @@ const ConfigRepo = {
  * puede nombrar a una persona suya, y ese nombre tiene que poder resolverse
  * para enseñarlo. Se filtra lo que se OFRECE, no lo que se consulta.
  */
+/**
+ * El muro entre contratos, para las personas.
+ *
+ * Cada contrato tiene sus propias personas: el Fabián de un contrato es una
+ * ficha distinta del Fabián de otro, aunque sea el mismo hombre. Pero nada
+ * impedía que una caja apuntara a la ficha del contrato de al lado, y así
+ * quedaron cajas del hospital enlazadas a una ficha de otro contrato: se veían
+ * con otro nombre y la relación de reembolso habría sacado la cuenta bancaria
+ * de esa otra ficha. Ahora no se deja enlazar, y se explica por qué.
+ */
+function errorPersonaDeOtroContrato(campo, personaId, contratoId) {
+  const p = PersonaRepo.deOtroContrato(personaId, contratoId);
+  if (!p) return null;
+  const otro = ContratoRepo.get(p.contratoId);
+  return campo + ': «' + p.nombre + '» es una persona de otro contrato' +
+    (otro ? ' (' + otro.nombre + ')' : '') + '. Cada contrato tiene sus propias personas: ' +
+    'elija la de este contrato. Si hay varias así, puede corregirlas todas a la vez desde el aviso del panel.';
+}
+
 function delContratoActivo(lista) {
   const ctrId = ContratoRepo.activoId();
   if (!ctrId) return lista;
@@ -3366,6 +3416,12 @@ const PersonaRepo = {
     return this.financiadores()[0] || null;
   },
   get(id) { return Cache.personas.get(id) || null; },
+  /** La persona, si pertenece a un contrato DISTINTO de `contratoId`; si no, null. */
+  deOtroContrato(personaId, contratoId) {
+    if (!personaId || !contratoId) return null;
+    const p = this.get(personaId);
+    return p && p.contratoId && p.contratoId !== contratoId ? p : null;
+  },
   porNombre(nombre) {
     const n = Txt.norm(nombre);
     return this.todas().find(p => p.nombreNorm === n) || null;
@@ -4021,6 +4077,11 @@ const CajaService = {
     const cajaId = ID.caja();
     const contratoId = entrada.contratoId || ContratoRepo.activoId();
     if (!contratoId) throw new ErrorDominio('No hay un contrato activo. Cree uno en Contratos.', 'SIN_CONTRATO');
+    const cruces = [
+      errorPersonaDeOtroContrato('Solicitante', entrada.solicitanteId, contratoId),
+      errorPersonaDeOtroContrato('Consignó', entrada.consignoId, contratoId)
+    ].filter(Boolean);
+    if (cruces.length) throw new ErrorValidacion(cruces);
     const ctx = {
       cajaId, contratoId, fecha: entrada.fecha, solicitanteId: entrada.solicitanteId || null,
       municipioId: entrada.municipioId || null, estado: entrada.estado || EstadoCaja.BORRADOR
@@ -4075,6 +4136,16 @@ const CajaService = {
     const previa = await CajaRepo.get(cajaId);
     if (!previa) throw new ErrorDominio('Caja no encontrada.', 'NO_EXISTE');
     if (previa.estado === EstadoCaja.ANULADA) throw new ErrorDominio('Una caja anulada no se puede modificar.', 'ANULADA');
+    /* Sólo se mira lo que llega del formulario. Las ediciones internas que no
+       tocan a las personas —reescribir las líneas, por ejemplo— siguen
+       funcionando en una caja cruzada mientras no se repare. */
+    const cruces = [
+      entrada.solicitanteId !== undefined
+        ? errorPersonaDeOtroContrato('Solicitante', entrada.solicitanteId, previa.contratoId) : null,
+      entrada.consignoId !== undefined
+        ? errorPersonaDeOtroContrato('Consignó', entrada.consignoId, previa.contratoId) : null
+    ].filter(Boolean);
+    if (cruces.length) throw new ErrorValidacion(cruces);
 
     // Si cambia el solicitante se toma un snapshot NUEVO; si no, se conserva el original (§62)
     const cambioSolicitante = entrada.solicitanteId !== undefined && entrada.solicitanteId !== previa.solicitanteId;
@@ -4281,6 +4352,93 @@ const CajaService = {
 };
 
 /* --------------------------------------------------------------------------
+   PersonasCruzadas — cajas y consignaciones enlazadas a una persona de OTRO
+   contrato, y su corrección.
+
+   Revisar no toca nada. Corregir cambia sólo el enlace del registro de este
+   contrato: pasa a la persona de ESTE contrato con el mismo nombre, tomando una
+   copia nueva de su ficha, igual que cuando se elige otra persona en el
+   formulario. La ficha del otro contrato no se toca: sigue siendo de su
+   contrato, con lo suyo. Si aquí no hay nadie con ese nombre —o hay varios—,
+   no se inventa: se señala para corregirlo a mano.
+   -------------------------------------------------------------------------- */
+const PersonasCruzadas = {
+  CAMPOS: [
+    { tipo: 'caja', campo: 'Solicitante', clave: 'solicitanteId', copia: 'solicitante', papel: 'esSolicitante' },
+    { tipo: 'caja', campo: 'Consignó', clave: 'consignoId', copia: 'consigno', papel: 'esFinanciador' },
+    { tipo: 'consignacion', campo: 'Beneficiario', clave: 'beneficiarioId', copia: 'beneficiario', papel: 'esFinanciador' }
+  ],
+
+  /** Sin tocar nada: qué enlaces cruzan el muro y con qué se podrían corregir. */
+  analizar(cajas, consignaciones, contratoId) {
+    if (!contratoId) return [];
+    const propias = [...Cache.personas.values()].filter(p => p.contratoId === contratoId);
+    const out = [];
+    const revisar = (obj, tipo) => {
+      if (!obj || obj.contratoId !== contratoId) return;
+      for (const c of this.CAMPOS) {
+        if (c.tipo !== tipo) continue;
+        const ajena = PersonaRepo.deOtroContrato(obj[c.clave], contratoId);
+        if (!ajena) continue;
+        const iguales = propias.filter(p => p.nombreNorm === ajena.nombreNorm);
+        const propuesta = iguales.length === 1 ? iguales[0] : null;
+        out.push({
+          tipo, objetoId: obj.id, numero: obj.numero || '', fecha: obj.fecha || '',
+          campo: c.campo, clave: c.clave, copia: c.copia,
+          ajena, contratoAjeno: ContratoRepo.get(ajena.contratoId), propuesta,
+          sinPapel: Boolean(propuesta && !propuesta[c.papel]),
+          motivo: propuesta ? '' : (iguales.length > 1
+            ? 'en este contrato hay varias personas con ese nombre'
+            : 'en este contrato no hay ninguna persona con ese nombre')
+        });
+      }
+    };
+    (cajas || []).forEach(c => revisar(c, 'caja'));
+    (consignaciones || []).forEach(k => revisar(k, 'consignacion'));
+    return out.sort((a, b) => a.fecha.localeCompare(b.fecha) || String(a.numero).localeCompare(String(b.numero)));
+  },
+
+  /** Corrige los que tienen reemplazo. Lee cada registro fresco antes de escribir. */
+  async aplicar(lista) {
+    const validos = (lista || []).filter(x => x && x.propuesta);
+    let corregidos = 0, omitidos = 0;
+    for (const tipo of ['caja', 'consignacion']) {
+      const items = validos.filter(x => x.tipo === tipo);
+      if (!items.length) continue;
+      const col = tipo === 'caja' ? 'cajas' : 'consignaciones';
+      const frescos = new Map((await db.getMany(col, U.uniq(items.map(x => x.objetoId)))).map(o => [o.id, o]));
+      const cambiados = new Map();
+      const hechos = [];
+      for (const x of items) {
+        const o = frescos.get(x.objetoId);
+        /* Si mientras se miraba la lista alguien ya lo cambió, no se pisa. */
+        if (!o || o[x.clave] !== x.ajena.id) { omitidos++; continue; }
+        const p = PersonaRepo.get(x.propuesta.id);
+        if (!p || p.contratoId !== o.contratoId) { omitidos++; continue; }
+        o[x.copia] = Modelo.snapshotPersona(p, p.municipioId ? MunicipioRepo.get(p.municipioId) : null);
+        o[x.clave] = p.id;
+        o.actualizadoEn = Modelo.ahora();
+        cambiados.set(o.id, o);
+        hechos.push(x);
+      }
+      if (cambiados.size) await db.putMany(col, [...cambiados.values()]);
+      corregidos += hechos.length;
+      /* El histórico dice qué se cambió y desde qué contrato venía: una sola
+         escritura para todos, no una por registro. */
+      if (hechos.length && Auditoria.activa) {
+        try {
+          await db.putMany('auditoria', hechos.map(x => Modelo.auditoria(tipo, x.objetoId,
+            'CORREGIR_PERSONA_DE_OTRO_CONTRATO', { campo: x.campo, antes: x.ajena.nombre,
+              contratoAnterior: (x.contratoAjeno || {}).nombre || '', ahora: x.propuesta.nombre })));
+        } catch (e) { console.warn('[auditoria]', e); }
+      }
+    }
+    if (corregidos) { Bus.emit('cajas:cambio', null); Bus.emit('consignaciones:cambio', null); }
+    return { corregidos, omitidos };
+  }
+};
+
+/* --------------------------------------------------------------------------
    ConsignacionService — reposición financiera (NO es gasto, §24)
    -------------------------------------------------------------------------- */
 const ConsignacionService = {
@@ -4298,6 +4456,8 @@ const ConsignacionService = {
     const ben = entrada.beneficiarioId ? PersonaRepo.get(entrada.beneficiarioId) : null;
     const contratoId = entrada.contratoId || ContratoRepo.activoId();
     if (!contratoId) throw new ErrorDominio('No hay un contrato activo. Cree uno en Contratos.', 'SIN_CONTRATO');
+    const cruceBen = errorPersonaDeOtroContrato('Beneficiario', entrada.beneficiarioId, contratoId);
+    if (cruceBen) throw new ErrorValidacion([cruceBen]);
     const con = Modelo.consignacion({
       contratoId,
       numero: entrada.numero || null,
@@ -4328,6 +4488,10 @@ const ConsignacionService = {
     const previa = await ConsignacionRepo.get(id);
     if (!previa) throw new ErrorDominio('Consignación no encontrada.', 'NO_EXISTE');
     const benId = entrada.beneficiarioId !== undefined ? entrada.beneficiarioId : previa.beneficiarioId;
+    if (entrada.beneficiarioId !== undefined) {
+      const cruceBen = errorPersonaDeOtroContrato('Beneficiario', entrada.beneficiarioId, previa.contratoId);
+      if (cruceBen) throw new ErrorValidacion([cruceBen]);
+    }
     const ben = benId ? PersonaRepo.get(benId) : null;
     const cambioBen = benId !== previa.beneficiarioId;
     const fecha = entrada.fecha || previa.fecha;
@@ -5366,6 +5530,36 @@ const Comp = {
     if (ficha && ficha.nombre) return ficha.nombre;
     if (caja.consigno && caja.consigno.nombre) return caja.consigno.nombre;
     return caja.consignoTexto || '—';
+  },
+  /**
+   * Por qué no se puede guardar un campo de persona, o null si está bien.
+   *
+   * Estos campos sólo toman una persona cuando se PINCHA en la lista. Si se
+   * borraba el nombre y se escribía otro sin pincharlo, el formulario guardaba
+   * en silencio la persona de antes —con el campo diciendo otra cosa— y encima
+   * avisaba «Caja actualizada». Así pasó en el contrato del hospital: el campo
+   * decía «Fabián Castro» y se seguía guardando la ficha vieja.
+   * Ahora, si hay un nombre escrito que no se eligió, no se guarda y se explica
+   * por qué, que casi siempre es que la ficha no tiene marcado su papel y por
+   * eso no sale en la lista.
+   *   o = { campo, rol: 'solicitante'|'financiador', texto, id, textoLibre }
+   * `textoLibre` es el nombre escrito a mano que la caja ya traía de antes
+   * (cajas importadas): si no se ha tocado, se puede guardar tal cual.
+   */
+  errorCampoPersona(o) {
+    const texto = String(o.texto || '').trim();
+    if (o.id || !texto) return null;
+    if (o.textoLibre && texto === o.textoLibre) return null;
+    const papel = o.rol === 'financiador' ? 'puede adelantar dinero' : 'puede ser solicitante';
+    const misma = PersonaRepo.todas().find(p => p.nombreNorm === Txt.norm(texto));
+    if (misma && misma.estado !== Estado.ACTIVO)
+      return o.campo + ': «' + misma.nombre + '» está inactiva en Personas, por eso no sale en la lista. ' +
+        'Actívela en su ficha y vuelva a elegirla.';
+    if (misma && !(o.rol === 'financiador' ? misma.esFinanciador : misma.esSolicitante))
+      return o.campo + ': «' + misma.nombre + '» está en Personas, pero no está marcada como «' + papel +
+        '», por eso no sale en la lista. Márquela en su ficha y vuelva a elegirla.';
+    return o.campo + ': «' + texto + '» no se eligió de la lista. Escriba el nombre y pinche a la ' +
+      'persona en la lista que aparece debajo.';
   },
 
   kpi(o) {
@@ -6516,6 +6710,45 @@ const AccionesGlobales = {
     try { await Nube.salir(); } catch (e) { console.warn(e); }
     location.reload();
   },
+  /* Revisar y corregir, con vista previa, los enlaces a personas de otro
+     contrato. No cambia nada hasta que se confirma. */
+  async repararPersonas() {
+    Analitica.invalidar();
+    const v = await Analitica.vista();
+    const lista = PersonasCruzadas.analizar(v.cajas, v.consignaciones, ContratoRepo.activoId());
+    if (!lista.length) { Toast.ok('No hay enlaces a personas de otro contrato.'); return; }
+    const conReemplazo = lista.filter(x => x.propuesta);
+    const ctr = ContratoRepo.activo() || {};
+    const filas = lista.map(x => '<tr>' +
+      '<td class="mono nowrap">' + esc(x.numero) + '</td>' +
+      '<td>' + esc(x.campo) + '</td>' +
+      '<td>' + esc(x.ajena.nombre) + '<div class="fs11 txt-3">de ' +
+        esc((x.contratoAjeno || {}).nombre || 'otro contrato') + '</div></td>' +
+      '<td>' + (x.propuesta
+        ? '<b>' + esc(x.propuesta.nombre) + '</b>' + (x.sinPapel
+          ? '<div class="fs11" style="color:var(--warn-700)">no está marcada como «' +
+            (x.campo === 'Solicitante' ? 'puede ser solicitante' : 'puede adelantar dinero') +
+            '»: conviene marcarla en su ficha</div>' : '')
+        : '<span class="txt-3">Sin reemplazo: ' + esc(x.motivo) + '. Corríjala a mano.</span>') +
+      '</td></tr>').join('');
+    const ok = await Modal.confirmar({
+      titulo: 'Personas de otro contrato',
+      ancho: 'wide',
+      textoOk: conReemplazo.length ? 'Corregir ' + conReemplazo.length + ' enlace(s)' : 'Entendido',
+      html: '<p>Cada contrato tiene sus propias personas. Estos registros de <b>' + esc(ctr.nombre || '') +
+        '</b> apuntan a fichas de otro contrato. Donde este contrato tiene una persona con el mismo ' +
+        'nombre, se propone como reemplazo.</p>' +
+        '<p class="mt8 fs12 txt-2">La ficha del otro contrato no se toca. Al corregir, cada registro toma ' +
+        'los datos de la ficha de este contrato, igual que si la eligiera en el formulario.</p>' +
+        '<div class="tbl-wrap tbl-scroll mt12"><table class="tbl"><thead><tr><th>Número</th><th>Campo</th>' +
+        '<th>Ahora apunta a</th><th>Se cambia por</th></tr></thead><tbody>' + filas + '</tbody></table></div>'
+    });
+    if (!ok || !conReemplazo.length) return;
+    const r = await PersonasCruzadas.aplicar(conReemplazo);
+    Toast.ok(r.corregidos + ' enlace(s) corregido(s).' +
+      (r.omitidos ? ' ' + r.omitidos + ' no se tocaron porque cambiaron mientras tanto.' : ''));
+    Router.resolver();
+  },
   /* Se calla hasta mañana, no para siempre: el dato sigue haciendo falta. */
   ocultarCopia() {
     Prefs.set('copiaOculta', Fecha.hoy());
@@ -6644,6 +6877,7 @@ const VistaDashboard = {
        período elegido para decidir CUÁNTO: así, filtrar por un mes flojo no
        hace desaparecer tarjetas y reaparecer al mes siguiente. */
     const vistaCtr = await Analitica.vista();
+    const cruces = PersonasCruzadas.analizar(vistaCtr.cajas, vistaCtr.consignaciones, ContratoRepo.activoId());
     const seguidas = CategoriaRepo.seguidasEnPanel(vistaCtr.detalles);
     const ind = Finanzas.porIndicador(r.detalles, seguidas, res.gastoOperativo);
     const PALETA = ['#c8860d', '#6d4aca', '#0e8a8a', '#b5453f', '#3f6cb5', '#7a8a1f'];
@@ -6704,6 +6938,12 @@ const VistaDashboard = {
         '<div><b>' + revisiones.length + ' caja(s) requieren revisión.</b> Tienen inconsistencias detectadas durante la ' +
         'importación (por ejemplo, gasolina + aceite superior al total declarado). ' +
         '<span class="link" data-act="verRevisiones">Ver listado</span></div></div>' : '') +
+
+      /* Cajas o consignaciones de este contrato enlazadas a personas de otro. */
+      (cruces.length ? '<div class="alert a-warn mb16">' + Icon('warn') + '<div style="flex:1">' +
+        '<b>' + cruces.length + ' enlace(s) a personas de otro contrato.</b> ' +
+        'Cada contrato tiene sus propias personas, y aquí hay registros apuntando a fichas de otro. ' +
+        '<span class="link" data-gact="repararPersonas">Revisar y corregir</span></div></div>' : '') +
 
       /* Recordatorio de la copia de seguridad. Sale sólo cuando de verdad hace
          falta y se puede callar por hoy: un aviso que sale siempre deja de
@@ -7220,7 +7460,7 @@ const VistaCajas = {
         : '') +
       '</div></div>' +
 
-      '<div class="card"><div class="card-b flush"><div class="tbl-wrap"><table class="tbl compacta">' +
+      '<div class="card"><div class="card-b flush"><div class="tbl-wrap"><table class="tbl compacta lista-cajas">' +
       '<thead><tr>' +
       '<th style="width:30px" title="Marcar todas las de esta página">' +
         '<input type="checkbox" data-act="selPagina"' + (todasMarcadas ? ' checked' : '') + '></th>' +
@@ -7287,22 +7527,22 @@ const VistaCajas = {
               'no cuadraban y se dejaron tal cual" style="color:var(--warn-500);cursor:help">⚠</span>' : '') +
             '</td>' +
           '<td class="nowrap">' + Fecha.corta(c.fecha) + '</td>' +
-          '<td class="trunc" style="max-width:126px" title="' + attr(cats.join(' · ')) + '">' +
+          '<td class="trunc" style="max-width:90px" title="' + attr(cats.join(' · ')) + '">' +
             (cats.length ? esc(cats[0]) + (cats.length > 1
               ? ' <span class="txt-3 fs11">+' + (cats.length - 1) + '</span>' : '')
               : '<span class="txt-3">—</span>') + '</td>' +
-          '<td class="trunc" style="max-width:148px" title="' + attr(Comp.nombreSolicitante(c)) + '">' +
+          '<td class="trunc" style="max-width:100px" title="' + attr(Comp.nombreSolicitante(c)) + '">' +
             esc(Comp.nombreSolicitante(c)) + '</td>' +
           /* Cuando el gasto se repartió, la ubicación de la caja ya no lo
              cuenta todo: se avisa de cuántos municipios más hay detrás. */
           (() => {
             const otros = munsDe(c).filter(n => n && n !== c.municipioNombre);
             const tit = [c.municipioNombre || '—'].concat(otros).join(' · ');
-            return '<td class="trunc" style="max-width:104px" data-tip="' + attr(tit) + '">' +
+            return '<td class="trunc" style="max-width:82px" data-tip="' + attr(tit) + '">' +
               esc(c.municipioNombre || '—') +
               (otros.length ? ' <span class="txt-3 fs11">+' + otros.length + '</span>' : '') + '</td>';
           })() +
-          '<td class="trunc" style="max-width:92px" title="' + attr(Comp.nombreConsigno(c)) + '">' +
+          '<td class="trunc" style="max-width:76px" title="' + attr(Comp.nombreConsigno(c)) + '">' +
             esc(Comp.nombreConsigno(c)) + '</td>' +
           '<td class="num"><b>' + Money.format(c.total) + '</b></td>' +
           (verGas ? '<td class="num">' + (c.gasolina ? Money.format(c.gasolina) : '<span class="txt-3">—</span>') + '</td>' : '') +
@@ -8295,7 +8535,11 @@ const VistaCajaForm = {
     const inSol = $('#fSolicitante'), inCon = $('#fConsigno'), inMun = $('#fMunicipio');
     const solP = base.solicitanteId ? PersonaRepo.get(base.solicitanteId) : null;
     if (solP) { inSol.value = solP.nombre; inSol.dataset.id = solP.id; }
-    else if (base.solicitanteTexto) inSol.value = base.solicitanteTexto;
+    else if (base.solicitanteTexto) {
+      inSol.value = base.solicitanteTexto;
+      /* Nombre escrito a mano que la caja ya traía: sin tocarlo, se guarda igual. */
+      inSol.dataset.textoLibre = base.solicitanteTexto;
+    }
     const conP = base.consignoId ? PersonaRepo.get(base.consignoId) : null;
     if (conP) { inCon.value = conP.nombre; inCon.dataset.id = conP.id; }
     const munM = base.municipioId ? MunicipioRepo.get(base.municipioId) : null;
@@ -8304,6 +8548,8 @@ const VistaCajaForm = {
     Combo.montar(inSol, {
       opciones: () => Combo.opcionesPersonasPorRol('solicitante', base.solicitanteId),
       permitirLibre: false,
+      /* Al escribir se suelta la persona de antes: lo guardado es lo que se ve. */
+      alEscribir: () => { this.estado.solicitanteId = ''; },
       alElegir: op => {
         this.estado.solicitanteId = op ? op.id : '';
         if (op) {
@@ -8320,6 +8566,7 @@ const VistaCajaForm = {
     Combo.montar(inCon, {
       opciones: () => Combo.opcionesPersonasPorRol('financiador', base.consignoId),
       permitirLibre: false,
+      alEscribir: () => { this.estado.consignoId = ''; },
       alElegir: op => { this.estado.consignoId = op ? op.id : ''; }
     });
     Combo.montar(inMun, {
@@ -8722,6 +8969,14 @@ const VistaCajaForm = {
       detalles: e.detalles.filter(d => (d.valor || 0) > 0 || !Txt.vacio(d.categoriaNombre) || !Txt.vacio(d.descripcion))
     };
     try {
+      /* Lo que se guarda tiene que ser lo que se ve en el campo. */
+      const errPersonas = [
+        Comp.errorCampoPersona({ campo: 'Solicitante', rol: 'solicitante', texto: inSol.value,
+          id: entrada.solicitanteId, textoLibre: inSol.dataset.textoLibre || '' }),
+        Comp.errorCampoPersona({ campo: 'Consignó', rol: 'financiador',
+          texto: ($('#fConsigno') || {}).value, id: entrada.consignoId })
+      ].filter(Boolean);
+      if (errPersonas.length) throw new ErrorValidacion(errPersonas);
       let caja;
       if (editandoId) {
         caja = await CajaService.actualizar(editandoId, entrada);
@@ -8957,6 +9212,8 @@ const VistaConsignacionForm = {
     Combo.montar(inB, {
       opciones: () => Combo.opcionesPersonasPorRol('financiador', base.beneficiarioId),
       permitirLibre: false,
+      /* Igual que en la caja: al escribir se suelta el beneficiario de antes. */
+      alEscribir: () => { this.estado.beneficiarioId = ''; },
       alElegir: async op => {
         this.estado.beneficiarioId = op ? op.id : '';
         const p = op ? PersonaRepo.get(op.id) : null;
@@ -9064,6 +9321,9 @@ const VistaConsignacionForm = {
   },
 
   async guardar(editandoId) {
+    const errBenef = Comp.errorCampoPersona({ campo: 'Beneficiario', rol: 'financiador',
+      texto: ($('#kBenef') || {}).value, id: this.estado.beneficiarioId });
+    if (errBenef) throw new ErrorValidacion([errBenef]);
     const asignaciones = [...this.estado.seleccion.entries()]
       .map(([cajaId, monto]) => ({ cajaId, monto })).filter(a => a.monto > 0);
     const entrada = {
@@ -14506,9 +14766,12 @@ const Pruebas = {
             const a1 = await CajaService.crear({ fecha: '2026-05-02', solicitanteId: lider.id, estado: EstadoCaja.CONSIGNADA,
               detalles: [{ categoriaNombre: 'X', descripcion: 'contrato A', valor: Money.parse('100.000') }] });
             await ContratoRepo.cambiarActivo(ctx.ctrB.id);
-            const b1 = await CajaService.crear({ fecha: '2026-05-02', solicitanteId: lider.id, estado: EstadoCaja.CONSIGNADA,
+            /* Cada contrato tiene sus personas: B necesita su propio solicitante. */
+            const liderB = PersonaRepo.porNombre('Piloto de Contratos') ||
+              await PersonaRepo.guardar({ nombre: 'Piloto de Contratos', esSolicitante: 1 });
+            const b1 = await CajaService.crear({ fecha: '2026-05-02', solicitanteId: liderB.id, estado: EstadoCaja.CONSIGNADA,
               detalles: [{ categoriaNombre: 'X', descripcion: 'contrato B', valor: Money.parse('200.000') }] });
-            const b2 = await CajaService.crear({ fecha: '2026-05-03', solicitanteId: lider.id, estado: EstadoCaja.CONSIGNADA,
+            const b2 = await CajaService.crear({ fecha: '2026-05-03', solicitanteId: liderB.id, estado: EstadoCaja.CONSIGNADA,
               detalles: [{ categoriaNombre: 'X', descripcion: 'contrato B', valor: Money.parse('300.000') }] });
             Pruebas.ok(/^AP-2026-\d{5}$/.test(b1.numero), 'El contrato B usa su prefijo: ' + b1.numero);
             Pruebas.igual(b1.numero, 'AP-2026-00001', 'El contrato B empieza en 1');
@@ -14586,8 +14849,9 @@ const Pruebas = {
               await ContratoRepo.cambiarActivo(ctx.ctrB.id);
               /* Sólo la que la prueba anterior creó aquí a propósito: ninguna
                  heredada del contrato A. */
-              Pruebas.igual(PersonaRepo.todas().map(p => p.nombre).join('|'), 'Pagador de Apartadó',
-                'El contrato nuevo no hereda personas: sólo tiene la suya');
+              Pruebas.igual(PersonaRepo.todas().map(p => p.nombre).sort().join('|'),
+                'Pagador de Apartadó|Piloto de Contratos',
+                'El contrato nuevo no hereda personas: sólo tiene las que se crearon en él');
               Pruebas.igual(CategoriaRepo.todas().length, 0, 'Ni categorías');
               Pruebas.igual(MunicipioRepo.todos().length, 0, 'Ni municipios');
               /* Pero lo del otro contrato se sigue resolviendo por identificador,
@@ -15478,6 +15742,267 @@ const Pruebas = {
     {
       nombre: 'Documentos y formato',
       casos: [
+        { nombre: 'CRÍTICO · una caja no puede enlazar a una persona de otro contrato', fn: async ctx => {
+            /* Cada contrato tiene sus propias personas. El Fabián de un contrato
+               es otra ficha que el de otro, aunque sea el mismo hombre. */
+            const ajena = Modelo.persona({ nombre: 'Persona Del Muro', esFinanciador: 1, esSolicitante: 1,
+              contratoId: ctx.ctrB.id });
+            await db.put('personas', ajena); Cache.personas.set(ajena.id, ajena);
+            const sol = await PersonaRepo.guardar({ nombre: 'Solicitante Del Muro', esSolicitante: 1 });
+            const base = { fecha: '2026-12-01', estado: EstadoCaja.CONSIGNADA,
+              detalles: [{ categoriaNombre: 'Caja menor', descripcion: 'muro', valor: Money.parse('20.000') }] };
+            /* El contexto se prepara ANTES de comprobar nada: si una comprobación
+               falla, las pruebas siguientes tienen que poder correr igual y
+               decir lo suyo, en vez de caer todas en cadena. */
+            const buena = await CajaService.crear(Object.assign({ solicitanteId: sol.id }, base));
+            ctx.muro = { ajena, sol, base, cajaId: buena.id };
+            let msg = '';
+            try { await CajaService.crear(Object.assign({ solicitanteId: sol.id, consignoId: ajena.id }, base)); }
+            catch (e) { msg = (e.errores || [e.message]).join(' '); }
+            Pruebas.ok(/otro contrato/.test(msg), 'Quien consignó de otro contrato se rechaza');
+            Pruebas.ok(msg.includes(ctx.ctrB.nombre), 'Y el aviso dice de qué contrato es');
+            await Pruebas.lanza(() => CajaService.crear(Object.assign({ solicitanteId: ajena.id }, base)),
+              'Un solicitante de otro contrato también se rechaza');
+            Pruebas.ok(buena && buena.id, 'Con personas de este contrato se crea sin problema');
+          } },
+
+        { nombre: 'CRÍTICO · editar tampoco cruza el muro, pero lo interno sigue', fn: async ctx => {
+            const { ajena, cajaId } = ctx.muro;
+            let msg = '';
+            try { await CajaService.actualizar(cajaId, { consignoId: ajena.id }); }
+            catch (e) { msg = (e.errores || [e.message]).join(' '); }
+            Pruebas.ok(/otro contrato/.test(msg), 'Cambiar quien consignó a una persona de otro contrato se rechaza');
+            /* Se deja cruzada por debajo, como las del hospital: reescribir sus
+               líneas —que no toca a las personas— tiene que seguir funcionando
+               mientras no se repare. */
+            const cruzada = Object.assign({}, await CajaRepo.get(cajaId),
+              { consigno: Modelo.snapshotPersona(ajena), consignoId: ajena.id });
+            await db.put('cajas', cruzada);
+            const dets = await CajaRepo.detalles(cajaId);
+            let error = null;
+            try { await CajaService.actualizar(cajaId, { detalles: dets, retencion: 0, omitirValidacion: true }); }
+            catch (e) { error = e; }
+            Pruebas.ok(!error, 'Reescribir las líneas de una caja cruzada no se bloquea' + (error ? ': ' + error.message : ''));
+          } },
+
+        { nombre: 'CRÍTICO · una consignación no puede tener un beneficiario de otro contrato', fn: async ctx => {
+            let msg = '';
+            try {
+              await ConsignacionService.crear({ fecha: '2026-12-02', beneficiarioId: ctx.muro.ajena.id,
+                valor: Money.parse('10.000'), asignaciones: [] });
+            } catch (e) { msg = (e.errores || [e.message]).join(' '); }
+            Pruebas.ok(/Beneficiario/.test(msg) && /otro contrato/.test(msg), 'Se rechaza y dice por qué');
+          } },
+
+        { nombre: 'CRÍTICO · la revisión encuentra lo cruzado y propone la persona de este contrato', fn: async ctx => {
+            const { ajena, cajaId } = ctx.muro;
+            /* Este contrato tiene su propia ficha con el mismo nombre. */
+            const propia = await PersonaRepo.guardar({ nombre: 'Persona Del Muro', esFinanciador: 1 });
+            ctx.muro.propia = propia;
+            Analitica.invalidar();
+            const v = await Analitica.vista();
+            const lista = PersonasCruzadas.analizar(v.cajas, v.consignaciones, ContratoRepo.activoId());
+            const item = lista.find(x => x.objetoId === cajaId && x.campo === 'Consignó');
+            Pruebas.ok(item, 'Encuentra la caja enlazada a la ficha del otro contrato');
+            Pruebas.igual(item && item.ajena.id, ajena.id, 'Sabe a qué ficha ajena apunta');
+            Pruebas.igual(item && item.propuesta && item.propuesta.id, propia.id,
+              'Y propone la persona de ESTE contrato con ese nombre');
+            Pruebas.ok(!lista.some(x => x.objetoId === cajaId && x.campo === 'Solicitante'),
+              'El solicitante, que es de este contrato, no sale');
+            Pruebas.ok(lista.every(x => x.ajena.contratoId !== ContratoRepo.activoId()),
+              'Sólo salen enlaces que de verdad cruzan el muro');
+          } },
+
+        { nombre: 'CRÍTICO · corregir pasa la caja a la persona de este contrato y no toca la del otro', fn: async ctx => {
+            const { ajena, propia, cajaId } = ctx.muro;
+            const fichaAjenaAntes = JSON.stringify(await db.get('personas', ajena.id));
+            Analitica.invalidar();
+            const v = await Analitica.vista();
+            const lista = PersonasCruzadas.analizar(v.cajas, v.consignaciones, ContratoRepo.activoId())
+              .filter(x => x.objetoId === cajaId);
+            const r = await PersonasCruzadas.aplicar(lista);
+            Pruebas.igual(r.corregidos, 1, 'Corrige el enlace');
+            const caja = await CajaRepo.get(cajaId);
+            Pruebas.igual(caja.consignoId, propia.id, 'La caja pasa a la persona de este contrato');
+            Pruebas.igual(caja.consigno && caja.consigno.personaId, propia.id,
+              'Con su copia renovada, para que no vuelva a apuntar a la ajena al guardarla');
+            Pruebas.igual(JSON.stringify(await db.get('personas', ajena.id)), fichaAjenaAntes,
+              'La ficha del otro contrato queda exactamente igual');
+            Analitica.invalidar();
+            const v2 = await Analitica.vista();
+            Pruebas.ok(!PersonasCruzadas.analizar(v2.cajas, v2.consignaciones, ContratoRepo.activoId())
+              .some(x => x.objetoId === cajaId), 'Y deja de salir en la revisión');
+          } },
+
+        { nombre: 'Sin equivalente en este contrato no se inventa a nadie', fn: async ctx => {
+            const sinIgual = Modelo.persona({ nombre: 'Nadie Igual Aqui', esFinanciador: 1, contratoId: ctx.ctrB.id });
+            await db.put('personas', sinIgual); Cache.personas.set(sinIgual.id, sinIgual);
+            const c = await CajaService.crear(Object.assign({ solicitanteId: ctx.muro.sol.id }, ctx.muro.base));
+            await db.put('cajas', Object.assign({}, c, { consigno: Modelo.snapshotPersona(sinIgual), consignoId: sinIgual.id }));
+            Analitica.invalidar();
+            const v = await Analitica.vista();
+            const item = PersonasCruzadas.analizar(v.cajas, v.consignaciones, ContratoRepo.activoId())
+              .find(x => x.objetoId === c.id);
+            Pruebas.ok(item, 'La señala');
+            Pruebas.igual(item && item.propuesta, null, 'Sin proponer a nadie');
+            Pruebas.ok(item && /no hay ninguna/.test(item.motivo), 'Y dice por qué');
+            const r = await PersonasCruzadas.aplicar([item]);
+            Pruebas.igual(r.corregidos, 0, 'Corregir no cambia nada');
+            Pruebas.igual((await CajaRepo.get(c.id)).consignoId, sinIgual.id, 'La caja queda como estaba');
+            ctx.muro.cajaSinIgual = c.id;
+          } },
+
+        { nombre: 'El panel avisa cuando hay enlaces a personas de otro contrato', fn: async ctx => {
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0;width:1400px';
+            document.body.appendChild(div);
+            try {
+              Analitica.invalidar();
+              await VistaDashboard.render(div);
+              Pruebas.ok(/personas de otro contrato/.test(div.innerHTML), 'Sale el aviso');
+              Pruebas.ok(div.querySelector('[data-gact="repararPersonas"]'), 'Con el enlace para revisar y corregir');
+            } finally { div.remove(); }
+          } },
+
+        { nombre: 'CRÍTICO · corregir quién consignó eligiendo de la lista cambia la persona', fn: async ctx => {
+            /* El caso del hospital: cajas apuntando a una ficha «Fabian» de otro
+               contrato, y un «Fabián» en este. Se reproduce la corrección a mano
+               tal como la hace una persona: borrar, escribir, pinchar, guardar. */
+            const otroCtr = (ctx.ctrB && ctx.ctrB.id) || 'ctr_otro_contrato';
+            const suelta = Modelo.persona({ nombre: 'Fabian Suelto', esFinanciador: 1, contratoId: otroCtr });
+            await db.put('personas', suelta); Cache.personas.set(suelta.id, suelta);
+            const local = await PersonaRepo.guardar({ nombre: 'Fabián Suelto', esFinanciador: 1 });
+            const sol = await PersonaRepo.guardar({ nombre: 'Solicitante del Campo', esSolicitante: 1 });
+            /* El programa ya no deja crear una caja enlazada a otro contrato.
+               Para reproducir las del hospital —que quedaron así por un fallo
+               que ya no existe— se crea bien y se deja apuntando a la ficha
+               ajena por debajo, tal como quedaron. */
+            const hacer = async extra => {
+              const c = await CajaService.crear(Object.assign({
+                fecha: '2026-11-20', solicitanteId: sol.id, consignoId: local.id, estado: EstadoCaja.CONSIGNADA,
+                detalles: [{ categoriaNombre: 'Caja menor', descripcion: 'campo', valor: Money.parse('30.000') }] }, extra || {}));
+              if (extra && 'consignoId' in extra) return c;
+              const cruzada = Object.assign({}, c, { consigno: Modelo.snapshotPersona(suelta), consignoId: suelta.id });
+              await db.put('cajas', cruzada);
+              return cruzada;
+            };
+            /* Abre la caja, toca el campo como una persona y guarda. */
+            const corregir = async (cajaId, selector, texto, modo) => {
+              const div = document.createElement('div');
+              div.style.cssText = 'position:fixed;left:-99999px;top:0;width:1200px';
+              document.body.appendChild(div);
+              const irOrig = Router.ir; Router.ir = () => {};
+              let aviso = '';
+              try {
+                await VistaCajaForm.render(div, [cajaId]);
+                const inp = div.querySelector(selector);
+                if (modo !== 'no tocar') {
+                  inp.focus(); inp.dispatchEvent(new FocusEvent('focus'));
+                  inp.value = ''; inp.dispatchEvent(new Event('input', { bubbles: true }));
+                  if (texto) { inp.value = texto; inp.dispatchEvent(new Event('input', { bubbles: true })); }
+                  if (modo === 'pinchar') {
+                    const api = Combo._act;
+                    const op = api && api.filtradas.find(o => Txt.norm(o.texto) === Txt.norm(texto));
+                    if (op) api.elegir(op);
+                  } else if (modo === 'tab') inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+                  inp.blur();
+                  await new Promise(r => setTimeout(r, 150));
+                }
+                await VistaCajaForm.guardar(cajaId, div);
+                await new Promise(r => setTimeout(r, 100));
+                aviso = [...document.querySelectorAll('#modals .modal-bd')].map(m => m.textContent).join(' ');
+              } finally {
+                Router.ir = irOrig; div.remove();
+                try { Combo.cerrar(); } catch (e) {}
+                for (let i = 0; i < 5 && document.querySelector('#modals .modal-bd'); i++) Modal.cerrarTop();
+                document.querySelectorAll('#modals .modal-bd').forEach(m => m.remove());
+              }
+              return { caja: await CajaRepo.get(cajaId), aviso };
+            };
+            ctx.campo = { suelta, local, sol, hacer, corregir };
+
+            const caja = await hacer();
+            const r = await corregir(caja.id, '#fConsigno', 'Fabián Suelto', 'pinchar');
+            Pruebas.igual(r.caja.consignoId, local.id, 'Pinchando la persona en la lista, la caja pasa a ella');
+            Pruebas.ok(!/No se pudo guardar/.test(r.aviso), 'Sin ningún aviso de error');
+          } },
+
+        { nombre: 'CRÍTICO · escribir un nombre sin elegirlo no guarda en silencio la persona de antes', fn: async ctx => {
+            const { suelta, hacer, corregir } = ctx.campo;
+            const caja = await hacer();
+            const r = await corregir(caja.id, '#fConsigno', 'Fabián Suelto', 'tab');
+            Pruebas.igual(r.caja.consignoId, suelta.id,
+              'No se cambia a nadie: el nombre escrito no se eligió');
+            Pruebas.ok(/No se pudo guardar/.test(r.aviso) && /Consignó/.test(r.aviso),
+              'Y se AVISA, en vez de decir «actualizada» guardando la persona vieja');
+          } },
+
+        { nombre: 'Si la ficha no puede adelantar dinero, el aviso dice cómo arreglarlo', fn: async ctx => {
+            const { suelta, local, hacer, corregir } = ctx.campo;
+            await PersonaRepo.guardar(Object.assign({}, PersonaRepo.get(local.id), { esFinanciador: 0 }));
+            try {
+              const caja = await hacer();
+              const r = await corregir(caja.id, '#fConsigno', 'Fabián Suelto', 'pinchar');
+              Pruebas.igual(r.caja.consignoId, suelta.id, 'No hay a quién pinchar: no se cambia');
+              Pruebas.ok(/puede adelantar dinero/.test(r.aviso),
+                'El aviso dice qué falta marcar en la ficha');
+            } finally {
+              await PersonaRepo.guardar(Object.assign({}, PersonaRepo.get(local.id), { esFinanciador: 1 }));
+            }
+          } },
+
+        { nombre: 'Vaciar el campo quita a quien consignó', fn: async ctx => {
+            const { hacer, corregir } = ctx.campo;
+            const caja = await hacer();
+            const r = await corregir(caja.id, '#fConsigno', '', 'nada');
+            Pruebas.ok(!r.caja.consignoId, 'Con el campo vacío, la caja se queda sin quien consignó');
+            Pruebas.ok(!/No se pudo guardar/.test(r.aviso), 'Sin avisos: es lo que se pidió');
+          } },
+
+        { nombre: 'CRÍTICO · el solicitante tampoco se cambia en silencio', fn: async ctx => {
+            const { sol, hacer, corregir } = ctx.campo;
+            const caja = await hacer();
+            const r = await corregir(caja.id, '#fSolicitante', 'Nombre Que No Existe', 'tab');
+            Pruebas.igual(r.caja.solicitanteId, sol.id, 'El solicitante sigue siendo el de antes');
+            Pruebas.ok(/No se pudo guardar/.test(r.aviso) && /Solicitante/.test(r.aviso), 'Y se avisa');
+          } },
+
+        { nombre: 'Una caja con el solicitante escrito a mano se sigue guardando', fn: async ctx => {
+            /* Las cajas importadas traen el solicitante como texto, sin ficha. Si
+               no se toca, guardar la caja no puede bloquearse por eso. */
+            const { local, hacer, corregir } = ctx.campo;
+            const caja = await hacer({ solicitanteId: null, solicitanteTexto: 'Escrito A Mano', consignoId: local.id });
+            const r = await corregir(caja.id, '#fSolicitante', '', 'no tocar');
+            Pruebas.ok(!/No se pudo guardar/.test(r.aviso), 'Se guarda sin avisos');
+            Pruebas.igual(r.caja.solicitanteTexto, 'Escrito A Mano', 'Y conserva su texto');
+          } },
+
+        { nombre: 'CRÍTICO · la consignación tampoco guarda un beneficiario sin elegir', fn: async ctx => {
+            const antes = await db.count('consignaciones');
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0;width:1200px';
+            document.body.appendChild(div);
+            const irOrig = Router.ir; Router.ir = () => {};
+            let error = null;
+            try {
+              await VistaConsignacionForm.render(div, []);
+              const inp = div.querySelector('#kBenef');
+              inp.focus(); inp.dispatchEvent(new FocusEvent('focus'));
+              inp.value = ''; inp.dispatchEvent(new Event('input', { bubbles: true }));
+              inp.value = 'Alguien Sin Elegir'; inp.dispatchEvent(new Event('input', { bubbles: true }));
+              inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+              inp.blur(); await new Promise(r => setTimeout(r, 150));
+              try { await VistaConsignacionForm.guardar(null); } catch (e) { error = e; }
+            } finally {
+              Router.ir = irOrig; div.remove();
+              try { Combo.cerrar(); } catch (e) {}
+              for (let i = 0; i < 5 && document.querySelector('#modals .modal-bd'); i++) Modal.cerrarTop();
+            }
+            Pruebas.ok(error && /Beneficiario/.test(((error.errores) || []).join(' ')),
+              'Se niega a guardar y dice que el beneficiario no se eligió');
+            Pruebas.igual(await db.count('consignaciones'), antes, 'Y no se crea ninguna consignación');
+          } },
+
         { nombre: 'CRÍTICO · quien consignó se ve con el nombre actual de su ficha', fn: async ctx => {
             /* El caso real: la ficha decía «Fabian» y se corrigió a «Fabián».
                Las cajas de antes tienen que verse corregidas sin que haya que
@@ -15677,6 +16202,39 @@ const Pruebas = {
             Pruebas.ok(!html.includes('PARA CONSIGNAR A'), 'No debe aparecer el bloque de la cuenta');
             Pruebas.ok(html.includes('REEMBOLSAR'), 'Pero el resto del documento sigue igual');
           } },
+        { nombre: 'CRÍTICO · el estado del listado no se corta aunque falte sitio', fn: async ctx => {
+            /* El desplegable del estado iba a todo el ancho de su celda, y en
+               una tabla automática eso dejaba la columna comprimible casi a
+               cero: con quince columnas, a 1366 px «Reembolsada» tenía 43 px de
+               los 93 que necesita y se leía «Reembo». Se mide en un hueco más
+               estrecho que cualquier portátil, que es cuando el fallo aparece. */
+            const filtrosPrevios = Estado_App.filtrosCajas;
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0;width:900px';
+            document.body.appendChild(div);
+            try {
+              Estado_App.filtrosCajas = Object.assign({}, filtrosPrevios, { texto: '', estado: '', pagina: 1 });
+              await VistaCajas.render(div);
+              const sels = [...div.querySelectorAll('select.sel-estado')];
+              Pruebas.ok(sels.length > 0, 'La prueba necesita estados en pantalla');
+              const lienzo = document.createElement('canvas').getContext('2d');
+              const cortados = sels.filter(s => {
+                const cs = getComputedStyle(s);
+                lienzo.font = cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
+                const txt = s.options[s.selectedIndex].text;
+                const necesita = lienzo.measureText(txt).width + (parseFloat(cs.letterSpacing) || 0) * txt.length +
+                  parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) +
+                  parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth);
+                return necesita - s.getBoundingClientRect().width > 0.5;
+              }).map(s => s.options[s.selectedIndex].text);
+              Pruebas.igual(cortados.length, 0,
+                'Ningún estado puede salir cortado' + (cortados.length ? ': ' + cortados.slice(0, 3).join(', ') : ''));
+              const tabla = div.querySelector('table');
+              Pruebas.ok(tabla && tabla.classList.contains('lista-cajas'),
+                'Y los ajustes son de esta tabla sola, con su clase propia');
+            } finally { div.remove(); Estado_App.filtrosCajas = filtrosPrevios; }
+          } },
+
         { nombre: 'CRÍTICO · el listado no enseña columnas que el contrato no usa', fn: async ctx => {
             /* En un contrato de hospital, Gasolina y Aceite eran dos columnas
                siempre vacías robándole sitio a lo que sí importa. Manda el
