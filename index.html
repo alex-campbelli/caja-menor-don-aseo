@@ -667,6 +667,23 @@ html[data-theme="dark"] .marca.m-sinlegal{background:rgba(217,143,6,.18);color:#
 .comp-lista{display:flex;flex-direction:column;gap:2px}
 .comp-item{display:flex;align-items:center;gap:9px;padding:5px 7px;border-radius:7px;min-width:0}
 .comp-item:hover{background:var(--surface-2)}
+/* Miniatura de un adjunto: se pulsa para verlo. */
+.adj-th{flex:0 0 36px;width:36px;height:36px;padding:0;border:1px solid var(--border);border-radius:6px;overflow:hidden;
+  background:var(--surface-3);display:grid;place-items:center;cursor:pointer;font-family:inherit}
+.adj-th:hover{border-color:var(--accent)}
+.adj-th img{width:100%;height:100%;object-fit:cover;display:block}
+.adj-th .dt-ext{font-size:9px;font-weight:800;letter-spacing:.04em;color:var(--text-3)}
+.adj-hueco{flex:0 0 28px}
+/* Visor de archivos */
+/* Alto fijo, a la medida de la ventana: al pasar de un archivo a otro nada
+   salta, y nunca aparece barra de desplazamiento. */
+.visor-cuerpo{box-sizing:border-box;height:calc(100vh - 260px);display:flex;align-items:center;justify-content:center;
+  background:var(--surface-3);border-radius:8px;padding:10px}
+.visor-cuerpo img{max-width:100%;max-height:100%;border-radius:5px;display:block}
+.visor-pdf{width:100%;height:100%;border:1px solid var(--border);border-radius:8px;background:#fff}
+.ic-izq{transform:rotate(180deg)}
+.btn-danger-ghost{color:var(--dang-500)}
+.btn-danger-ghost:hover{background:var(--dang-50)}
 /* Marcar varios adjuntos para eliminarlos de una vez. */
 .docsel-todos{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;color:var(--text-2);
   cursor:pointer;user-select:none;white-space:nowrap;margin-right:4px}
@@ -6185,6 +6202,80 @@ const Modal = (() => {
  * momento no hace parpadear nada. Y una vez vista, se queda al menos medio
  * segundo, para que no aparezca y desaparezca como un destello.
  */
+/**
+ * Visor de archivos: se ve uno y se pasa al anterior o al siguiente sin cerrar,
+ * con los botones o con las flechas del teclado. Sirve tanto para lo que aún
+ * no se ha subido (un File en memoria) como para lo ya guardado en la nube.
+ *   items: [{ nombre, mime, tamano, etiqueta, url, ref }]
+ *          url es el enlace o una función que lo trae (lo guardado se pide al verlo)
+ *   opciones.alQuitar(item): si se da, aparece «Quitar este archivo»
+ */
+const Visor = {
+  abrir(items, indice, opciones) {
+    const lista = (items || []).slice();
+    if (!lista.length) return null;
+    const o = opciones || {};
+    let i = Math.max(0, Math.min(Number(indice) || 0, lista.length - 1));
+    let pedido = 0;
+    const m = Modal.abrir({
+      titulo: lista[i].nombre, subtitulo: ' ', ancho: 'xwide',
+      cuerpo: '<div class="visor-cuerpo"></div>',
+      pie: '<button class="btn" data-visor="ant">' + Icon('chevR', 'ic-izq', 14) + 'Anterior</button>' +
+           '<button class="btn mf-left" data-visor="sig">Siguiente' + Icon('chevR', '', 14) + '</button>' +
+           (o.alQuitar ? '<button class="btn btn-danger-ghost" data-visor="quitar">' + Icon('trash', '', 13) + 'Quitar este archivo</button>' : '') +
+           '<button class="btn btn-primary" data-cerrar>Listo</button>'
+    });
+    const ant = m.querySelector('[data-visor="ant"]'), sig = m.querySelector('[data-visor="sig"]');
+    const sinPrevia = it => '<div class="empty">' + Icon('file') + '<h4>Vista previa no disponible</h4>' +
+      '<p>«' + esc(it.nombre) + '» no se puede mostrar aquí' + (it.mime ? ' (' + esc(it.mime) + ')' : '') +
+      '. Se guardará igual.</p></div>';
+    const pintar = async () => {
+      const it = lista[i];
+      const turno = ++pedido;
+      m.querySelector('.modal-h h3').textContent = it.nombre;
+      m.querySelector('.mh-sub').textContent = [lista.length > 1 ? (i + 1) + ' de ' + lista.length : '',
+        it.etiqueta, it.tamano ? Txt.bytes(it.tamano) : ''].filter(Boolean).join(' · ');
+      ant.hidden = sig.hidden = lista.length < 2;
+      ant.classList.toggle('hidden', lista.length < 2); sig.classList.toggle('hidden', lista.length < 2);
+      ant.disabled = i === 0; sig.disabled = i === lista.length - 1;
+      const c = m.querySelector('.visor-cuerpo');
+      c.innerHTML = '<span class="spin"></span>';
+      let url = null;
+      try { url = typeof it.url === 'function' ? await it.url() : it.url; } catch (e) { console.error(e); }
+      if (turno !== pedido || !m.isConnected) return;   // ya se pasó a otro
+      if (!url) { c.innerHTML = '<div class="empty">' + Icon('warn') + '<h4>Archivo no disponible</h4></div>'; return; }
+      if (/^image\//.test(it.mime || '')) {
+        c.innerHTML = '<img alt="">';
+        const img = c.querySelector('img');
+        img.onerror = () => { if (turno === pedido) c.innerHTML = sinPrevia(it); };
+        img.src = url;
+      } else if (/pdf|html/.test(it.mime || '')) {
+        c.innerHTML = '<iframe class="visor-pdf" src="' + attr(url) + '"></iframe>';
+      } else c.innerHTML = sinPrevia(it);
+    };
+    ant.onclick = () => { if (i > 0) { i--; pintar(); } };
+    sig.onclick = () => { if (i < lista.length - 1) { i++; pintar(); } };
+    const quitar = m.querySelector('[data-visor="quitar"]');
+    if (quitar) quitar.onclick = async () => {
+      await o.alQuitar(lista[i]);
+      lista.splice(i, 1);
+      if (!lista.length) { Modal.cerrar(m); return; }
+      if (i >= lista.length) i = lista.length - 1;
+      pintar();
+    };
+    const teclas = e => {
+      if (!m.isConnected) { document.removeEventListener('keydown', teclas); return; }
+      if ([...document.querySelectorAll('#modals .modal-bd')].pop() !== m) return;
+      if (e.key === 'ArrowLeft') ant.onclick();
+      if (e.key === 'ArrowRight') sig.onclick();
+    };
+    document.addEventListener('keydown', teclas);
+    pintar();
+    m._visor = { ir: k => { i = k; return pintar(); }, get indice() { return i; }, get total() { return lista.length; } };
+    return m;
+  }
+};
+
 const Progreso = {
   RETARDO: 250,
   MINIMO: 500,
@@ -9032,6 +9123,14 @@ const VistaCajaForm = {
       Shell.titulo('Nueva caja menor', 'El número se asigna automáticamente al guardar');
     }
     this.estado = base;
+    /* Al editar, lo que la caja ya tiene guardado también se ve aquí: antes la
+       tarjeta decía «Sin archivos» aunque la caja tuviera sus soportes. */
+    this.docsGuardados = [];
+    if (editandoId) CajaRepo.documentos(editandoId).then(d => {
+      if (this.estado !== base) return;
+      this.docsGuardados = d.filter(x => !DOCS_GENERADOS.includes(x.tipo));
+      this.pintarAdjuntos();
+    }).catch(e => console.error(e));
 
     const roles = this.rolesDisponibles();
     cont.innerHTML =
@@ -9124,9 +9223,9 @@ const VistaCajaForm = {
         '</div><div class="card-b">' +
           '<div class="dz mb12" id="dzCaja">' + Icon('upload') +
           '<h4>Arrastre aquí los archivos o haga clic para buscarlos</h4>' +
-          '<p>Elija arriba a qué corresponde cada uno: la <b>factura del taller</b> que justifica el ' +
-          'monto, el <b>comprobante</b> si el dinero ya se giró, o la <b>legalización</b> si ya se ' +
-          'gastó. Puede mezclarlos: cada archivo se guarda donde le corresponde.</p></div>' +
+          '<p>Elija arriba a qué corresponde cada uno: el <b>comprobante de la transferencia</b> si el ' +
+          'dinero ya se giró, o la <b>legalización del gasto</b> (facturas y recibos). Puede mezclarlos: ' +
+          'cada archivo se guarda donde le corresponde.</p></div>' +
           '<div id="listaAdjuntos"></div>' +
         '</div></div>' +
       '</div>' +
@@ -9206,7 +9305,15 @@ const VistaCajaForm = {
       cambiarRol: el => { this.estado.detalles[Number(el.dataset.i)].rol = el.value || null; this.pintarTotales(); },
       repartir: el => this.abrirReparto(Number(el.dataset.i)),
       elegirAdjuntos: () => { const i = $('#fAdjuntos'); if (i) i.click(); },
-      quitarAdjunto: el => { this.estado.adjuntos.splice(Number(el.dataset.i), 1); this.pintarAdjuntos(); },
+      quitarAdjunto: el => {
+        const a = this.estado.adjuntos[Number(el.dataset.i)];
+        if (a) this.soltarUrl(a);
+        this.estado.adjuntos.splice(Number(el.dataset.i), 1); this.pintarAdjuntos();
+      },
+      verAdjunto: el => this.verAdjuntos(Number(el.dataset.i)),
+      verGuardado: el => Visor.abrir(this.docsGuardados.map(d => ({ nombre: d.nombre, mime: d.mime, tamano: d.tamano,
+        etiqueta: (DESTINOS_DOC.find(x => x.tipo === d.tipo) || TIPO_DOC_META[d.tipo] || {}).titulo ||
+          (TIPO_DOC_META[d.tipo] || {}).label, url: () => DocumentoService.url(d.id) })), Number(el.dataset.i)),
       cancelar: () => Router.ir(editandoId ? 'caja/' + editandoId : 'cajas'),
       guardar: () => this.guardar(editandoId, cont)
     });
@@ -9382,26 +9489,60 @@ const VistaCajaForm = {
     return fuera;
   },
 
-  /** Lo que espera para subirse cuando la caja se guarde. */
+  /* Enlace en memoria para ver un archivo que todavía no se ha subido. Se crea
+     una sola vez por archivo y se suelta al quitarlo o al subirlo. */
+  urlDe(a) { return a._url || (a._url = URL.createObjectURL(a.file)); },
+  soltarUrl(a) { if (a && a._url) { URL.revokeObjectURL(a._url); delete a._url; } },
+
+  /** Abre el visor sobre lo que espera a subirse, empezando por el i-ésimo. */
+  verAdjuntos(i) {
+    const lista = this.estado.adjuntos || [];
+    const nombreDe = a => { const d = DESTINOS_DOC.find(x => x.tipo === a.tipo); return d ? d.titulo : (TIPO_DOC_META[a.tipo] || {}).label; };
+    return Visor.abrir(lista.map(a => ({ nombre: a.file.name, mime: a.file.type, tamano: a.file.size,
+      etiqueta: nombreDe(a) + ' · se sube al guardar', url: this.urlDe(a), ref: a })), i, {
+      alQuitar: it => {
+        const k = this.estado.adjuntos.indexOf(it.ref);
+        if (k < 0) return;
+        this.soltarUrl(it.ref);
+        this.estado.adjuntos.splice(k, 1);
+        this.pintarAdjuntos();
+      }
+    });
+  },
+
+  /** Lo que espera para subirse cuando la caja se guarde, y lo ya guardado. */
   pintarAdjuntos() {
     const cont = $('#listaAdjuntos'); if (!cont) return;
     const lista = this.estado.adjuntos || [];
-    cont.innerHTML = lista.length
-      ? '<div class="comp-lista">' + lista.map((a, i) => {
-          const f = a.file;
-          const meta = TIPO_DOC_META[a.tipo] || TIPO_DOC_META.OTRO;
-          const dest = DESTINOS_DOC.find(x => x.tipo === a.tipo);
-          return '<div class="comp-item">' +
-            '<span class="comp-ic">' + Icon(/^image\//.test(f.type) ? 'eye' : 'file', '', 13) + '</span>' +
-            '<span class="fs12 trunc" style="flex:1" title="' + attr(f.name) + '">' + esc(f.name) + '</span>' +
-            '<span class="txt-3 fs11 nowrap">' + Txt.bytes(f.size) + '</span>' +
-            '<span class="pill np ' + attr(meta.color) + '" data-tip="' +
-              attr(dest ? dest.cuando : '') + '">' + esc(dest ? dest.titulo : meta.label) + '</span>' +
-            '<span class="pill np p-amber">al guardar</span>' +
-            '<button class="btn btn-sm btn-ghost btn-icon" data-act="quitarAdjunto" data-i="' + i +
-              '" data-tip="Quitar">' + Icon('trash', '', 12) + '</button>' +
-          '</div>';
-        }).join('') + '</div>'
+    const guardados = this.docsGuardados || [];
+    const pillDestino = tipo => {
+      const meta = TIPO_DOC_META[tipo] || TIPO_DOC_META.OTRO;
+      const dest = DESTINOS_DOC.find(x => x.tipo === tipo);
+      return '<span class="pill np ' + attr(meta.color) + '" data-tip="' + attr(dest ? dest.cuando : '') + '">' +
+        esc(dest ? dest.titulo : meta.label) + '</span>';
+    };
+    /* La miniatura y el nombre abren el archivo: así se confirma que se eligió
+       el que era antes de guardar. */
+    const miniatura = (accion, i, mime, nombre, url) =>
+      '<button class="adj-th" data-act="' + accion + '" data-i="' + i + '" data-tip="Ver" aria-label="Ver ' + attr(nombre) + '">' +
+        (url && /^image\//.test(mime || '') ? '<img src="' + attr(url) + '" alt="" loading="lazy" decoding="async">'
+          : '<span class="dt-ext">' + esc((U.extension(nombre) || (/pdf/.test(mime || '') ? 'pdf' : '?')).toUpperCase().slice(0, 4)) + '</span>') +
+      '</button>';
+    const fila = (accion, i, nombre, tamano, mime, url, tipo, estadoPill) =>
+      '<div class="comp-item">' + miniatura(accion, i, mime, nombre, url) +
+        '<button class="link fs12 trunc" style="flex:1;text-align:left" data-act="' + accion + '" data-i="' + i +
+          '" title="' + attr(nombre) + '">' + esc(nombre) + '</button>' +
+        '<span class="txt-3 fs11 nowrap">' + Txt.bytes(tamano) + '</span>' + pillDestino(tipo) + estadoPill;
+    cont.innerHTML = (lista.length || guardados.length)
+      ? '<div class="fs11 txt-3 mb8">Pulse un archivo para verlo.</div>' +
+        '<div class="comp-lista">' +
+        guardados.map((d, i) => fila('verGuardado', i, d.nombre, d.tamano, d.mime, null, d.tipo,
+          '<span class="pill np p-green">guardado</span>') + '<span class="adj-hueco"></span></div>').join('') +
+        lista.map((a, i) => fila('verAdjunto', i, a.file.name, a.file.size, a.file.type,
+          /^image\//.test(a.file.type) ? this.urlDe(a) : null, a.tipo, '<span class="pill np p-amber">al guardar</span>') +
+          '<button class="btn btn-sm btn-ghost btn-icon" data-act="quitarAdjunto" data-i="' + i +
+            '" data-tip="Quitar">' + Icon('trash', '', 12) + '</button></div>').join('') +
+        '</div>'
       : '<div class="fs12 txt-3">Sin archivos por ahora. Puede guardar la caja sin ellos y adjuntarlos después.</div>';
   },
 
@@ -9620,6 +9761,7 @@ const VistaCajaForm = {
             }
           } finally { await prog.cerrar(); }
           Expediente.informar(total);
+          adj.forEach(a => this.soltarUrl(a));
           e.adjuntos = [];
         } catch (err2) {
           Toast.warn('La caja se guardó, pero no se pudieron adjuntar los archivos. ' +
@@ -18573,6 +18715,90 @@ const Pruebas = {
             Pruebas.igual(docs[0].tipo, TipoDocumento.SOPORTE_COMPRA, 'Ya clasificado como legalización');
             Pruebas.igual((VistaCajaForm.estado.adjuntos || []).length, 0,
               'Y la lista de espera queda limpia, para no subirlo dos veces');
+          } },
+
+        { nombre: 'CRÍTICO · lo que se adjunta al registrar la caja se puede ver antes de guardar', fn: async ctx => {
+            const pausa = ms => new Promise(r => setTimeout(r, ms));
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            try {
+              await VistaCajaForm.render(div, []);
+              const cv = document.createElement('canvas'); cv.width = 40; cv.height = 30;
+              cv.getContext('2d').fillRect(0, 0, 40, 30);
+              const png = new File([await new Promise(r => cv.toBlob(r, 'image/png'))], 'Comprobante Bancolombia.png', { type: 'image/png' });
+              const pdf = new File([new TextEncoder().encode('%PDF-1.4\n%%EOF')], 'Recibo ferretería.pdf', { type: 'application/pdf' });
+              const inp = div.querySelector('#fAdjuntos');
+              const dt = new DataTransfer(); dt.items.add(png); dt.items.add(pdf); inp.files = dt.files;
+              inp.dispatchEvent(new Event('change', { bubbles: true }));
+              await pausa(40);
+              const lista = div.querySelector('#listaAdjuntos');
+              const mini = lista.querySelector('.adj-th img');
+              Pruebas.ok(mini && /^blob:/.test(mini.getAttribute('src')), 'La foto se ve en miniatura, sin haberla subido');
+              Pruebas.igual(lista.querySelectorAll('[data-act="verAdjunto"]').length, 4,
+                'Cada archivo se puede abrir desde su miniatura y desde su nombre');
+
+              lista.querySelector('button.link[data-act="verAdjunto"]').click();
+              await pausa(60);
+              const v = [...document.querySelectorAll('#modals .modal-bd')].pop();
+              Pruebas.ok(v && /Comprobante Bancolombia\.png/.test(v.querySelector('h3').textContent) &&
+                /1 de 2/.test(v.textContent), 'Se abre el visor con el archivo pulsado');
+              const img = v.querySelector('.visor-cuerpo img');
+              Pruebas.ok(img && /^blob:/.test(img.getAttribute('src')), 'Mostrando la imagen');
+              v.querySelector('[data-visor="sig"]').click(); await pausa(60);
+              Pruebas.ok(/Recibo ferretería\.pdf/.test(v.querySelector('h3').textContent) && v.querySelector('iframe.visor-pdf'),
+                'Con «Siguiente» pasa al PDF, que también se ve');
+              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+              await pausa(60);
+              Pruebas.ok(/Comprobante Bancolombia/.test(v.querySelector('h3').textContent), 'Y con la flecha del teclado vuelve');
+
+              const url = VistaCajaForm.estado.adjuntos[0]._url;
+              v.querySelector('[data-visor="quitar"]').click(); await pausa(80);
+              Pruebas.igual(VistaCajaForm.estado.adjuntos.map(a => a.file.name).join(), 'Recibo ferretería.pdf',
+                'Si no era el que tocaba, se quita desde el visor');
+              Pruebas.ok(/Recibo ferretería\.pdf/.test(v.querySelector('h3').textContent) && !/de 2/.test(v.textContent),
+                'Y el visor sigue con el que queda');
+              let soltado = false;
+              try { await fetch(url); } catch (e) { soltado = true; }
+              Pruebas.ok(soltado, 'La memoria del quitado se libera');
+              Pruebas.igual(lista.querySelectorAll('.comp-item').length, 1, 'La lista del formulario también se actualiza');
+              v.querySelector('[data-visor="quitar"]').click(); await pausa(60);
+              Pruebas.ok(!document.body.contains(v), 'Al quitar el último, el visor se cierra');
+            } finally {
+              for (let i = 0; i < 5 && document.querySelector('#modals .modal-bd'); i++) Modal.cerrarTop();
+              (VistaCajaForm.estado.adjuntos || []).forEach(a => VistaCajaForm.soltarUrl(a));
+              VistaCajaForm.estado.adjuntos = [];
+              div.remove();
+            }
+          } },
+
+        { nombre: 'Al editar una caja se ven los documentos que ya tiene', fn: async ctx => {
+            const pausa = ms => new Promise(r => setTimeout(r, ms));
+            const cm = await CategoriaRepo.obtenerOCrear('Gasto de la prueba del visor');
+            const caja = await CajaService.crear({ fecha: '2026-09-09', solicitanteId: ctx.fernando.id,
+              municipioId: ctx.municipio.id, detalles: [{ categoriaId: cm.id, elemento: 'Varios', valor: 1000000 }] });
+            const doc = await DocumentoService.adjuntar(new File([new TextEncoder().encode('%PDF-1.4')], 'Factura guardada.pdf',
+              { type: 'application/pdf' }), { cajaId: caja.id, tipo: TipoDocumento.SOPORTE_COMPRA });
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            try {
+              await VistaCajaForm.render(div, [caja.id]);
+              await pausa(80);
+              const lista = div.querySelector('#listaAdjuntos');
+              Pruebas.ok(/Factura guardada\.pdf/.test(lista.textContent) && /guardado/.test(lista.textContent),
+                'La tarjeta enseña lo que la caja ya tiene, en vez de «Sin archivos»');
+              lista.querySelector('button.link[data-act="verGuardado"]').click();
+              await pausa(120);
+              const v = [...document.querySelectorAll('#modals .modal-bd')].pop();
+              Pruebas.ok(v && /Factura guardada\.pdf/.test(v.textContent) && v.querySelector('iframe.visor-pdf'),
+                'Y se puede abrir para verlo');
+              Pruebas.ok(!v.querySelector('[data-visor="quitar"]'), 'Lo ya guardado no se quita desde aquí');
+            } finally {
+              for (let i = 0; i < 5 && document.querySelector('#modals .modal-bd'); i++) Modal.cerrarTop();
+              div.remove();
+              await DocumentoService.eliminar(doc.id);
+            }
           } },
 
         { nombre: 'Dentro de una caja sólo se elige entre los dos momentos', fn: async ctx => {
