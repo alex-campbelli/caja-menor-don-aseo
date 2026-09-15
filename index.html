@@ -2704,15 +2704,21 @@ const Nube = {
   traducirDuplicado(msg) {
     const m = /duplicate key value violates unique constraint "?([^"]+)"?/i.exec(String(msg || ''));
     if (!m) return null;
-    const partes = m[1].replace(/"$/, '').split('_');
-    const campo = partes[partes.length - 1];
-    const legible = { nombre: 'nombre', cedula: 'cédula', numero: 'número',
-                      codigo: 'código', correo: 'correo', clave: 'clave' }[campo] || campo;
+    const indice = m[1].replace(/"$/, '');
+    /* Dos formas de llamarse: los índices propios («ux_tabla_campo») y los que
+       arma PostgreSQL solo para un `unique` («tabla_campo_key»). De este
+       último salía «ya existe un registro con ese key». */
+    const auto = /_p?key$/.test(indice);
+    const partes = auto ? indice.replace(/_p?key$/, '').split('_') : indice.split('_');
+    const campo = auto ? (partes.slice(1).join('_') || 'id') : partes[partes.length - 1];
+    const legible = { nombre: 'nombre', cedula: 'cédula', numero: 'número', id: 'identificador',
+                      codigo: 'código', correo: 'correo', clave: 'clave' }[campo] || null;
+    if (!legible) return new ErrorDominio('Ya existe un registro igual. No se guardó para no duplicarlo.', 'DUPLICADO');
     /* Los catálogos son de cada contrato desde hace poco. Si la nube rechaza un
        nombre que en ESTE contrato no existe, es que su base todavía tiene la
        regla antigua —única en toda la tabla— y falta correr la actualización.
        Decirlo aquí ahorra buscar a ciegas. */
-    const tabla = partes.length > 1 ? partes[1] : '';
+    const tabla = auto ? partes[0] : (partes.length > 1 ? partes[1] : '');
     if (campo === 'nombre' && ['personas', 'categorias', 'municipios'].includes(tabla))
       return new ErrorDominio('La nube rechazó el nombre por repetido. Si en este contrato no ' +
         'existe, su base de datos todavía tiene la regla antigua: ejecute «actualizacion-columnas.sql» ' +
@@ -3376,6 +3382,88 @@ const ContratoRepo = {
   get(id) { return Cache.contratos.get(id) || null; },
   porNombre(n) { const x = Txt.norm(n); return this.todos().find(c => c.nombreNorm === x) || null; },
 
+  /* ---- Prefijos de numeración ------------------------------------------
+     El número de una caja o de una consignación es único en TODA la base, no
+     sólo en su contrato. Por eso dos contratos no pueden numerar con el mismo
+     prefijo: el primer número del segundo ya lo tiene el primero. */
+  PREFIJOS: { prefijoCaja: { porDefecto: 'CM', etiqueta: 'de caja menor' },
+              prefijoConsignacion: { porDefecto: 'CON', etiqueta: 'de consignación' } },
+  normPrefijo(p) { return String(p || '').trim().toUpperCase(); },
+  prefijoDe(ctr, campo) { return this.normPrefijo((ctr && ctr[campo]) || this.PREFIJOS[campo].porDefecto); },
+  /** el otro contrato que ya numera con ese prefijo, o null */
+  quienUsaPrefijo(campo, prefijo, excluirId, lista) {
+    const p = this.normPrefijo(prefijo);
+    return (lista || this.todos()).find(k => k.id !== excluirId && this.prefijoDe(k, campo) === p) || null;
+  },
+  /** un prefijo libre que tenga sentido para el contrato: sus iniciales para
+      las cajas (HOSPITAL GENERAL DE MEDELLÍN → HGM) y el de cajas + C para las
+      consignaciones (HGM → HGMC) */
+  prefijoSugerido(campo, ctr, lista) {
+    const c = ctr || {};
+    let base;
+    if (campo === 'prefijoConsignacion') base = this.prefijoDe(c, 'prefijoCaja') + 'C';
+    else {
+      const vacias = ['DE', 'DEL', 'LA', 'LAS', 'LOS', 'EL', 'Y', 'E'];
+      const palabras = Txt.norm(c.nombre || '').toUpperCase().split(/[^A-Z0-9]+/)
+        .filter(w => w && !vacias.includes(w));
+      base = (palabras.length === 1 ? palabras[0] : palabras.map(w => w[0]).join('')).slice(0, 4) || 'CM';
+    }
+    base = base.slice(0, 7);
+    let s = base;
+    for (let i = 2; this.quienUsaPrefijo(campo, s, c.id, lista) && i < 100; i++) s = base.slice(0, 8 - String(i).length) + i;
+    return s;
+  },
+  /**
+   * Reparte los prefijos para que no haya dos contratos con el mismo.
+   * No guarda nada: devuelve los contratos ya ajustados y la lista de cambios.
+   *
+   * De cada grupo que comparte un prefijo, lo conserva el contrato que ya tiene
+   * números emitidos con él (a igualdad, el más antiguo). Los demás reciben uno
+   * propio. Cambiar un prefijo nunca renumera lo emitido: sólo cambia cómo se
+   * llamarán los números que vengan.
+   *   registros: { prefijoCaja: [cajas], prefijoConsignacion: [consignaciones] }
+   */
+  repartirPrefijos(contratos, registros) {
+    const lista = (contratos || []).map(k => Object.assign({}, k))
+      .sort((a, b) => String(a.creadoEn || '').localeCompare(String(b.creadoEn || '')));
+    const cambios = [];
+    for (const campo of Object.keys(this.PREFIJOS)) {
+      const grupos = U.groupBy(lista, k => this.prefijoDe(k, campo));
+      for (const [pref, grupo] of grupos) {
+        if (grupo.length < 2) continue;
+        const emitidos = k => ((registros && registros[campo]) || [])
+          .filter(r => r.contratoId === k.id && String(r.numero || '').startsWith(pref + '-')).length;
+        const dueno = grupo.slice().sort((a, b) => emitidos(b) - emitidos(a))[0];
+        for (const k of grupo) {
+          if (k === dueno) continue;
+          const nuevo = this.prefijoSugerido(campo, k, lista);
+          cambios.push({ contratoId: k.id, nombre: k.nombre, campo, antes: pref, despues: nuevo, dueno: dueno.nombre });
+          k[campo] = nuevo;
+        }
+      }
+    }
+    return { contratos: lista, cambios };
+  },
+  /** Repara en la base los prefijos compartidos. Devuelve lo que cambió. */
+  async repararPrefijos(leer) {
+    const L = leer || (col => db.getAll(col));
+    const contratos = await L('contratos');
+    const hayRepetidos = Object.keys(this.PREFIJOS).some(campo =>
+      new Set(contratos.map(k => this.prefijoDe(k, campo))).size < contratos.length);
+    if (!hayRepetidos) return [];
+    const r = this.repartirPrefijos(contratos, { prefijoCaja: await L('cajas'), prefijoConsignacion: await L('consignaciones') });
+    if (!r.cambios.length) return [];
+    const tocados = r.contratos.filter(k => r.cambios.some(x => x.contratoId === k.id))
+      .map(k => Object.assign(k, { actualizadoEn: Modelo.ahora() }));
+    await db.putMany('contratos', tocados);
+    tocados.forEach(k => Cache.contratos.set(k.id, k));
+    for (const x of r.cambios)
+      await Auditoria.registrar('contrato', x.contratoId, 'ACTUALIZAR',
+        { campo: x.campo, antes: x.antes, despues: x.despues, motivo: 'prefijo compartido con ' + x.dueno });
+    Bus.emit('contratos:cambio', null);
+    return r.cambios;
+  },
+
   /** contrato sobre el que se trabaja ahora; nunca devuelve null si hay alguno */
   activo() {
     const cfg = Cache.config || {};
@@ -3405,6 +3493,16 @@ const ContratoRepo = {
     if (e.length) throw new ErrorValidacion(e);
     const dup = this.porNombre(c.nombre);
     if (dup && dup.id !== c.id) throw new ErrorDominio('Ya existe un contrato llamado "' + c.nombre + '".', 'DUPLICADO');
+    /* Sólo se mira al crear el contrato o al cambiarle el prefijo: dos contratos
+       que ya lo compartían de antes pueden seguir editándose sin tropezar aquí. */
+    for (const campo of Object.keys(this.PREFIJOS)) {
+      c[campo] = this.prefijoDe(c, campo);
+      if (previo && this.prefijoDe(previo, campo) === c[campo]) continue;
+      const otro = this.quienUsaPrefijo(campo, c[campo], c.id);
+      if (otro) throw new ErrorDominio('El prefijo ' + this.PREFIJOS[campo].etiqueta + ' «' + c[campo] +
+        '» ya lo usa el contrato «' + otro.nombre + '». Elija otro, por ejemplo «' +
+        this.prefijoSugerido(campo, c) + '», para que los números de los dos no choquen.', 'PREFIJO_EN_USO');
+    }
     await db.put('contratos', c);
     Cache.contratos.set(c.id, c);
     await Auditoria.registrar('contrato', c.id, previo ? 'ACTUALIZAR' : 'CREAR', { nombre: c.nombre });
@@ -3761,6 +3859,39 @@ const Secuencia = {
     return valor;
   },
   async ver(clave) { const r = await db.get('secuencias', clave); return (r && r.valor) || 0; },
+  /**
+   * El siguiente número, comprobando que de verdad esté libre cuando hace falta.
+   *
+   * Cada contrato lleva su propio contador, pero el número es único en toda la
+   * base. Si otro contrato numera con el mismo prefijo, el primer número de
+   * éste ya existe: la nube lo rechazaba con un «ya existe un registro con ese
+   * key» que no explicaba nada. Ahora se mira ANTES de gastar el consecutivo:
+   *   · si el número lo tiene otro contrato, se para y se dice por qué: la
+   *     salida es darle a este contrato su propio prefijo, no mezclar series;
+   *   · si lo tiene este mismo contrato (el contador se quedó atrás), se salta.
+   * Sólo se consulta cuando el prefijo está compartido: lo normal no paga un
+   * viaje más a la nube por cada caja.
+   */
+  async siguienteLibre(o) {
+    const compartido = ContratoRepo.quienUsaPrefijo(o.campo, o.prefijo, o.contratoId);
+    if (!compartido) return o.formato(await this.siguiente(o.clave));
+    for (let vuelta = 0; vuelta < 1000; vuelta++) {
+      const n = (await this.ver(o.clave)) + 1;
+      const numero = o.formato(n);
+      const ya = (await db.query(o.coleccion, { indice: 'numero', valor: numero }))[0];
+      if (!ya) return o.formato(await this.siguiente(o.clave));
+      if (ya.contratoId !== o.contratoId) {
+        const otro = ContratoRepo.get(ya.contratoId) || compartido;
+        const ctr = ContratoRepo.get(o.contratoId) || {};
+        throw new ErrorDominio('No se guardó: el número ' + numero + ' ya es de ' + o.nombre + ' del contrato «' +
+          otro.nombre + '», porque «' + (ctr.nombre || 'este contrato') + '» numera con el mismo prefijo «' +
+          o.prefijo + '». Póngale a este contrato un prefijo propio en Contratos.', 'PREFIJO_COMPARTIDO',
+          { campo: o.campo, contratoId: o.contratoId, otroContratoId: otro.id, prefijo: o.prefijo, numero });
+      }
+      await this.asegurarMinimo(o.clave, n);
+    }
+    throw new ErrorDominio('No se encontró un número libre.', 'SIN_NUMERO');
+  },
   /** tras una importación/restauración, adelanta el contador para no colisionar */
   async asegurarMinimo(clave, minimo) {
     await db.transaccion(['secuencias'], async tx => {
@@ -4155,8 +4286,9 @@ const CajaService = {
     const anio = Fecha.anio(fecha || Fecha.hoy());
     const ctr = (contratoId ? ContratoRepo.get(contratoId) : ContratoRepo.activo()) || {};
     const pref = ctr.prefijoCaja || 'CM';
-    const n = await Secuencia.siguiente(Secuencia.claveCaja(ctr.id || 'sin', pref, anio));
-    return Secuencia.formatoCaja(anio, n, pref);
+    return Secuencia.siguienteLibre({ campo: 'prefijoCaja', prefijo: pref, contratoId: ctr.id, coleccion: 'cajas',
+      nombre: 'una caja', clave: Secuencia.claveCaja(ctr.id || 'sin', pref, anio),
+      formato: n => Secuencia.formatoCaja(anio, n, pref) });
   },
 
   /**
@@ -4538,8 +4670,9 @@ const ConsignacionService = {
     const anio = Fecha.anio(fecha || Fecha.hoy());
     const ctr = (contratoId ? ContratoRepo.get(contratoId) : ContratoRepo.activo()) || {};
     const pref = ctr.prefijoConsignacion || 'CON';
-    const n = await Secuencia.siguiente(Secuencia.claveConsignacion(ctr.id || 'sin', pref, anio));
-    return Secuencia.formatoConsignacion(anio, n, pref);
+    return Secuencia.siguienteLibre({ campo: 'prefijoConsignacion', prefijo: pref, contratoId: ctr.id,
+      coleccion: 'consignaciones', nombre: 'una consignación', clave: Secuencia.claveConsignacion(ctr.id || 'sin', pref, anio),
+      formato: n => Secuencia.formatoConsignacion(anio, n, pref) });
   },
 
   /** entrada: { fecha, beneficiarioId, valor, banco, referencia, observaciones,
@@ -7151,6 +7284,10 @@ function manejarError(err) {
         'Nada de lo que ya guardó se pierde.', 'warn');
       setTimeout(() => location.reload(), 2600);
     }
+    return;
+  }
+  if (err instanceof ErrorDominio && err.codigo === 'PREFIJO_COMPARTIDO' && err.detalles) {
+    PrefijoPropio.pedir(err.detalles);
     return;
   }
   if (err instanceof ErrorValidacion) {
@@ -10576,6 +10713,71 @@ const VistaMunicipios = {
    municipios, categorías) sí se comparten, porque un mismo líder o municipio
    suele intervenir en varios contratos.
    ========================================================================== */
+/**
+ * Cuando un número choca porque dos contratos comparten prefijo, se explica y
+ * se deja poner el prefijo propio ahí mismo, sin salir del formulario: lo que
+ * se estaba escribiendo sigue en pantalla y basta con volver a guardar.
+ */
+const PrefijoPropio = {
+  pedir(d) {
+    const ctr = ContratoRepo.get(d.contratoId);
+    const otro = ContratoRepo.get(d.otroContratoId) || {};
+    if (!ctr) return;
+    const esCon = d.campo === 'prefijoConsignacion';
+    const que = esCon ? 'consignaciones' : 'cajas menores';
+    const anio = String(d.numero || '').split('-').slice(-2, -1)[0] || Fecha.anio(Fecha.hoy());
+    const m = Modal.abrir({
+      titulo: 'Este contrato necesita su propio prefijo', ancho: 'narrow',
+      cuerpo:
+        '<div class="fs13" style="line-height:1.55">' +
+        '<p style="margin:0 0 8px">Las ' + que + ' de <b>' + esc(ctr.nombre) + '</b> se numeran con <b>' + esc(d.prefijo) +
+          '</b>, el mismo prefijo que usa <b>' + esc(otro.nombre || 'otro contrato') + '</b>. Por eso el número <b class="mono">' +
+          esc(d.numero) + '</b> ya existe y <b>no se guardó nada</b>.</p>' +
+        '<p style="margin:0 0 12px">Póngale a este contrato un prefijo propio. Los números de ' +
+          esc(otro.nombre || 'el otro contrato') + ' no cambian.</p></div>' +
+        '<div class="field"><label>Prefijo de ' + (esCon ? 'consignación' : 'caja menor') + ' para ' + esc(ctr.nombre) + '</label>' +
+        '<input class="inp mono" id="ppPrefijo" maxlength="8" autocomplete="off" value="' +
+          attr(ContratoRepo.prefijoSugerido(d.campo, ctr)) + '"></div>' +
+        '<div class="fs12 txt-3" id="ppPrevia"></div>' +
+        '<div class="fs12 mt8" id="ppError" style="color:var(--dang-500)"></div>',
+      pie: '<button class="btn" data-cerrar>Cancelar</button>' +
+           '<button class="btn btn-primary" id="ppGuardar">Guardar prefijo</button>',
+      alMontar(el) {
+        const inp = el.querySelector('#ppPrefijo');
+        const previa = async () => {
+          const p = ContratoRepo.normPrefijo(inp.value);
+          if (!p) { el.querySelector('#ppPrevia').textContent = ''; return; }
+          const clave = esCon ? Secuencia.claveConsignacion(ctr.id, p, anio) : Secuencia.claveCaja(ctr.id, p, anio);
+          const n = (await Secuencia.ver(clave)) + 1;
+          if (ContratoRepo.normPrefijo(inp.value) !== p) return;
+          el.querySelector('#ppPrevia').innerHTML = 'La próxima quedará como <b class="mono">' +
+            esc(esCon ? Secuencia.formatoConsignacion(anio, n, p) : Secuencia.formatoCaja(anio, n, p)) + '</b>';
+        };
+        inp.oninput = () => { el.querySelector('#ppError').textContent = ''; previa(); };
+        previa();
+        el.querySelector('#ppGuardar').onclick = async () => {
+          const p = ContratoRepo.normPrefijo(inp.value);
+          if (!p) { el.querySelector('#ppError').textContent = 'Escriba un prefijo.'; return; }
+          /* Aquí no basta con la regla del contrato, que deja pasar un prefijo
+             que no cambia: dejar el mismo que comparte no arregla nada. */
+          const usa = ContratoRepo.quienUsaPrefijo(d.campo, p, ctr.id);
+          if (usa) {
+            el.querySelector('#ppError').textContent = '«' + p + '» ya lo usa el contrato «' + usa.nombre + '». Elija uno distinto.';
+            return;
+          }
+          try {
+            await ContratoRepo.guardar({ id: ctr.id, [d.campo]: p });
+          } catch (e) { el.querySelector('#ppError').textContent = e.message; return; }
+          Modal.cerrar(el);
+          Shell.pintarSelectorContrato();
+          Toast.ok('Prefijo «' + p + '» guardado. Vuelva a pulsar «Guardar» para terminar.', 7000);
+        };
+      }
+    });
+    return m;
+  }
+};
+
 const VistaContratos = {
   async render(cont) {
     Shell.titulo('Contratos', 'Cada contrato lleva su propia contabilidad');
@@ -10640,7 +10842,8 @@ const VistaContratos = {
           '<div class="flex g6 wrap mb12">' +
           '<span class="pill np ' + (c.estado === 'VIGENTE' ? 'p-green' : c.estado === 'SUSPENDIDO' ? 'p-amber' : 'p-gray') + '">' +
           esc(c.estado.charAt(0) + c.estado.slice(1).toLowerCase()) + '</span>' +
-          '<span class="chip">' + esc(c.prefijoCaja) + '-…</span>' +
+          '<span class="chip" data-tip="Numeración de sus cajas menores">' + esc(c.prefijoCaja) + '-…</span>' +
+          '<span class="chip" data-tip="Numeración de sus consignaciones">' + esc(c.prefijoConsignacion || 'CON') + '-…</span>' +
           (c.fechaInicio ? '<span class="chip">' + Icon('calendar', '', 11) + Fecha.corta(c.fechaInicio) +
             (c.fechaFin ? ' → ' + Fecha.corta(c.fechaFin) : '') + '</span>' : '') +
           '</div>' +
@@ -10704,26 +10907,70 @@ const VistaContratos = {
         '<div class="divider"></div>' +
         '<div class="row">' +
         '<div class="field"><label>Prefijo de caja menor <span class="req">*</span></label>' +
-        '<input class="inp" id="kPrefCaja" value="' + attr(c.prefijoCaja || 'CM') + '" maxlength="8"></div>' +
-        '<div class="field"><label>Prefijo de consignación</label>' +
-        '<input class="inp" id="kPrefCon" value="' + attr(c.prefijoConsignacion || 'CON') + '" maxlength="8"></div>' +
+        '<input class="inp mono" id="kPrefCaja" style="text-transform:uppercase" autocomplete="off" maxlength="8" value="' +
+          attr(esNuevo ? '' : (c.prefijoCaja || 'CM')) + '" placeholder="Ej.: HGM"></div>' +
+        '<div class="field"><label>Prefijo de consignación <span class="req">*</span></label>' +
+        '<input class="inp mono" id="kPrefCon" style="text-transform:uppercase" autocomplete="off" maxlength="8" value="' +
+          attr(esNuevo ? '' : (c.prefijoConsignacion || 'CON')) + '" placeholder="Ej.: HGMC"></div>' +
         '<div class="field"><label>Quien adelanta el dinero por defecto</label>' +
         '<select class="inp" id="kFinanciador"><option value="">— sin preseleccionar —</option>' +
         PersonaRepo.todas().filter(p => p.esFinanciador).map(p => '<option value="' + p.id + '"' +
           (c.financiadorPorDefectoId === p.id ? ' selected' : '') + '>' + esc(p.nombre) + '</option>').join('') +
         '</select></div>' +
         '</div>' +
-        (esNuevo ? '<div class="alert a-info" style="padding:9px 11px">' + Icon('info', '', 14) +
-          '<div>La numeración de este contrato empieza en <b>' + esc((c.prefijoCaja || 'CM')) +
-          '-' + Fecha.anio(Fecha.hoy()) + '-00001</b>, independiente de los demás contratos.</div></div>'
-          : '<div class="alert a-warn" style="padding:9px 11px">' + Icon('warn', '', 14) +
-          '<div>Cambiar el prefijo <b>no renumera</b> las cajas ya emitidas: los números existentes son inmutables.</div></div>') +
+        /* Se rellena en vivo: cómo quedarán los números, o por qué no se puede. */
+        '<div class="alert a-info" id="kPrefAviso" style="padding:9px 11px"></div>' +
         '<div class="field mt12"><label>Observaciones</label>' +
         '<textarea class="inp" id="kObs">' + esc(c.observaciones || '') + '</textarea></div>',
       pie: (!esNuevo ? '<button class="btn btn-danger mf-left" id="kEliminar">' + Icon('trash', '', 14) + 'Eliminar</button>' : '') +
         '<button class="btn" data-cerrar>Cancelar</button>' +
         '<button class="btn btn-primary" id="kGuardar">' + Icon('save', '', 14) + 'Guardar</button>',
       alMontar(m) {
+        /* Los prefijos quedan cubiertos desde que se crea el contrato. Al
+           escribir el nombre se proponen unos libres (HOSPITAL GENERAL DE
+           MEDELLÍN → HGM y HGMC); si se escribe uno a mano ya no se toca; y uno
+           que ya usa otro contrato se avisa y no deja guardar. Así ningún
+           contrato nuevo vuelve a nacer con el «CON» de otro. */
+        const $k = s => m.querySelector(s);
+        const nombreK = $k('#kNombre'), pCaja = $k('#kPrefCaja'), pCon = $k('#kPrefCon');
+        const btnK = $k('#kGuardar'), avisoK = $k('#kPrefAviso');
+        const anioK = Fecha.anio(Fecha.hoy());
+        const revisar = () => {
+          const pc = ContratoRepo.normPrefijo(pCaja.value), pk = ContratoRepo.normPrefijo(pCon.value);
+          const errores = [];
+          if (!pc) errores.push('Escriba el prefijo de caja menor.');
+          if (!pk) errores.push('Escriba el prefijo de consignación.');
+          for (const [campo, p] of [['prefijoCaja', pc], ['prefijoConsignacion', pk]]) {
+            if (!p || (!esNuevo && ContratoRepo.prefijoDe(c, campo) === p)) continue;
+            const otro = ContratoRepo.quienUsaPrefijo(campo, p, c.id);
+            if (otro) errores.push('«' + p + '» ya lo usa el contrato «' + otro.nombre + '». Elija otro, por ejemplo «' +
+              ContratoRepo.prefijoSugerido(campo, Object.assign({}, c, { nombre: nombreK.value, prefijoCaja: pc })) + '».');
+          }
+          btnK.disabled = errores.length > 0;
+          avisoK.className = 'alert ' + (errores.length ? 'a-err' : esNuevo ? 'a-info' : 'a-warn');
+          avisoK.innerHTML = Icon(errores.length || !esNuevo ? 'warn' : 'info', '', 14) + '<div>' + (errores.length
+            ? errores.map(esc).join('<br>')
+            : esNuevo
+              ? 'Sus cajas quedarán como <b class="mono">' + esc(Secuencia.formatoCaja(anioK, 1, pc)) + '</b> y sus consignaciones como <b class="mono">' +
+                esc(Secuencia.formatoConsignacion(anioK, 1, pk)) + '</b>. Ningún otro contrato usa estos prefijos.'
+              : 'Cambiar un prefijo <b>no renumera</b> lo ya emitido: los números existentes son inmutables.') + '</div>';
+        };
+        if (esNuevo) {
+          pCaja.dataset.auto = '1'; pCon.dataset.auto = '1';
+          nombreK.addEventListener('input', () => {
+            if (pCaja.dataset.auto) pCaja.value = nombreK.value.trim() ? ContratoRepo.prefijoSugerido('prefijoCaja', { nombre: nombreK.value }) : '';
+            if (pCon.dataset.auto) pCon.value = pCaja.value.trim() ? ContratoRepo.prefijoSugerido('prefijoConsignacion', { prefijoCaja: pCaja.value }) : '';
+            revisar();
+          });
+        }
+        pCaja.addEventListener('input', () => {
+          delete pCaja.dataset.auto;
+          if (pCon.dataset.auto) pCon.value = pCaja.value.trim() ? ContratoRepo.prefijoSugerido('prefijoConsignacion', { prefijoCaja: pCaja.value }) : '';
+          revisar();
+        });
+        pCon.addEventListener('input', () => { delete pCon.dataset.auto; revisar(); });
+        revisar();
+
         m.querySelector('#kGuardar').onclick = async () => {
           try {
             const guardado = await ContratoRepo.guardar({
@@ -10734,8 +10981,8 @@ const VistaContratos = {
               estado: m.querySelector('#kEstado').value,
               fechaInicio: m.querySelector('#kIni').value,
               fechaFin: m.querySelector('#kFin').value,
-              prefijoCaja: (m.querySelector('#kPrefCaja').value.trim() || 'CM').toUpperCase(),
-              prefijoConsignacion: (m.querySelector('#kPrefCon').value.trim() || 'CON').toUpperCase(),
+              prefijoCaja: ContratoRepo.normPrefijo(pCaja.value),
+              prefijoConsignacion: ContratoRepo.normPrefijo(pCon.value),
               financiadorPorDefectoId: m.querySelector('#kFinanciador').value || null,
               observaciones: m.querySelector('#kObs').value.trim()
             });
@@ -15362,6 +15609,223 @@ const Pruebas = {
             Pruebas.ok(a1.numero.startsWith('CM-'), 'El contrato A conserva su prefijo: ' + a1.numero);
             ctx.cajaA = a1; ctx.cajaB1 = b1; ctx.cajaB2 = b2; ctx.lider = lider;
           } },
+        { nombre: 'CRÍTICO · dos contratos con el mismo prefijo ya no chocan al numerar', fn: async ctx => {
+            /* El hospital numeraba sus consignaciones con «CON», como COMFENALCO:
+               su primera salía CON-2026-0001, que ya existía, y la nube la
+               rechazaba con «ya existe un registro con ese key». */
+            const original = ContratoRepo.activoId();
+            const pausa = ms => new Promise(r => setTimeout(r, ms));
+            const X = await ContratoRepo.guardar({ nombre: 'CONTRATO PRIMERO XA', prefijoCaja: 'XA', prefijoConsignacion: 'XAC' });
+            const Y = await ContratoRepo.guardar({ nombre: 'HOSPITAL DE PRUEBA YA', prefijoCaja: 'YA', prefijoConsignacion: 'YAC' });
+            /* Así estaba el hospital: se crea con el prefijo de consignación del
+               otro por debajo, como quedó guardado antes de esta regla. */
+            const compartir = async (campo, valor) => {
+              const k = Object.assign({}, ContratoRepo.get(Y.id), { [campo]: valor });
+              await db.put('contratos', k); Cache.contratos.set(k.id, k);
+            };
+            await compartir('prefijoConsignacion', 'XAC');
+            let vez = 0;
+            const preparar = async () => {
+              const fin = await PersonaRepo.guardar({ nombre: 'Pagador ' + (++vez) + ' de ' + ContratoRepo.activo().nombre,
+                esFinanciador: 1, esSolicitante: 1 });
+              const cat = await CategoriaRepo.obtenerOCrear('Gasto de la prueba de prefijos');
+              const caja = await CajaService.crear({ fecha: '2026-09-07', solicitanteId: fin.id, consignoId: fin.id,
+                estado: EstadoCaja.CONSIGNADA, detalles: [{ categoriaId: cat.id, elemento: 'x', valor: 86672900 }] });
+              return { fin, caja };
+            };
+            const consignar = (p, valor) => ConsignacionService.crear({ fecha: '2026-09-15', beneficiarioId: p.fin.id,
+              valor: valor || 1000000, asignaciones: [{ cajaId: p.caja.id, monto: valor || 1000000 }] });
+            try {
+              await ContratoRepo.cambiarActivo(X.id);
+              const px = await preparar();
+              const cx1 = await consignar(px);
+              Pruebas.igual(cx1.numero, 'XAC-2026-0001', 'El primer contrato numera como siempre');
+
+              await ContratoRepo.cambiarActivo(Y.id);
+              const py = await preparar();
+              let err = null;
+              try { await consignar(py, 86672900); } catch (e) { err = e; }
+              Pruebas.ok(err && err.codigo === 'PREFIJO_COMPARTIDO', 'El choque se detecta antes de ir a la base');
+              Pruebas.ok(err && /XAC-2026-0001/.test(err.message) && /CONTRATO PRIMERO XA/.test(err.message) && /«XAC»/.test(err.message),
+                'Y se explica: qué número, de qué contrato y qué prefijo comparten');
+              Pruebas.igual((await db.query('consignaciones', { indice: 'contratoId', valor: Y.id })).length, 0, 'No se guardó nada');
+              Pruebas.igual(await Secuencia.ver(Secuencia.claveConsignacion(Y.id, 'XAC', '2026')), 0,
+                'Ni se gastó un consecutivo');
+              Pruebas.igual((await CajaRepo.aplicaciones(py.caja.id)).length, 0, 'La caja sigue esperando su reembolso');
+
+              /* El otro contrato no se entera: sigue numerando igual. */
+              await ContratoRepo.cambiarActivo(X.id);
+              const cx2 = await consignar(await preparar());
+              Pruebas.igual(cx2.numero, 'XAC-2026-0002', 'El primer contrato sigue funcionando sin tropiezos');
+              /* Si su contador se quedó atrás, el número que ya es SUYO se salta. */
+              await db.put('secuencias', { id: Secuencia.claveConsignacion(X.id, 'XAC', '2026'), valor: 1, actualizadoEn: Modelo.ahora() });
+              const cx3 = await consignar(await preparar());
+              Pruebas.igual(cx3.numero, 'XAC-2026-0003', 'Con el contador atrasado, salta el número que ya tiene');
+              await ContratoRepo.guardar({ id: X.id, observaciones: 'editado' });
+              await ContratoRepo.guardar({ id: Y.id, observaciones: 'editado' });
+              Pruebas.ok(true, 'Y los dos contratos que ya compartían prefijo se pueden seguir editando');
+
+              /* El aviso deja poner el prefijo propio sin salir de la pantalla. */
+              await ContratoRepo.cambiarActivo(Y.id);
+              manejarError(err);
+              const ventana = [...document.querySelectorAll('#modals .modal-bd')].pop();
+              const inp = ventana && ventana.querySelector('#ppPrefijo');
+              Pruebas.ok(inp && /HOSPITAL DE PRUEBA YA/.test(ventana.textContent) && /CONTRATO PRIMERO XA/.test(ventana.textContent),
+                'Sale una ventana que nombra los dos contratos');
+              Pruebas.igual(inp && inp.value, 'YAC', 'Y propone un prefijo libre armado con el de sus cajas');
+              await pausa(60);
+              Pruebas.ok(/YAC-2026-0001/.test(ventana.textContent), 'Enseñando cómo quedará la próxima');
+              inp.value = 'xac'; inp.dispatchEvent(new Event('input'));
+              ventana.querySelector('#ppGuardar').click(); await pausa(80);
+              Pruebas.ok(document.body.contains(ventana) && /ya lo usa/.test(ventana.querySelector('#ppError').textContent),
+                'Si se escribe otra vez el prefijo del otro, no lo acepta');
+              inp.value = 'yac'; inp.dispatchEvent(new Event('input'));
+              ventana.querySelector('#ppGuardar').click(); await pausa(120);
+              Pruebas.ok(!document.body.contains(ventana), 'Con uno libre, se guarda y la ventana se cierra');
+              Pruebas.igual(ContratoRepo.get(Y.id).prefijoConsignacion, 'YAC', 'El contrato queda con su prefijo propio');
+              const cy = await consignar(py, 86672900);
+              Pruebas.igual(cy.numero, 'YAC-2026-0001', 'Y al volver a guardar, su consignación empieza en 1');
+
+              /* Lo mismo con las cajas. */
+              await compartir('prefijoCaja', 'XA');
+              let errCaja = null;
+              try { await preparar(); } catch (e) { errCaja = e; }
+              Pruebas.ok(errCaja && errCaja.codigo === 'PREFIJO_COMPARTIDO' && errCaja.detalles.campo === 'prefijoCaja',
+                'Las cajas con el prefijo de otro contrato también se detectan');
+              await compartir('prefijoCaja', 'YA');
+
+              /* Y en adelante no se puede volver a dar el caso. */
+              await Pruebas.lanza(() => ContratoRepo.guardar({ nombre: 'CONTRATO COPIÓN', prefijoCaja: 'xa ', prefijoConsignacion: 'ZZC' }),
+                'Un contrato nuevo no puede usar el prefijo de cajas de otro');
+              await Pruebas.lanza(() => ContratoRepo.guardar({ nombre: 'CONTRATO COPIÓN', prefijoCaja: 'ZZ', prefijoConsignacion: 'YAC' }),
+                'Ni el de consignaciones');
+              await Pruebas.lanza(() => ContratoRepo.guardar({ id: X.id, prefijoConsignacion: 'YAC' }),
+                'Ni cambiarse al de otro');
+              Pruebas.igual(ContratoRepo.prefijoSugerido('prefijoCaja', { nombre: 'Hospital General de Medellín Luz Castro' }), 'HGML',
+                'Para un contrato sin prefijo se sugieren sus iniciales');
+            } finally {
+              for (let i = 0; i < 5 && document.querySelector('#modals .modal-bd'); i++) Modal.cerrarTop();
+              await ContratoRepo.cambiarActivo(original);
+            }
+          } },
+
+        { nombre: 'CRÍTICO · el contrato que comparte prefijo recibe uno propio al abrir el programa', fn: async () => {
+            /* Así estaba el hospital: cajas con HGM, consignaciones con el «CON»
+               de COMFENALCO. Se corrige solo, sin que nadie tenga que entrar. */
+            const A = { id: 'k_a', nombre: 'COMFENALCO', prefijoCaja: 'CM', prefijoConsignacion: 'CON', creadoEn: '2025-10-29T00:00:00Z' };
+            const H = { id: 'k_h', nombre: 'HOSPITAL GENERAL DE MEDELLÍN LUZ CASTRO', prefijoCaja: 'HGM', prefijoConsignacion: 'CON', creadoEn: '2026-08-01T00:00:00Z' };
+            let r = ContratoRepo.repartirPrefijos([H, A], {
+              prefijoCaja: [{ contratoId: 'k_a', numero: 'CM-2026-00001' }, { contratoId: 'k_h', numero: 'HGM-2026-00027' }],
+              prefijoConsignacion: [{ contratoId: 'k_a', numero: 'CON-2026-0001' }] });
+            Pruebas.igual(r.cambios.map(x => x.nombre + ' ' + x.campo + ' ' + x.antes + '→' + x.despues).join(' | '),
+              'HOSPITAL GENERAL DE MEDELLÍN LUZ CASTRO prefijoConsignacion CON→HGMC',
+              'Sólo el hospital cambia, y sólo su prefijo de consignaciones: HGMC');
+            Pruebas.igual(r.contratos.find(k => k.id === 'k_a').prefijoConsignacion, 'CON', 'COMFENALCO conserva el suyo');
+            Pruebas.igual(H.prefijoConsignacion, 'CON', 'Sin tocar los objetos recibidos: sólo propone');
+
+            /* Lo conserva quien ya tiene números emitidos con él, aunque sea el más nuevo. */
+            r = ContratoRepo.repartirPrefijos([
+              { id: 'k_b', nombre: 'VIEJO SIN USO', prefijoCaja: 'ZQ', prefijoConsignacion: 'ZQC', creadoEn: '2020-01-01' },
+              { id: 'k_c', nombre: 'NUEVO CON USO', prefijoCaja: 'ZQ', prefijoConsignacion: 'NCC', creadoEn: '2026-01-01' }
+            ], { prefijoCaja: [{ contratoId: 'k_c', numero: 'ZQ-2026-00001' }], prefijoConsignacion: [] });
+            Pruebas.igual(r.cambios.map(x => x.contratoId + ':' + x.despues).join(), 'k_b:VSU',
+              'Cambia el que no ha emitido nada con ese prefijo, con sus iniciales');
+
+            /* Varios a la vez, y la sugerencia no puede pisar la de un tercero. */
+            r = ContratoRepo.repartirPrefijos([
+              { id: 'd1', nombre: 'UNO', prefijoCaja: 'D1', prefijoConsignacion: 'CON', creadoEn: '2020' },
+              { id: 'd2', nombre: 'DOS', prefijoCaja: 'D2', prefijoConsignacion: 'CON', creadoEn: '2021' },
+              { id: 'd3', nombre: 'TRES', prefijoCaja: 'D3', prefijoConsignacion: 'D2C', creadoEn: '2022' },
+              { id: 'd4', nombre: 'CUATRO', prefijoCaja: 'D4', creadoEn: '2023' }
+            ], {});
+            const finales = r.contratos.map(k => ContratoRepo.prefijoDe(k, 'prefijoConsignacion'));
+            Pruebas.igual(new Set(finales).size, 4, 'Al final ninguno comparte: ' + finales.join(', '));
+            Pruebas.igual(r.contratos.find(k => k.id === 'd1').prefijoConsignacion, 'CON', 'El más antiguo conserva «CON»');
+            Pruebas.igual(r.contratos.find(k => k.id === 'd2').prefijoConsignacion, 'D2C2', 'Y el que chocaría con un tercero toma otro');
+            Pruebas.igual(r.contratos.find(k => k.id === 'd4').prefijoConsignacion, 'D4C', 'Uno sin prefijo guardado cuenta como «CON»');
+
+            /* En la base: se guarda, queda en memoria y la segunda vez no hace nada. */
+            const L1 = Modelo.contrato({ nombre: 'LEGADO PRIMERO', prefijoCaja: 'LG1', prefijoConsignacion: 'LGC' });
+            L1.creadoEn = '2019-01-01T00:00:00Z';
+            const L2 = Modelo.contrato({ nombre: 'LEGADO SEGUNDO', prefijoCaja: 'LG2', prefijoConsignacion: 'LGC' });
+            for (const k of [L1, L2]) { await db.put('contratos', k); Cache.contratos.set(k.id, k); }
+            try {
+              const hechos = await ContratoRepo.repararPrefijos();
+              Pruebas.igual(hechos.map(x => x.contratoId + ':' + x.despues).join(), L2.id + ':LG2C',
+                'Se repara el que compartía, y nada más de la base');
+              Pruebas.igual((await db.get('contratos', L2.id)).prefijoConsignacion, 'LG2C', 'Queda guardado');
+              Pruebas.igual(ContratoRepo.get(L2.id).prefijoConsignacion, 'LG2C', 'Y el programa ya lo usa');
+              Pruebas.igual((await ContratoRepo.repararPrefijos()).length, 0, 'La segunda vez no hay nada que hacer');
+            } finally {
+              for (const k of [L1, L2]) { await db.remove('contratos', k.id); Cache.contratos.delete(k.id); }
+            }
+
+            /* Y de verdad corre al abrir el programa: un arranque completo sobre
+               una base aparte, con un contrato como quedó el hospital. */
+            const dbAntes = db;
+            const cacheAntes = { config: Cache.config, contratos: Cache.contratos, personas: Cache.personas,
+                                 municipios: Cache.municipios, categorias: Cache.categorias };
+            try {
+              const aparte = new IndexedDBAdapter('dacm_arranque_' + Date.now(), 1);
+              await aparte.init();
+              db = aparte;
+              Cache.contratos = new Map(); Cache.personas = new Map(); Cache.municipios = new Map(); Cache.categorias = new Map();
+              await Semillas.aplicar(true);
+              await Cache.cargar();
+              const primero = ContratoRepo.todos()[0];
+              const hosp = Modelo.contrato({ nombre: 'HOSPITAL DEL ARRANQUE', prefijoCaja: 'HDA',
+                prefijoConsignacion: primero.prefijoConsignacion });
+              await db.put('contratos', hosp);
+              Semillas.avisos = [];
+              await Semillas.aplicar(false);
+              Pruebas.igual((await db.get('contratos', hosp.id)).prefijoConsignacion, 'HDAC', 'Al arrancar, el contrato queda con su prefijo propio');
+              Pruebas.igual((await db.get('contratos', primero.id)).prefijoConsignacion, primero.prefijoConsignacion, 'Y el primero no cambia');
+              Pruebas.ok(Semillas.avisos.some(x => /HOSPITAL DEL ARRANQUE/.test(x) && /«HDAC»/.test(x)), 'Y se deja el aviso para contarlo al entrar');
+            } finally {
+              db = dbAntes; Semillas.avisos = [];
+              Object.assign(Cache, cacheAntes);
+            }
+          } },
+
+        { nombre: 'CRÍTICO · al crear un contrato los prefijos se proponen y se comprueban', fn: async () => {
+            const pausa = ms => new Promise(r => setTimeout(r, ms));
+            const escribir = (el, v) => { el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); };
+            const otro = ContratoRepo.activo();
+            let nuevo = null;
+            try {
+              VistaContratos.modal(null); await pausa(30);
+              const m = [...document.querySelectorAll('#modals .modal-bd')].pop();
+              const nombre = m.querySelector('#kNombre'), pc = m.querySelector('#kPrefCaja'), pk = m.querySelector('#kPrefCon');
+              const btn = m.querySelector('#kGuardar'), aviso = m.querySelector('#kPrefAviso');
+              Pruebas.ok(btn.disabled, 'Sin prefijos todavía no deja guardar');
+              escribir(nombre, 'Hospital Prueba Norte Sur');
+              Pruebas.igual(pc.value, 'HPNS', 'Al escribir el nombre se propone el prefijo de cajas');
+              Pruebas.igual(pk.value, 'HPNSC', 'Y el de consignaciones, armado con el de cajas');
+              Pruebas.ok(/HPNS-\d{4}-00001/.test(aviso.textContent) && /HPNSC-\d{4}-0001/.test(aviso.textContent) && !btn.disabled,
+                'Enseña cómo quedarán los números y deja guardar');
+              escribir(pk, otro.prefijoConsignacion.toLowerCase());
+              Pruebas.ok(btn.disabled && /ya lo usa/.test(aviso.textContent) && aviso.textContent.includes(otro.nombre),
+                'El prefijo de otro contrato se avisa, nombrándolo, y no deja guardar');
+              escribir(pk, 'HPNSC');
+              escribir(pc, 'hpx');
+              escribir(nombre, 'Hospital Prueba Norte Sur Este');
+              Pruebas.igual(pc.value, 'hpx', 'Lo escrito a mano ya no lo cambia el nombre');
+              Pruebas.igual(pk.value, 'HPNSC', 'Tampoco el de consignaciones escrito a mano');
+              btn.click(); await pausa(200);
+              nuevo = ContratoRepo.porNombre('Hospital Prueba Norte Sur Este');
+              Pruebas.ok(nuevo && nuevo.prefijoCaja === 'HPX' && nuevo.prefijoConsignacion === 'HPNSC',
+                'Se guarda con sus prefijos, en mayúsculas');
+
+              VistaContratos.modal(otro); await pausa(30);
+              const e = [...document.querySelectorAll('#modals .modal-bd')].pop();
+              Pruebas.ok(!e.querySelector('#kGuardar').disabled && !/ya lo usa/.test(e.querySelector('#kPrefAviso').textContent),
+                'Al editar un contrato con sus prefijos de siempre, no se queja');
+            } finally {
+              for (let i = 0; i < 5 && document.querySelector('#modals .modal-bd'); i++) Modal.cerrarTop();
+              if (nuevo) await ContratoRepo.eliminar(nuevo.id);
+            }
+          } },
+
         { nombre: 'CRÍTICO · las estadísticas no mezclan contratos', fn: async ctx => {
             await ContratoRepo.cambiarActivo(ctx.ctrB.id);
             Analitica.invalidar();
@@ -15659,6 +16123,12 @@ const Pruebas = {
               .message.includes('cédula'), 'Traduce también la cédula');
             Pruebas.igual(Nube.traducirDuplicado('invalid input syntax for type date'), null,
               'Otros errores pasan de largo');
+            /* PostgreSQL llama «consignaciones_numero_key» al `unique` del número:
+               de ahí salía «ya existe un registro con ese key». */
+            const k = Nube.traducirDuplicado('duplicate key value violates unique constraint "consignaciones_numero_key"');
+            Pruebas.ok(/número/.test(k.message) && !/key/.test(k.message), 'El «_key» de PostgreSQL se entiende: ' + k.message);
+            const k2 = Nube.traducirDuplicado('duplicate key value violates unique constraint "aplicaciones_consignacion_id_caja_id_key"');
+            Pruebas.ok(!/key|_id/.test(k2.message), 'Y uno de varios campos no suelta jerga: ' + k2.message);
           } }
       ]
     },
@@ -18361,7 +18831,7 @@ const Pruebas = {
             const antesM = MunicipioRepo.todos().length;
             Pruebas.ok(antesM > 0, 'El contrato de origen tiene municipios');
             const otro = await ContratoRepo.guardar({ nombre: 'CONTRATO APARTE',
-              prefijoCaja: 'AP', prefijoConsignacion: 'APC' });
+              prefijoCaja: 'APT', prefijoConsignacion: 'APTC' });
             try {
               const propia = await PersonaRepo.guardar({ nombre: 'Persona Sólo Del Primero',
                 esSolicitante: 1 });
@@ -19400,6 +19870,8 @@ const Sesion = {
    §15  SEMILLAS Y ARRANQUE
    ========================================================================== */
 const Semillas = {
+  /** lo que el arranque arregló solo y conviene contar, una vez, al entrar */
+  avisos: [],
   MUNICIPIOS: [
     'Medellín', 'Apartadó', 'San Jerónimo', 'Andes', 'La Pintada', 'El Retiro',
     'El Carmen de Viboral', 'Caucasia', 'Guarne', 'Itagüí', 'Envigado'
@@ -19685,6 +20157,23 @@ const Semillas = {
       }
     }
 
+    /* --- reparación v8: cada contrato con sus propios prefijos ------------
+       El número es único en toda la base. Un contrato creado con el prefijo de
+       otro («CON» venía puesto de fábrica) no podía guardar su primera
+       consignación: el número ya lo tenía el otro. Se le da uno propio al que
+       no tiene números emitidos con ese prefijo. Es idempotente: si nadie
+       comparte, no lee nada más ni toca nada. */
+    {
+      const reparados = await ContratoRepo.repararPrefijos(leer);
+      if (reparados.length) {
+        olvidar('contratos');
+        this.avisos.push(...reparados.map(x => 'El contrato «' + x.nombre + '» numerará ' +
+          (x.campo === 'prefijoCaja' ? 'sus cajas menores' : 'sus consignaciones') + ' con «' + x.despues +
+          '», porque «' + x.antes + '» ya lo usa «' + x.dueno + '».'));
+        console.info('[reparación v8] prefijos propios:', reparados);
+      }
+    }
+
     /* auto-reparación: si no hay financiador por defecto, proponer el primero
        que no sea la propia empresa (el usuario puede cambiarlo en Configuración) */
     if (!cfg.financiadorPorDefectoId) {
@@ -19792,6 +20281,15 @@ async function arrancar() {
     registrarRutas();
     Router.iniciar();
     await Shell.refrescarConteos();
+
+    /* Lo que el arranque arregló por su cuenta se cuenta una vez. */
+    if (Semillas.avisos.length) {
+      Modal.alerta('Numeración ajustada',
+        '<ul style="margin:0;padding-left:18px">' + Semillas.avisos.map(a => '<li>' + esc(a) + '</li>').join('') + '</ul>' +
+        '<p style="margin:8px 0 0">Los números que ya existen no cambian. Si prefiere otro prefijo, puede cambiarlo en Contratos.</p>',
+        'info');
+      Semillas.avisos = [];
+    }
 
     /* la barra lateral y los conteos se refrescan ante cualquier cambio de datos */
     ['cajas:cambio', 'consignaciones:cambio', 'personas:cambio', 'documentos:cambio', 'import:finalizado', 'datos:reemplazados']
