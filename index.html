@@ -580,6 +580,17 @@ html[data-theme="dark"] .a-info{color:var(--info-500)}
   border-radius:50%;animation:rot .6s linear infinite;display:inline-block}
 @keyframes rot{to{transform:rotate(360deg)}}
 .progress{height:5px;background:var(--surface-3);border-radius:3px;overflow:hidden}
+/* Ventana de avance: adjuntar documentos. */
+.modal.prog .modal-b{padding-top:6px}
+.prog-txt{font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.progress.prog-barra{height:8px;margin-top:10px}
+.prog-barra i{transition:width .25s ease}
+.prog-pie{display:flex;justify-content:space-between;gap:10px;margin-top:7px;font-size:12px;color:var(--text-2)}
+.prog-pct{font-variant-numeric:tabular-nums;font-weight:600;color:var(--text)}
+.prog-nota{margin-top:12px;font-size:11.5px;color:var(--text-3)}
+/* Bloquea desde el primer instante, pero no se ve hasta pasado el retardo. */
+.modal-bd.prog-espera{background:transparent;backdrop-filter:none}
+.modal-bd.prog-espera .modal{opacity:0}
 .progress>i{display:block;height:100%;background:var(--accent);transition:width .2s}
 
 .mask{letter-spacing:.06em;font-family:var(--mono);font-size:11.5px}
@@ -656,6 +667,19 @@ html[data-theme="dark"] .marca.m-sinlegal{background:rgba(217,143,6,.18);color:#
 .comp-lista{display:flex;flex-direction:column;gap:2px}
 .comp-item{display:flex;align-items:center;gap:9px;padding:5px 7px;border-radius:7px;min-width:0}
 .comp-item:hover{background:var(--surface-2)}
+/* Marcar varios adjuntos para eliminarlos de una vez. */
+.docsel-todos{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;color:var(--text-2);
+  cursor:pointer;user-select:none;white-space:nowrap;margin-right:4px}
+.doc-chk-hueco{display:inline-block;width:15px;flex:0 0 15px}
+.docsel-barra{display:flex;align-items:center;gap:8px;min-height:28px;padding:0 7px 6px;margin-bottom:4px;
+  border-bottom:1px solid var(--border)}
+.comp-item .doc-chk{flex:0 0 auto}
+.comp-item.sel,.comp-item.sel:hover{background:var(--accent-soft)}
+table.tbl tr.sel td{background:var(--accent-soft)}
+.doc .doc-chk{position:absolute;top:7px;left:7px;z-index:2;width:17px;height:17px;opacity:0;transition:var(--t-fast)}
+.doc:hover .doc-chk,.doc .doc-chk:checked,.doc .doc-chk:focus-visible,[data-docsel].con-sel .doc .doc-chk{opacity:1}
+.doc.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.docsel-lista{margin:8px 0 10px;padding-left:18px;max-height:220px;overflow:auto}
 .comp-item .link{flex:1;min-width:0;background:none;border:0;padding:0;cursor:pointer;font-family:inherit}
 .comp-ic{flex:0 0 auto;width:22px;height:22px;border-radius:6px;display:grid;place-items:center;
   background:var(--ok-50);color:var(--ok-700)}
@@ -1229,8 +1253,18 @@ const Fecha = (() => {
      */
     diasEntre(desde, hasta) {
       if (!desde) return 0;
-      const a = new Date(desde.slice(0, 10) + 'T12:00:00');
-      const b = new Date((hasta || this.hoy()).slice(0, 10) + 'T12:00:00');
+      /* Un momento con hora (la copia de seguridad se guarda así, en hora
+         universal) se pasa primero al día de aquí. Cortarle los diez primeros
+         caracteres daba el día en Londres: una copia hecha a las 8 de la noche
+         contaba como de mañana, y el aviso salía un día tarde. */
+      const dia = s => {
+        const t = String(s);
+        if (t.length <= 10) return t;
+        const d = new Date(t);
+        return isNaN(d) ? t.slice(0, 10) : d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+      };
+      const a = new Date(dia(desde) + 'T12:00:00');
+      const b = new Date(dia(hasta || this.hoy()) + 'T12:00:00');
       if (isNaN(a) || isNaN(b)) return 0;
       return Math.round((b - a) / 86400000);
     },
@@ -4852,15 +4886,25 @@ const DocumentoService = {
     if (!file) throw new ErrorDominio('No se recibió archivo.', 'SIN_ARCHIVO');
     if (file.size > this.MAX_BYTES)
       throw new ErrorDominio('El archivo "' + file.name + '" supera 40 MB.', 'MUY_GRANDE');
-    /* Se achica ANTES de calcular la huella, para que la huella sea la de lo
-       que de verdad se guarda y el aviso de duplicados siga funcionando. */
+    /* Quien lo pida se entera de en qué paso va. Un fallo al avisar nunca
+       puede tumbar la subida. */
+    const aviso = fase => { try { if (meta.alProgreso) meta.alProgreso(fase); } catch (e) {} };
+    /* La huella es la del archivo TAL COMO SE ELIGIÓ, no la de la copia achicada
+       que se guarda. Sólo sirve para una cosa: saber si ese archivo ya está
+       adjunto. Antes se guardaba la de la copia achicada y se comparaba con la
+       del archivo elegido, y una foto nunca coincide con su versión achicada:
+       la misma foto de WhatsApp subida dos veces entraba dos veces. */
     const original = file;
+    const hash = await this.huella(file);
+    const yaEsta = async h => meta.sinRepetir && h && await this.duplicado(h, meta.cajaId, meta.consignacionId);
+    if (await yaEsta(hash)) throw this.errorDuplicado(file);
+    aviso('comprimiendo');
     const comp = await Compresor.procesar(file, meta.config);
     file = comp.file;
-    let hash = null;
-    if (file.size <= 12 * 1024 * 1024) {
-      try { hash = await U.hashHex(await file.arrayBuffer()); } catch {}
-    }
+    /* Los adjuntos subidos antes de este arreglo guardan la huella de su copia
+       achicada. Para que también cuenten, se compara además la copia achicada:
+       en el mismo navegador, achicar la misma foto da los mismos bytes. */
+    if (meta.sinRepetir && comp.comprimido && await yaEsta(await this.huella(file))) throw this.errorDuplicado(original);
     const doc = Modelo.documento({
       cajaId: meta.cajaId || null,
       consignacionId: meta.consignacionId || null,
@@ -4878,6 +4922,7 @@ const DocumentoService = {
       origen: meta.origen || Origen.MANUAL
     });
     doc.storageKey = doc.id;
+    aviso('subiendo');
     await db.transaccion(['documentos', 'archivos'], async tx => {
       tx.put('documentos', doc);
       tx.put('archivos', { docId: doc.id, blob: file, mime: doc.mime, nombre: file.name, tamano: file.size });
@@ -4923,11 +4968,55 @@ const DocumentoService = {
   async eliminar(docId) {
     const d = await db.get('documentos', docId);
     if (!d) return;
+    await this._quitar(d);
+  },
+  async _quitar(d) {
     await db.transaccion(['documentos', 'archivos'], async tx => {
-      tx.remove('documentos', docId); tx.remove('archivos', docId);
+      tx.remove('documentos', d.id); tx.remove('archivos', d.id);
     });
-    await Auditoria.registrar('documento', docId, 'ELIMINAR', { nombre: d.nombre, tipo: d.tipo });
+    await Auditoria.registrar('documento', d.id, 'ELIMINAR', { nombre: d.nombre, tipo: d.tipo });
     Bus.emit('documentos:cambio', null);
+  },
+  /**
+   * Borra varios documentos de una vez, cada uno con su archivo.
+   *
+   * Van de cuatro en cuatro: en la nube cada documento son dos viajes (la ficha
+   * y el archivo), y uno detrás de otro, veinte fotos eran veinte esperas
+   * seguidas. Si uno falla los demás siguen, y se devuelve cuáles no se
+   * pudieron. Uno que ya no existe —lo borró otra persona— cuenta como hecho:
+   * lo que se quería es que no estuviera.
+   *   alAvance({ hechos, total, nombre })  al terminar cada uno
+   */
+  async eliminarVarios(ids, alAvance) {
+    const lista = [...new Set((ids || []).filter(Boolean))];
+    const r = { ok: 0, fallos: [] };
+    if (!lista.length) return r;
+    const porId = new Map((await db.getMany('documentos', lista)).map(d => [d.id, d]));
+    const cola = lista.slice();
+    let hechos = 0;
+    const trabajar = async () => {
+      while (cola.length) {
+        const id = cola.shift();
+        const d = porId.get(id);
+        try { if (d) await this._quitar(d); r.ok++; }
+        catch (e) {
+          console.error(e);
+          r.fallos.push({ id, nombre: d ? d.nombre : id, motivo: (e && e.message) || String(e) });
+        }
+        hechos++;
+        try { if (alAvance) alAvance({ hechos, total: lista.length, nombre: d ? d.nombre : '' }); } catch (e) {}
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, lista.length) }, trabajar));
+    return r;
+  },
+  /** Huella SHA-256 de un archivo; null si no se pudo calcular. */
+  async huella(file) {
+    if (!file || file.size > this.MAX_BYTES) return null;
+    try { return await U.hashHex(await file.arrayBuffer()); } catch (e) { return null; }
+  },
+  errorDuplicado(file) {
+    return new ErrorDominio('"' + file.name + '" ya está adjunto (mismo contenido).', 'DUPLICADO');
   },
   /** detecta un archivo idéntico ya adjunto a la misma caja */
   async duplicado(hash, cajaId, consignacionId) {
@@ -5823,8 +5912,21 @@ const Modal = (() => {
     const m = pila.pop();
     if (m) { m.el.remove(); if (m.resolver) m.resolver(null); }
     if (!pila.length) document.removeEventListener('keydown', onKey);
+    soltarTeclado();
   }
   function onKey(e) { if (e.key === 'Escape') { e.stopPropagation(); cerrarTop(); } }
+  /** Hay abierta una ventana que no se puede esquivar (una tarea en curso). */
+  function hayBloqueante() { return pila.some(r => r.bloqueante); }
+  /* Con una tarea en curso, el teclado no hace nada: ni Esc, ni Ctrl+G, ni
+     Enter sobre un botón que hubiera quedado con el foco detrás de la ventana.
+     Va en la ventana y en captura, así llega antes que cualquier otro oyente. */
+  function bloquearTeclas(e) {
+    if (!hayBloqueante()) return;
+    e.preventDefault(); e.stopPropagation();
+  }
+  function soltarTeclado() {
+    if (!hayBloqueante()) window.removeEventListener('keydown', bloquearTeclas, true);
+  }
 
   function abrir(o) {
     const id = 'md_' + Ulid.generate().slice(-8);
@@ -5833,18 +5935,24 @@ const Modal = (() => {
       '<div class="modal ' + (o.ancho || '') + '" role="dialog" aria-modal="true">' +
       '<div class="modal-h"><div style="flex:1;min-width:0"><h3>' + esc(o.titulo) + '</h3>' +
       (o.subtitulo ? '<div class="mh-sub">' + esc(o.subtitulo) + '</div>' : '') + '</div>' +
-      '<button class="btn btn-ghost btn-icon btn-sm" data-cerrar>' + Icon('x', '', 15) + '</button></div>' +
+      (o.bloqueante ? '' : '<button class="btn btn-ghost btn-icon btn-sm" data-cerrar>' + Icon('x', '', 15) + '</button>') +
+      '</div>' +
       '<div class="modal-b">' + o.cuerpo + '</div>' +
       (o.pie === null ? '' : '<div class="modal-f">' + (o.pie || (
         '<button class="btn" data-cerrar>Cerrar</button>')) + '</div>') +
       '</div></div>';
     const el = elFrom(html);
     $('#modals').appendChild(el);
-    const reg = { el, resolver: null };
+    const reg = { el, resolver: null, bloqueante: Boolean(o.bloqueante) };
     pila.push(reg);
     if (pila.length === 1) document.addEventListener('keydown', onKey);
+    if (reg.bloqueante) {
+      window.addEventListener('keydown', bloquearTeclas, true);
+      // lo que tenía el foco detrás ya no puede recibir un Enter
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    }
     el.addEventListener('click', ev => {
-      if (ev.target === el && o.cerrarFuera !== false) cerrar(el);
+      if (ev.target === el && o.cerrarFuera !== false && !o.bloqueante) cerrar(el);
       if (ev.target.closest('[data-cerrar]')) cerrar(el);
     });
     /* Ningún botón de la ventana se dispara dos veces seguidas.
@@ -5891,6 +5999,7 @@ const Modal = (() => {
     if (i >= 0) { const m = pila.splice(i, 1)[0]; m.el.remove(); if (m.resolver) m.resolver(null); }
     else if (el) el.remove();
     if (!pila.length) document.removeEventListener('keydown', onKey);
+    soltarTeclado();
   }
   function confirmar(o) {
     return new Promise(res => {
@@ -5926,8 +6035,82 @@ const Modal = (() => {
       pie: '<button class="btn btn-primary" data-cerrar>Entendido</button>'
     });
   }
-  return { abrir, cerrar, cerrarTop, confirmar, alerta };
+  return { abrir, cerrar, cerrarTop, confirmar, alerta, hayBloqueante };
 })();
+
+/**
+ * Ventana de avance para tareas que tardan, como adjuntar muchos archivos.
+ *
+ * Antes se adjuntaba en silencio: el programa se quedaba pensando unos segundos
+ * sin decir nada y de pronto aparecía «adjuntado». Ahora sale una ventana que
+ * dice por qué archivo va, en qué paso está y cuánto falta, y que no se puede
+ * cerrar ni esquivar hasta que termina: tocar otra cosa a mitad —o cerrar la
+ * pestaña— dejaría archivos sin subir.
+ *
+ * La pantalla queda bloqueada desde el primer instante, pero la ventana sólo se
+ * VE si la tarea pasa de un cuarto de segundo: un archivo pequeño que sube al
+ * momento no hace parpadear nada. Y una vez vista, se queda al menos medio
+ * segundo, para que no aparezca y desaparezca como un destello.
+ */
+const Progreso = {
+  RETARDO: 250,
+  MINIMO: 500,
+  _ultima: null,
+  abrir(o) {
+    const opts = o || {};
+    const p = { total: Math.max(1, opts.total || 1), hechos: 0, nombre: '', fase: '', fraccion: 0,
+                fueVisible: false, visibleDesde: 0, cerrada: false };
+    const avisoSalida = e => { e.preventDefault(); e.returnValue = ''; return ''; };
+    window.addEventListener('beforeunload', avisoSalida);
+    const m = Modal.abrir({
+      titulo: opts.titulo || 'Trabajando…', ancho: 'narrow prog', bloqueante: true, pie: null,
+      cuerpo: '<div class="prog-txt">Preparando…</div>' +
+        '<div class="progress prog-barra"><i style="width:0%"></i></div>' +
+        '<div class="prog-pie"><span class="prog-fase"></span><span class="prog-pct">0 %</span></div>' +
+        '<div class="prog-nota">No cierre la pestaña hasta que termine.</div>'
+    });
+    m.classList.add('prog-espera');
+    const mostrar = setTimeout(() => {
+      if (p.cerrada) return;
+      m.classList.remove('prog-espera');
+      p.fueVisible = true; p.visibleDesde = Date.now();
+    }, this.RETARDO);
+    const pintar = () => {
+      const pct = Math.min(100, Math.round(((p.hechos + p.fraccion) / p.total) * 100));
+      const q = s => m.querySelector(s);
+      q('.prog-barra i').style.width = pct + '%';
+      q('.prog-txt').textContent = p.principal != null ? p.principal
+        : p.hechos >= p.total ? 'Terminando…'
+        : (p.total > 1 ? 'Archivo ' + (p.hechos + 1) + ' de ' + p.total + ' · ' : '') + p.nombre;
+      q('.prog-fase').textContent = p.fase;
+      q('.prog-pct').textContent = pct + ' %';
+    };
+    /** empieza con un archivo nuevo */
+    p.empezar = nombre => { p.nombre = nombre || ''; p.principal = null; p.fraccion = 0; p.fase = ''; pintar(); };
+    /** texto propio para la línea principal y la de abajo (p. ej. «3 de 12 eliminados») */
+    p.fijar = (principal, fase) => { p.principal = principal; p.fase = fase || ''; pintar(); };
+    /** paso dentro del archivo actual, con cuánto de él va hecho (0 a 1) */
+    p.enFase = (texto, fraccion) => { p.fase = texto || ''; if (fraccion != null) p.fraccion = fraccion; pintar(); };
+    /** el archivo actual ya terminó, bien o mal */
+    p.acabar = () => { p.hechos = Math.min(p.total, p.hechos + 1); p.fraccion = 0; pintar(); };
+    /** un último paso que no es de ningún archivo, p. ej. volver a pintar la caja */
+    p.rematar = texto => { p.hechos = p.total; p.fraccion = 0; p.fijar(texto, ''); };
+    p.cerrar = async () => {
+      if (p.cerrada) return;
+      p.cerrada = true;
+      clearTimeout(mostrar);
+      if (p.fueVisible) {
+        const falta = Progreso.MINIMO - (Date.now() - p.visibleDesde);
+        if (falta > 0) await new Promise(r => setTimeout(r, falta));
+      }
+      Modal.cerrar(m);
+      window.removeEventListener('beforeunload', avisoSalida);
+    };
+    p.el = m;
+    this._ultima = p;
+    return p;
+  }
+};
 
 /* --- Aviso emergente ------------------------------------------------------
    El `title` del navegador no es de fiar: tarda cerca de un segundo, no se ve
@@ -7875,6 +8058,10 @@ const VistaCaja = {
       : [];
     const esComprobante = d => d.tipo === TipoDocumento.COMPROBANTE_CONSIGNACION;
     const comprobantes = docs.filter(esComprobante).concat(docsCons.filter(esComprobante));
+    /* Los de la consignación se ven aquí, pero no se borran desde aquí: ese
+       comprobante puede estar pagando otras cajas a la vez. */
+    const compBorrable = d => d.cajaId === caja.id;
+    const hayCompBorrables = comprobantes.some(compBorrable);
     /* Todo lo que justifica en qué se gastó va junto: la factura del taller y
        los recibos que envía el líder prueban lo mismo. */
     const legalizacion = docs.filter(esDocLegalizacion);
@@ -8055,16 +8242,21 @@ const VistaCaja = {
            perdido entre los soportes de compra: es la prueba de que el dinero
            de ESTA caja se giró. */
         '<div class="divider"></div>' +
+        '<div data-docsel="comprobantes">' +
         '<div class="flex aic g8 mb8">' +
           '<b class="fs12">Comprobante de la transferencia</b>' +
           (comprobantes.length ? '<span class="pill np p-green">' + comprobantes.length + '</span>' : '') +
           '<span style="flex:1"></span>' +
+          (hayCompBorrables ? SeleccionDocs.todos() + SeleccionDocs.boton() : '') +
           '<button class="btn btn-sm" data-act="adjuntarComprobante">' + Icon('upload', '', 12) + 'Adjuntar</button>' +
           '<input type="file" id="inComprobante" multiple hidden>' +
         '</div>' +
         (comprobantes.length
           ? '<div class="comp-lista">' + comprobantes.map(d =>
               '<div class="comp-item">' +
+                (!hayCompBorrables ? '' : compBorrable(d) ? SeleccionDocs.casilla(d)
+                  : SeleccionDocs.hueco('Es de la consignación ' + ((conPorId.get(d.consignacionId) || {}).numero || '') +
+                      ': se elimina desde ella, porque puede estar pagando otras cajas.')) +
                 '<span class="comp-ic">' + Icon(U.esImagen(d.mime) ? 'eye' : 'file', '', 13) + '</span>' +
                 '<button class="link fs12 trunc" style="text-align:left" data-act="expVer" data-id="' + attr(d.id) +
                   '" title="' + attr(d.nombre) + '">' + esc(d.nombre) + '</button>' +
@@ -8077,6 +8269,7 @@ const VistaCaja = {
               '</div>').join('') + '</div>'
           : '<div class="fs12 txt-3">Todavía no hay comprobante de la transferencia de esta caja. ' +
             'Adjunte aquí la captura o el PDF que le envíe quien consignó.</div>') +
+        '</div>' +
         '</div></div>' +
 
       /* Dos tarjetas, no una: la factura del taller llega ANTES de girar y
@@ -8168,8 +8361,8 @@ const VistaCaja = {
     if (inC) inC.onchange = async () => {
       const files = [...inC.files];
       if (!files.length) return;
-      await Expediente.subir(files, { cajaId: caja.id, tipo: TipoDocumento.COMPROBANTE_CONSIGNACION });
-      VistaCaja.render(cont, params);
+      await Expediente.subir(files, { cajaId: caja.id, tipo: TipoDocumento.COMPROBANTE_CONSIGNACION },
+        { alTerminar: () => VistaCaja.render(cont, params) });
     };
 
     /* Igual que el comprobante: se adjunta a ESTA caja y ya clasificado según
@@ -8180,8 +8373,8 @@ const VistaCaja = {
       el.onchange = async () => {
         const files = [...el.files];
         if (!files.length) return;
-        await Expediente.subir(files, { cajaId: caja.id, tipo: tipo });
-        VistaCaja.render(cont, params);
+        await Expediente.subir(files, { cajaId: caja.id, tipo: tipo },
+          { alTerminar: () => VistaCaja.render(cont, params) });
       };
     };
     engancharDoc('inLegalizacion', TipoDocumento.SOPORTE_COMPRA);
@@ -8195,7 +8388,7 @@ const VistaCaja = {
    * evita que se separen con el tiempo.
    */
   tarjetaDocs(o) {
-    return '<div class="card mb16"><div class="card-h"><h3>' + esc(o.destino.titulo) + '</h3>' +
+    return '<div class="card mb16" data-docsel="legalizacion"><div class="card-h"><h3>' + esc(o.destino.titulo) + '</h3>' +
       '<span class="ch-sub">' + esc(o.destino.cuando) +
         (o.docs.length ? ' · ' + o.docs.length + ' archivo(s)' : '') + '</span>' +
       '<div class="ch-act">' +
@@ -8204,8 +8397,13 @@ const VistaCaja = {
         '<input type="file" id="' + attr(o.input) + '" multiple hidden>' +
       '</div></div><div class="card-b">' +
       (o.docs.length
-        ? '<div class="comp-lista">' + o.docs.map(d =>
-            '<div class="comp-item">' +
+        /* «Todos» y «Eliminar» van en su propia barra, sobre la lista y a la
+           altura de las casillas: en la cabecera, al aparecer el botón, el
+           título se apretaba y la tarjeta cambiaba de alto. */
+        ? '<div class="docsel-barra">' + SeleccionDocs.todos() + '<span style="flex:1"></span>' +
+            SeleccionDocs.boton() + '</div>' +
+          '<div class="comp-lista">' + o.docs.map(d =>
+            '<div class="comp-item">' + SeleccionDocs.casilla(d) +
               '<span class="comp-ic">' + Icon(U.esImagen(d.mime) ? 'eye' : 'file', '', 13) + '</span>' +
               '<button class="link fs12 trunc" style="text-align:left" data-act="expVer" data-id="' + attr(d.id) +
                 '" title="' + attr(d.nombre) + '">' + esc(d.nombre) + '</button>' +
@@ -8355,6 +8553,93 @@ function detalleNuevo() {
            elemento: '', descripcion: '', valor: 0, rol: null };
 }
 
+/**
+ * Marcar varios adjuntos y eliminarlos de una vez, en vez de uno por uno.
+ *
+ * Cada lista que lo permite es un contenedor con `data-docsel`: dentro van las
+ * casillas de sus documentos, la de «Todos» y el botón «Eliminar (n)», que sólo
+ * aparece cuando hay algo marcado. Cada lista es independiente: marcar en la
+ * legalización no toca lo marcado en los comprobantes. Lo marcado vive en las
+ * propias casillas, así que no queda nada viejo recordado cuando la vista se
+ * vuelve a pintar.
+ */
+const SeleccionDocs = {
+  casilla(d) {
+    return '<input type="checkbox" class="doc-chk" data-act="docSel" data-id="' + attr(d.id) +
+      '" aria-label="Seleccionar ' + attr(d.nombre) + '">';
+  },
+  /** sitio vacío del ancho de una casilla, para lo que no se puede borrar desde aquí */
+  hueco(motivo) { return '<span class="doc-chk-hueco" data-tip="' + attr(motivo) + '"></span>'; },
+  todos(texto) {
+    return '<label class="docsel-todos" data-tip="Marcar todos los de esta lista">' +
+      '<input type="checkbox" data-act="docSelTodos" aria-label="Seleccionar todos">' +
+      (texto === '' ? '' : '<span>' + esc(texto || 'Todos') + '</span>') + '</label>';
+  },
+  boton() {
+    return '<button class="btn btn-sm btn-danger hidden" data-act="docEliminarSel">' +
+      Icon('trash', '', 12) + 'Eliminar <span class="docsel-n"></span></button>';
+  },
+  marcados(grupo) {
+    return grupo ? [...grupo.querySelectorAll('input[data-act="docSel"]:checked')].map(c => c.dataset.id) : [];
+  },
+  refrescar(grupo) {
+    if (!grupo) return;
+    const chks = [...grupo.querySelectorAll('input[data-act="docSel"]')];
+    const n = chks.filter(c => c.checked).length;
+    chks.forEach(c => { const f = c.closest('.doc, .comp-item, tr'); if (f) f.classList.toggle('sel', c.checked); });
+    grupo.querySelectorAll('input[data-act="docSelTodos"]').forEach(t => {
+      t.checked = n > 0 && n === chks.length;
+      t.indeterminate = n > 0 && n < chks.length;
+    });
+    grupo.querySelectorAll('[data-act="docEliminarSel"]').forEach(b => {
+      b.classList.toggle('hidden', n === 0);
+      const s = b.querySelector('.docsel-n'); if (s) s.textContent = '(' + n + ')';
+    });
+    grupo.classList.toggle('con-sel', n > 0);
+  },
+  marcarTodos(grupo, si) {
+    if (!grupo) return;
+    grupo.querySelectorAll('input[data-act="docSel"]').forEach(c => { c.checked = si; });
+    this.refrescar(grupo);
+  },
+  async eliminar(grupo, recargar) {
+    const ids = this.marcados(grupo);
+    if (!ids.length) return;
+    const docs = await db.getMany('documentos', ids);
+    if (!docs.length) { await recargar(); return; }
+    const n = docs.length;
+    const muestra = docs.slice(0, 8);
+    if (!await Modal.confirmar({
+      titulo: n === 1 ? 'Eliminar documento' : 'Eliminar ' + n + ' documentos',
+      peligro: true, textoOk: n === 1 ? 'Eliminar' : 'Eliminar los ' + n,
+      html: (n === 1 ? 'Se eliminará del expediente:' : 'Se eliminarán del expediente estos ' + n + ' documentos:') +
+        '<ul class="docsel-lista">' + muestra.map(d => '<li>' + esc(d.nombre) + '</li>').join('') +
+        (n > muestra.length ? '<li class="txt-3">y ' + (n - muestra.length) + ' más…</li>' : '') + '</ul>' +
+        'Esta acción no se puede deshacer.'
+    })) return;
+    const prog = Progreso.abrir({ total: n, titulo: n === 1 ? 'Eliminando documento' : 'Eliminando ' + n + ' documentos' });
+    let r = { ok: 0, fallos: [] };
+    try {
+      prog.fijar('0 de ' + n + ' eliminados', 'Eliminando…');
+      r = await DocumentoService.eliminarVarios(docs.map(d => d.id), a => {
+        prog.acabar();
+        prog.fijar(a.hechos + ' de ' + a.total + ' eliminados', a.nombre);
+      });
+      prog.rematar('Actualizando la vista…');
+      try { await recargar(); } catch (e) { console.error(e); }
+    } finally { await prog.cerrar(); }
+    if (r.fallos.length) {
+      Modal.alerta(r.fallos.length === 1 ? 'No se pudo eliminar un documento'
+          : 'No se pudieron eliminar ' + r.fallos.length + ' documentos',
+        (r.ok ? '<p style="margin:0 0 6px">Los demás sí se eliminaron.</p>' : '') +
+        '<ul style="margin:0;padding-left:18px">' +
+        r.fallos.map(x => '<li><b>' + esc(x.nombre) + '</b>: ' + esc(x.motivo) + '</li>').join('') + '</ul>', 'err');
+    }
+    if (r.ok) Toast.ok(r.ok === 1 ? 'Documento eliminado.' : r.ok + ' documentos eliminados.');
+    Shell.refrescarConteos();
+  }
+};
+
 const Expediente = {
   async montar(el, cfg) {
     if (!el) return;
@@ -8368,10 +8653,12 @@ const Expediente = {
     const opciones = cfg.opciones ||
       Object.keys(TIPO_DOC_META).map(t => ({ tipo: t, titulo: TIPO_DOC_META[t].label }));
     el.className = 'card';
+    el.setAttribute('data-docsel', 'expediente');
     el.innerHTML =
       '<div class="card-h"><h3>' + esc(cfg.titulo || 'Expediente documental') + '</h3>' +
       '<span class="ch-sub">' + docs.length + ' documento(s) · ' + Txt.bytes(U.sumBy(docs, d => d.tamano)) + '</span>' +
       '<div class="ch-act">' +
+      (docs.length ? SeleccionDocs.todos() + SeleccionDocs.boton() : '') +
       '<select class="inp" id="expTipo" style="height:28px;width:auto;font-size:12px">' +
       opciones.map(o => '<option value="' + attr(o.tipo) + '"' +
         (o.tipo === (cfg.tipoPorDefecto || opciones[0].tipo) ? ' selected' : '') + '>' +
@@ -8392,8 +8679,7 @@ const Expediente = {
       await Expediente.subir(files, {
         cajaId: cfg.cajaId, consignacionId: cfg.consignacionId,
         tipo: $('#expTipo', el).value
-      });
-      if (cfg.recargar) cfg.recargar(); else Expediente.montar(el, Object.assign({}, cfg, { docs: null }));
+      }, { alTerminar: () => cfg.recargar ? cfg.recargar() : Expediente.montar(el, Object.assign({}, cfg, { docs: null })) });
     });
     // miniaturas de imágenes (lazy, tras el pintado)
     for (const d of docs) {
@@ -8407,7 +8693,7 @@ const Expediente = {
   tarjeta(d) {
     const ext = (d.extension || U.extension(d.nombreArchivo) || '?').toUpperCase();
     const meta = TIPO_DOC_META[d.tipo] || TIPO_DOC_META.OTRO;
-    return '<div class="doc" data-doc="' + attr(d.id) + '">' +
+    return '<div class="doc" data-doc="' + attr(d.id) + '">' + SeleccionDocs.casilla(d) +
       '<div class="doc-th" data-th="' + attr(d.id) + '" data-act="expVer" data-id="' + attr(d.id) + '">' +
       (U.esImagen(d.mime) ? '<span class="spin"></span>' :
         U.esPdf(d.mime) ? Icon('doc') + '<span class="dt-ext" style="position:absolute;bottom:6px">PDF</span>' :
@@ -8431,22 +8717,66 @@ const Expediente = {
       '</div></div>';
   },
 
-  async subir(files, meta) {
-    let ok = 0, dup = 0, err = 0;
-    for (const f of files) {
-      try {
-        const buf = f.size <= 12 * 1024 * 1024 ? await f.arrayBuffer() : null;
-        const hash = buf ? await U.hashHex(buf) : null;
-        if (hash) {
-          const d = await DocumentoService.duplicado(hash, meta.cajaId, meta.consignacionId);
-          if (d) { dup++; continue; }
-        }
-        await DocumentoService.adjuntar(f, meta);
-        ok++;
-      } catch (e) { console.error(e); err++; Toast.err('No se pudo adjuntar "' + f.name + '": ' + e.message); }
+  /**
+   * Adjunta los archivos enseñando el avance en una ventana que no deja tocar
+   * nada hasta que termina.
+   *   opciones.alTerminar  lo que hay que hacer antes de soltar la pantalla
+   *                        (volver a pintar la caja): así lo adjuntado ya se ve
+   *                        cuando la ventana se va.
+   *   opciones.progreso    una ventana ya abierta por quien llama, que sube
+   *                        varios lotes seguidos. Entonces no se abre otra ni se
+   *                        avisa del resultado: eso lo hace quien llama, una vez.
+   */
+  async subir(files, meta, opciones) {
+    const lista = [...(files || [])];
+    const o = opciones || {};
+    const r = { ok: 0, dup: 0, fallos: [] };
+    if (!lista.length) return r;
+    const prog = o.progreso || Progreso.abrir({ total: lista.length,
+      titulo: lista.length === 1 ? 'Adjuntando documento' : 'Adjuntando ' + lista.length + ' documentos' });
+    try {
+      for (const f of lista) {
+        prog.empezar(f.name);
+        try {
+          prog.enFase('Revisando si ya estaba adjunto…', 0.05);
+          /* Si ya está, se omite: lo decide el servicio, que es el que sabe
+             comparar tanto el archivo elegido como su copia achicada. */
+          await DocumentoService.adjuntar(f, Object.assign({}, meta, {
+            sinRepetir: true,
+            alProgreso: fase => fase === 'subiendo'
+              ? prog.enFase('Subiendo al servidor…', 0.5)
+              : prog.enFase('Preparando el archivo…', 0.15)
+          }));
+          r.ok++;
+        } catch (e) {
+          if (e && e.codigo === 'DUPLICADO') { r.dup++; continue; }
+          console.error(e);
+          r.fallos.push({ nombre: f.name, motivo: (e && e.message) || String(e) });
+        } finally { prog.acabar(); }
+      }
+      if (o.alTerminar) {
+        prog.rematar('Actualizando la vista…');
+        try { await o.alTerminar(); } catch (e) { console.error(e); }
+      }
+    } finally { if (!o.progreso) await prog.cerrar(); }
+    if (!o.progreso) this.informar(r);
+    return r;
+  },
+
+  /** Cuenta lo que pasó al adjuntar, cuando la pantalla ya está libre. */
+  informar(r) {
+    /* Los que fallan, juntos y con su motivo, en una ventana que no se pierde:
+       con muchos archivos, un aviso suelto por cada uno pasaba desapercibido. */
+    if (r.fallos.length) {
+      Modal.alerta(r.fallos.length === 1 ? 'No se pudo adjuntar un archivo'
+          : 'No se pudieron adjuntar ' + r.fallos.length + ' archivos',
+        (r.ok ? '<p style="margin:0 0 6px">Los demás sí se adjuntaron.</p>' : '') +
+        '<ul style="margin:0;padding-left:18px">' +
+        r.fallos.map(x => '<li><b>' + esc(x.nombre) + '</b>: ' + esc(x.motivo) + '</li>').join('') + '</ul>' +
+        '<p style="margin:6px 0 0">Puede volver a intentarlo con esos archivos.</p>', 'err');
     }
-    if (ok) Toast.ok(ok + ' documento(s) adjuntado(s).');
-    if (dup) Toast.warn(dup + ' archivo(s) omitido(s) por estar ya adjuntos (contenido idéntico).');
+    if (r.ok) Toast.ok(r.ok === 1 ? 'Documento adjuntado.' : r.ok + ' documentos adjuntados.');
+    if (r.dup) Toast.warn(r.dup + ' archivo(s) omitido(s) por estar ya adjuntos (contenido idéntico).');
     Shell.refrescarConteos();
   },
 
@@ -8510,7 +8840,10 @@ const Expediente = {
         Toast.ok('Documento eliminado.');
         Shell.refrescarConteos();
         recargar();
-      }
+      },
+      docSel: el => SeleccionDocs.refrescar(el.closest('[data-docsel]')),
+      docSelTodos: el => SeleccionDocs.marcarTodos(el.closest('[data-docsel]'), el.checked),
+      docEliminarSel: el => SeleccionDocs.eliminar(el.closest('[data-docsel]'), recargar)
     };
   }
 };
@@ -9139,8 +9472,17 @@ const VistaCajaForm = {
             if (!porTipo.has(a.tipo)) porTipo.set(a.tipo, []);
             porTipo.get(a.tipo).push(a.file);
           }
-          for (const [tipo, files] of porTipo.entries())
-            await Expediente.subir(files, { cajaId: caja.id, tipo: tipo });
+          /* Una sola ventana para todos los grupos, y un solo aviso al final. */
+          const prog = Progreso.abrir({ total: adj.length,
+            titulo: adj.length === 1 ? 'Adjuntando documento' : 'Adjuntando ' + adj.length + ' documentos' });
+          const total = { ok: 0, dup: 0, fallos: [] };
+          try {
+            for (const [tipo, files] of porTipo.entries()) {
+              const r = await Expediente.subir(files, { cajaId: caja.id, tipo: tipo }, { progreso: prog });
+              total.ok += r.ok; total.dup += r.dup; total.fallos.push(...r.fallos);
+            }
+          } finally { await prog.cerrar(); }
+          Expediente.informar(total);
           e.adjuntos = [];
         } catch (err2) {
           Toast.warn('La caja se guardó, pero no se pudieron adjuntar los archivos. ' +
@@ -10890,14 +11232,15 @@ const VistaExpediente = {
       '<option value="consignacion"' + (f.vinculo === 'consignacion' ? ' selected' : '') + '>Consignaciones</option>' +
       '<option value="huerfano"' + (f.vinculo === 'huerfano' ? ' selected' : '') + '>Sin vínculo</option></select></div>' +
       '</div></div></div>' +
-      '<div class="card"><div class="card-b flush"><div class="tbl-wrap"><table class="tbl">' +
-      '<thead><tr><th>Documento</th><th>Tipo</th><th>Vinculado a</th><th class="num">Tamaño</th>' +
-      '<th>Cargado</th><th>Origen</th><th></th></tr></thead><tbody>' +
+      '<div class="card" data-docsel="expediente-general"><div class="card-b flush"><div class="tbl-wrap"><table class="tbl">' +
+      '<thead><tr><th style="width:34px">' + (lista.length ? SeleccionDocs.todos('') : '') + '</th>' +
+      '<th>Documento</th><th>Tipo</th><th>Vinculado a</th><th class="num">Tamaño</th>' +
+      '<th>Cargado</th><th>Origen</th><th class="nowrap" style="text-align:right">' + SeleccionDocs.boton() + '</th></tr></thead><tbody>' +
       (lista.length ? lista.slice(0, 500).map(d => {
         const c = d.cajaId ? v.cajaPorId.get(d.cajaId) : null;
         const cn = d.consignacionId ? consPorId.get(d.consignacionId) : null;
         const meta = TIPO_DOC_META[d.tipo] || TIPO_DOC_META.OTRO;
-        return '<tr><td><div class="flex aic g8">' + Icon(U.esImagen(d.mime) ? 'file' : 'doc', 'txt-3', 15) +
+        return '<tr><td>' + SeleccionDocs.casilla(d) + '</td><td><div class="flex aic g8">' + Icon(U.esImagen(d.mime) ? 'file' : 'doc', 'txt-3', 15) +
           '<div style="min-width:0"><div class="trunc" style="max-width:280px"><b>' + esc(d.nombre) + '</b></div>' +
           (d.descripcion ? '<div class="fs11 txt-3 trunc" style="max-width:280px">' + esc(d.descripcion) + '</div>' : '') +
           '</div></div></td>' +
@@ -10914,7 +11257,7 @@ const VistaExpediente = {
           '<button class="btn btn-sm btn-ghost btn-icon" data-act="expEliminar" data-id="' + attr(d.id) + '">' + Icon('trash', '', 13) + '</button>' +
           '</td></tr>';
       }).join('')
-        : '<tr><td colspan="7">' + Comp.vacio({ icono: 'folder', titulo: 'Sin documentos',
+        : '<tr><td colspan="8">' + Comp.vacio({ icono: 'folder', titulo: 'Sin documentos',
             texto: 'Adjunte soportes desde el detalle de cada caja menor o consignación.' }) + '</td></tr>') +
       '</tbody></table></div>' +
       (lista.length > 500 ? '<div class="card-f">Mostrando los 500 más recientes de ' + lista.length + '.</div>' : '') +
@@ -16641,6 +16984,131 @@ const Pruebas = {
             Pruebas.igual(r.map(c => c.id).join(','), 'x2', 'Sólo la que tiene saldo');
           } },
 
+        { nombre: 'CRÍTICO · una ventana de tarea en curso no se puede cerrar ni esquivar', fn: async () => {
+            const detras = document.createElement('button');
+            let pulsado = false;
+            detras.onclick = () => { pulsado = true; };
+            document.body.appendChild(detras);
+            detras.focus();
+            const m = Modal.abrir({ titulo: 'Tarea en curso', cuerpo: '<p>trabajando</p>', pie: null, bloqueante: true });
+            const irOrig = Router.ir;
+            let navego = false;
+            Router.ir = () => { navego = true; };
+            try {
+              Pruebas.ok(!m.querySelector('[data-cerrar]'), 'No tiene botón para cerrarla');
+              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+              Pruebas.ok(document.body.contains(m), 'Esc no la cierra');
+              m.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+              Pruebas.ok(document.body.contains(m), 'Pinchar fuera tampoco');
+              Pruebas.ok(Modal.hayBloqueante(), 'El programa sabe que hay una tarea en curso');
+              const g = new KeyboardEvent('keydown', { key: 'g', ctrlKey: true, bubbles: true, cancelable: true });
+              document.dispatchEvent(g);
+              Pruebas.ok(!navego, 'Ctrl+G no saca de la pantalla a mitad');
+              Pruebas.ok(document.activeElement !== detras, 'Lo que tenía el foco detrás lo pierde');
+              const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+              detras.dispatchEvent(enter);
+              Pruebas.ok(enter.defaultPrevented && !pulsado, 'Y un Enter no pulsa nada de lo de detrás');
+            } finally { Router.ir = irOrig; Modal.cerrar(m); detras.remove(); }
+            Pruebas.ok(!Modal.hayBloqueante(), 'Al terminar, la pantalla queda libre');
+            const k = new KeyboardEvent('keydown', { key: 'x', bubbles: true, cancelable: true });
+            document.dispatchEvent(k);
+            Pruebas.ok(!k.defaultPrevented, 'Y el teclado vuelve a funcionar');
+          } },
+
+        { nombre: 'CRÍTICO · mientras se adjuntan documentos se ve el avance y no se puede tocar nada', fn: async () => {
+            /* Antes el programa se quedaba pensando en silencio unos segundos y
+               de pronto decía «adjuntado». */
+            const origAdj = DocumentoService.adjuntar, origDup = DocumentoService.duplicado;
+            const esperas = [];
+            let sinEsperar = false;
+            DocumentoService.duplicado = async () => null;
+            DocumentoService.adjuntar = async (f, meta) => {
+              if (meta.alProgreso) meta.alProgreso('subiendo');
+              if (!sinEsperar) await new Promise(r => esperas.push(r));
+              return { id: 'doc_prueba' };
+            };
+            const files = [1, 2, 3].map(i => new File([new Uint8Array([i, 7])], 'soporte-' + i + '.jpg', { type: 'image/jpeg' }));
+            let repintada = false, terminado = false;
+            const tarea = Expediente.subir(files, { cajaId: 'cm_prueba', tipo: TipoDocumento.SOPORTE_COMPRA },
+                { alTerminar: async () => { await new Promise(r => setTimeout(r, 30));
+                    repintada = Modal.hayBloqueante() && document.body.contains(Progreso._ultima.el); } })
+              .then(r => { terminado = true; return r; });
+            const pausa = ms => new Promise(r => setTimeout(r, ms));
+            const soltar = async () => { while (!esperas.length) await pausa(10); esperas.shift()(); await pausa(40); };
+            let ventana = null;
+            try {
+              await pausa(Progreso.RETARDO + 150);
+              ventana = Progreso._ultima && Progreso._ultima.el;
+              Pruebas.ok(ventana && document.body.contains(ventana) && !ventana.classList.contains('prog-espera'),
+                'Sale la ventana de avance');
+              const texto = () => ventana.textContent;
+              Pruebas.ok(/Adjuntando 3 documentos/.test(texto()), 'Dice qué está haciendo');
+              Pruebas.ok(/Archivo 1 de 3/.test(texto()) && /soporte-1\.jpg/.test(texto()), 'Por cuál va, y su nombre');
+              Pruebas.ok(/Subiendo al servidor/.test(texto()), 'Y en qué paso está');
+              Pruebas.ok(Modal.hayBloqueante(), 'La pantalla queda bloqueada mientras dura');
+              const ev = new Event('beforeunload', { cancelable: true });
+              window.dispatchEvent(ev);
+              Pruebas.ok(ev.defaultPrevented, 'Si se intenta cerrar la pestaña, el navegador avisa');
+              await soltar();
+              Pruebas.ok(/Archivo 2 de 3/.test(texto()), 'Avanza al siguiente archivo');
+              const pct = parseFloat(ventana.querySelector('.prog-barra i').style.width);
+              Pruebas.ok(pct > 30 && pct < 70, 'La barra avanza con los archivos: ' + pct + ' %');
+              await soltar(); await soltar();
+              const r = await tarea;
+              Pruebas.ok(terminado && r.ok === 3, 'Termina con los tres adjuntados');
+              Pruebas.ok(repintada, 'La caja se vuelve a pintar ANTES de soltar la pantalla');
+              Pruebas.ok(!document.body.contains(ventana), 'La ventana se cierra sola');
+              Pruebas.ok(!Modal.hayBloqueante(), 'Dejando la pantalla libre');
+              const ev2 = new Event('beforeunload', { cancelable: true });
+              window.dispatchEvent(ev2);
+              Pruebas.ok(!ev2.defaultPrevented, 'Y ya no avisa al cerrar la pestaña');
+            } finally {
+              /* Si algo falló a mitad, la subida de prueba acaba con los
+                 falsos, no con los de verdad: no deja documentos sueltos. */
+              sinEsperar = true;
+              while (esperas.length) esperas.shift()();
+              await tarea.catch(() => {});
+              DocumentoService.adjuntar = origAdj; DocumentoService.duplicado = origDup;
+              if (ventana && document.body.contains(ventana)) Modal.cerrar(ventana);
+            }
+          } },
+
+        { nombre: 'Un adjunto rápido no hace parpadear la ventana', fn: async () => {
+            const origAdj = DocumentoService.adjuntar, origDup = DocumentoService.duplicado;
+            DocumentoService.duplicado = async () => null;
+            DocumentoService.adjuntar = async () => ({ id: 'doc_rapido' });
+            try {
+              const r = await Expediente.subir([new File([new Uint8Array([9])], 'rapido.jpg', { type: 'image/jpeg' })],
+                { cajaId: 'cm_prueba', tipo: TipoDocumento.SOPORTE_COMPRA });
+              Pruebas.igual(r.ok, 1, 'Se adjunta');
+              Pruebas.igual(Progreso._ultima.fueVisible, false, 'Sin que la ventana llegue a verse');
+              Pruebas.ok(!Modal.hayBloqueante(), 'Y la pantalla queda libre');
+            } finally { DocumentoService.adjuntar = origAdj; DocumentoService.duplicado = origDup; }
+          } },
+
+        { nombre: 'Si un archivo falla, se dice cuál y los demás se adjuntan', fn: async () => {
+            const origAdj = DocumentoService.adjuntar, origDup = DocumentoService.duplicado;
+            DocumentoService.duplicado = async () => null;
+            DocumentoService.adjuntar = async f => {
+              if (/malo/.test(f.name)) throw new ErrorDominio('El archivo está dañado.', 'PRUEBA');
+              return { id: 'doc_' + f.name };
+            };
+            try {
+              const files = ['bueno-1.jpg', 'malo.jpg', 'bueno-2.jpg'].map((n, i) =>
+                new File([new Uint8Array([i, 3])], n, { type: 'image/jpeg' }));
+              const r = await Expediente.subir(files, { cajaId: 'cm_prueba', tipo: TipoDocumento.SOPORTE_COMPRA });
+              Pruebas.igual(r.ok, 2, 'Los buenos se adjuntan');
+              Pruebas.igual(r.fallos.length, 1, 'Y uno falla');
+              Pruebas.ok(!Modal.hayBloqueante(), 'La ventana de avance ya se fue');
+              const aviso = [...document.querySelectorAll('#modals .modal-bd')].map(m => m.textContent).join(' ');
+              Pruebas.ok(/malo\.jpg/.test(aviso) && /dañado/.test(aviso), 'Una ventana dice cuál falló y por qué');
+              Pruebas.ok(/Los demás sí se adjuntaron/.test(aviso), 'Y que los demás sí entraron');
+            } finally {
+              DocumentoService.adjuntar = origAdj; DocumentoService.duplicado = origDup;
+              for (let i = 0; i < 5 && document.querySelector('#modals .modal-bd'); i++) Modal.cerrarTop();
+            }
+          } },
+
         { nombre: 'Adjuntar un PDF a una caja', fn: async ctx => {
             const blob = new Blob(['%PDF-1.4 prueba'], { type: 'application/pdf' });
             const file = new File([blob], 'factura.pdf', { type: 'application/pdf' });
@@ -16664,6 +17132,205 @@ const Pruebas = {
             const dup = await DocumentoService.duplicado(hash, ctx.caja300.id, null);
             Pruebas.ok(dup, 'Debe reconocer el contenido repetido');
           } },
+        { nombre: 'Se eliminan varios documentos de una vez, cada uno con su archivo', fn: async ctx => {
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const caja = await CajaService.crear({ fecha: '2026-09-09', solicitanteId: ctx.fernando.id,
+              municipioId: ctx.municipio.id, detalles: [{ categoriaId: cm.id, elemento: 'Varios', valor: 1000000 }] });
+            const docs = [];
+            for (let i = 0; i < 6; i++)
+              docs.push(await DocumentoService.adjuntar(new File([new Blob(['borrar ' + i])], 'soporte ' + i + '.pdf',
+                { type: 'application/pdf' }), { cajaId: caja.id, tipo: TipoDocumento.SOPORTE_COMPRA }));
+            const avances = [];
+            const r = await DocumentoService.eliminarVarios(
+              docs.slice(0, 5).map(d => d.id).concat(['doc_que_ya_no_existe']), a => avances.push(a.hechos));
+            Pruebas.igual(r.fallos.length, 0, 'Sin fallos');
+            const quedan = await CajaRepo.documentos(caja.id);
+            Pruebas.igual(quedan.map(d => d.id).join(), docs[5].id, 'Sólo queda el que no se marcó');
+            Pruebas.igual(await DocumentoService.blob(docs[0].id), null, 'Y el archivo se fue con su ficha');
+            Pruebas.igual(avances.length, 6, 'Avisa del avance una vez por documento');
+            Pruebas.igual(Math.max(...avances), 6, 'Hasta llegar al total');
+
+            /* Si uno falla, los demás igual se borran y se sabe cuál quedó. */
+            const otro = await DocumentoService.adjuntar(new File([new Blob(['borrar otro'])], 'se resiste.pdf',
+              { type: 'application/pdf' }), { cajaId: caja.id, tipo: TipoDocumento.SOPORTE_COMPRA });
+            const quitarOrig = DocumentoService._quitar;
+            DocumentoService._quitar = async function (d) {
+              if (d.id === otro.id) throw new Error('Sin conexión');
+              return quitarOrig.call(this, d);
+            };
+            try {
+              const r2 = await DocumentoService.eliminarVarios([docs[5].id, otro.id]);
+              Pruebas.igual(r2.ok, 1, 'Uno sí se borra');
+              Pruebas.igual(r2.fallos.map(x => x.nombre + ': ' + x.motivo).join(), 'se resiste.pdf: Sin conexión',
+                'Del otro se dice cuál es y por qué');
+            } finally { DocumentoService._quitar = quitarOrig; }
+            Pruebas.igual((await CajaRepo.documentos(caja.id)).map(d => d.id).join(), otro.id, 'Y ése sigue ahí');
+            await DocumentoService.eliminar(otro.id);
+          } },
+
+        { nombre: 'CRÍTICO · en la caja se marcan varios soportes y se eliminan de una vez', fn: async ctx => {
+            const pausa = ms => new Promise(r => setTimeout(r, ms));
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const caja = await CajaService.crear({ fecha: '2026-09-09', solicitanteId: ctx.fernando.id,
+              municipioId: ctx.municipio.id, detalles: [{ categoriaId: cm.id, elemento: 'Varios', valor: 1000000 }] });
+            const sop = [];
+            for (let i = 1; i <= 3; i++)
+              sop.push(await DocumentoService.adjuntar(new File([new Blob(['recibo ' + i])], 'recibo ' + i + '.pdf',
+                { type: 'application/pdf' }), { cajaId: caja.id, tipo: TipoDocumento.SOPORTE_COMPRA }));
+            await DocumentoService.adjuntar(new File([new Blob(['transferencia'])], 'transferencia.pdf',
+              { type: 'application/pdf' }), { cajaId: caja.id, tipo: TipoDocumento.COMPROBANTE_CONSIGNACION });
+            const div = document.createElement('div');
+            document.body.appendChild(div);
+            const confOrig = Modal.confirmar;
+            let respuesta = false, pregunta = '';
+            Modal.confirmar = async o => { pregunta = o.titulo + ' ' + o.html; return respuesta; };
+            try {
+              await VistaCaja.render(div, [caja.id]);
+              const card = div.querySelector('[data-docsel="legalizacion"]');
+              const chks = [...card.querySelectorAll('input[data-act="docSel"]')];
+              Pruebas.igual(chks.length, 3, 'Cada soporte de la legalización tiene su casilla');
+              const btn = card.querySelector('[data-act="docEliminarSel"]');
+              Pruebas.ok(btn.classList.contains('hidden'), 'Sin nada marcado no se ofrece eliminar');
+              const todos = card.querySelector('input[data-act="docSelTodos"]');
+              todos.click(); await pausa(30);
+              Pruebas.ok(chks.every(c => c.checked), '«Todos» marca los tres');
+              Pruebas.ok(!btn.classList.contains('hidden') && /\(3\)/.test(btn.textContent), 'Y aparece «Eliminar (3)»');
+              chks[1].click(); await pausa(30);
+              Pruebas.ok(todos.indeterminate && /\(2\)/.test(btn.textContent), 'Al desmarcar uno quedan dos, y «Todos» a medias');
+              const comps = div.querySelector('[data-docsel="comprobantes"]');
+              Pruebas.igual(comps.querySelectorAll('input[data-act="docSel"]:checked').length, 0,
+                'Lo marcado en la legalización no marca nada en los comprobantes');
+
+              btn.click(); await pausa(80);
+              Pruebas.igual((await CajaRepo.documentos(caja.id)).length, 4, 'Si se cancela la pregunta, no se borra nada');
+
+              respuesta = true;
+              btn.click();
+              for (let i = 0; i < 150 && (div.querySelector('[data-docsel="legalizacion"]') === card || Modal.hayBloqueante()); i++)
+                await pausa(20);
+              Pruebas.ok(/Eliminar 2 documentos/.test(pregunta) && /recibo 1\.pdf/.test(pregunta) && /recibo 3\.pdf/.test(pregunta),
+                'Antes pregunta, diciendo cuántos y cuáles');
+              const quedan = await CajaRepo.documentos(caja.id);
+              Pruebas.igual(quedan.filter(d => d.tipo === TipoDocumento.SOPORTE_COMPRA).map(d => d.nombre).join(), 'recibo 2.pdf',
+                'Se eliminan justo los dos marcados');
+              Pruebas.ok(quedan.some(d => d.tipo === TipoDocumento.COMPROBANTE_CONSIGNACION), 'El comprobante sigue ahí');
+              const nueva = div.querySelector('[data-docsel="legalizacion"]');
+              Pruebas.igual(nueva.querySelectorAll('input[data-act="docSel"]').length, 1,
+                'La caja se vuelve a pintar con lo que queda');
+              Pruebas.ok(!Modal.hayBloqueante(), 'Y la pantalla queda libre');
+            } finally { Modal.confirmar = confOrig; div.remove(); }
+          } },
+
+        { nombre: 'Desde la caja no se borra el comprobante de una consignación, que puede pagar otras cajas', fn: async ctx => {
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const caja = await CajaService.crear({ fecha: '2026-09-09', solicitanteId: ctx.fernando.id,
+              municipioId: ctx.municipio.id, detalles: [{ categoriaId: cm.id, elemento: 'Varios', valor: 1000000 }] });
+            const propio = await DocumentoService.adjuntar(new File([new Blob(['propio'])], 'de la caja.pdf',
+              { type: 'application/pdf' }), { cajaId: caja.id, tipo: TipoDocumento.COMPROBANTE_CONSIGNACION });
+            const aplOrig = CajaRepo.aplicaciones, docsOrig = ConsignacionRepo.documentos;
+            CajaRepo.aplicaciones = async () => [{ id: 'apl_x', cajaId: caja.id, consignacionId: 'cn_x', monto: 0 }];
+            ConsignacionRepo.documentos = async () => [Object.assign(Modelo.documento({ consignacionId: 'cn_x',
+              tipo: TipoDocumento.COMPROBANTE_CONSIGNACION, nombre: 'de la consignacion.png', mime: 'image/png', tamano: 10 }))];
+            const div = document.createElement('div');
+            try {
+              await VistaCaja.render(div, [caja.id]);
+              const g = div.querySelector('[data-docsel="comprobantes"]');
+              const chks = [...g.querySelectorAll('input[data-act="docSel"]')];
+              Pruebas.igual(chks.map(c => c.dataset.id).join(), propio.id, 'Sólo el comprobante propio de la caja tiene casilla');
+              const hueco = g.querySelector('.doc-chk-hueco');
+              Pruebas.ok(hueco && /se elimina desde ella/.test(hueco.getAttribute('data-tip')),
+                'Al otro se le explica dónde se elimina');
+            } finally {
+              CajaRepo.aplicaciones = aplOrig; ConsignacionRepo.documentos = docsOrig;
+              await DocumentoService.eliminar(propio.id);
+            }
+          } },
+
+        { nombre: 'En el expediente de abajo y en la página del expediente también se marcan varios', fn: async ctx => {
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const caja = await CajaService.crear({ fecha: '2026-09-09', solicitanteId: ctx.fernando.id,
+              municipioId: ctx.municipio.id, detalles: [{ categoriaId: cm.id, elemento: 'Varios', valor: 1000000 }] });
+            const d = await DocumentoService.adjuntar(new File([new Blob(['exp'])], 'exp.pdf', { type: 'application/pdf' }),
+              { cajaId: caja.id, tipo: TipoDocumento.SOPORTE_COMPRA });
+            const div = document.createElement('div');
+            try {
+              await VistaCaja.render(div, [caja.id]);
+              const exp = div.querySelector('#expedienteCaja');
+              Pruebas.ok(exp.matches('[data-docsel]') && exp.querySelector('.doc input[data-act="docSel"][data-id="' + d.id + '"]')
+                && exp.querySelector('input[data-act="docSelTodos"]') && exp.querySelector('[data-act="docEliminarSel"]'),
+                'El expediente de la caja tiene casillas, «Todos» y «Eliminar»');
+              const pag = document.createElement('div');
+              await VistaExpediente.render(pag);
+              const g = pag.querySelector('[data-docsel]');
+              Pruebas.ok(g && g.querySelector('input[data-act="docSel"][data-id="' + d.id + '"]')
+                && g.querySelector('input[data-act="docSelTodos"]') && g.querySelector('[data-act="docEliminarSel"]'),
+                'Y la página del expediente documental también');
+              Pruebas.ok(Object.keys(Acciones).includes('docEliminarSel'), 'Con su acción de eliminar conectada');
+            } finally { await DocumentoService.eliminar(d.id); }
+          } },
+
+        { nombre: 'CRÍTICO · la misma foto subida dos veces no entra dos veces, aunque se guarde achicada', fn: async ctx => {
+            /* Una foto grande se guarda achicada. Antes se guardaba la huella
+               de la copia achicada y se comparaba con la de la foto elegida:
+               nunca coincidían y la foto repetida entraba otra vez. */
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const nueva = () => CajaService.crear({ fecha: '2026-09-09', solicitanteId: ctx.fernando.id,
+              municipioId: ctx.municipio.id, detalles: [{ categoriaId: cm.id, elemento: 'Varios', valor: 1000000 }] });
+            const caja = await nueva(), otra = await nueva();
+            const cv = document.createElement('canvas'); cv.width = 1000; cv.height = 1000;
+            const g = cv.getContext('2d'), img = g.createImageData(1000, 1000);
+            let s = 12345;
+            for (let i = 0; i < img.data.length; i++) { s = (s * 1103515245 + 12345) & 0x7fffffff; img.data[i] = (i & 3) === 3 ? 255 : s & 255; }
+            g.putImageData(img, 0, 0);
+            const blob = await new Promise(r => cv.toBlob(r, 'image/png'));
+            const foto = () => new File([blob], 'WhatsApp Image 2026-09-09.png', { type: 'image/png' });
+            const meta = { cajaId: caja.id, tipo: TipoDocumento.SOPORTE_COMPRA, config: { comprimirAdjuntos: 1, nivelCompresion: 'normal' } };
+
+            const r1 = await Expediente.subir([foto()], meta);
+            const docs1 = await CajaRepo.documentos(caja.id);
+            Pruebas.igual(r1.ok, 1, 'La primera vez entra');
+            Pruebas.ok(docs1[0] && docs1[0].tamanoOriginal > 0 && docs1[0].tamano < blob.size,
+              'Y se guarda achicada (si no, la prueba no probaría nada)');
+            const r2 = await Expediente.subir([foto()], meta);
+            Pruebas.igual(r2.dup, 1, 'La segunda vez se reconoce como repetida');
+            Pruebas.igual((await CajaRepo.documentos(caja.id)).length, 1, 'Y no entra dos veces');
+
+            /* Otro computador puede achicar la misma foto con bytes distintos.
+               Por eso lo que se compara es la foto elegida, no la copia. */
+            const procOrig = Compresor.procesar;
+            Compresor.procesar = async function (f, cfg) {
+              const r = await procOrig.call(this, f, cfg);
+              if (r.comprimido) r.file = new File([r.file, new Uint8Array([7])], r.file.name, { type: r.file.type });
+              return r;
+            };
+            try {
+              const rOtroPc = await Expediente.subir([foto()], meta);
+              Pruebas.igual(rOtroPc.dup, 1, 'Aunque en otro computador la copia achicada salga distinta, se reconoce');
+            } finally { Compresor.procesar = procOrig; }
+            Pruebas.igual((await CajaRepo.documentos(caja.id)).length, 1, 'Y sigue sin entrar dos veces');
+            const r3 = await Expediente.subir([foto()], Object.assign({}, meta, { cajaId: otra.id }));
+            Pruebas.igual(r3.ok, 1, 'En otra caja sí se puede adjuntar la misma foto');
+
+            /* Un adjunto subido antes del arreglo guarda la huella de su copia
+               achicada: también se tiene que reconocer. */
+            const viejo = docs1[0];
+            const copia = await DocumentoService.blob(viejo.id);
+            await db.put('documentos', Object.assign({}, viejo, { hash: await U.hashHex(await copia.arrayBuffer()) }));
+            const r4 = await Expediente.subir([foto()], meta);
+            Pruebas.igual(r4.dup, 1, 'Un adjunto de antes, con la huella de la copia achicada, también se reconoce');
+            Pruebas.igual((await CajaRepo.documentos(caja.id)).length, 1, 'Y tampoco entra dos veces');
+
+            /* Sin pedirlo expresamente, el servicio no se niega: el formato que
+               archiva el sistema puede guardarse otra vez. */
+            const f2 = new File([new Blob(['igual'])], 'igual.pdf', { type: 'application/pdf' });
+            await DocumentoService.adjuntar(f2, { cajaId: otra.id, tipo: TipoDocumento.OTRO });
+            await DocumentoService.adjuntar(new File([new Blob(['igual'])], 'igual.pdf', { type: 'application/pdf' }),
+              { cajaId: otra.id, tipo: TipoDocumento.OTRO });
+            Pruebas.igual((await CajaRepo.documentos(otra.id)).length, 3, 'Sin «sinRepetir», el servicio guarda lo que le den');
+            for (const d of [...await CajaRepo.documentos(caja.id), ...await CajaRepo.documentos(otra.id)])
+              await DocumentoService.eliminar(d.id);
+          } },
+
         { nombre: 'Generar el formato oficial de la caja', fn: async ctx => {
             const html = await Documento.construir(ctx.caja300);
             Pruebas.ok(html.includes('DOCUMENTO SOPORTE DE COSTOS'), 'Debe llevar el título oficial');
@@ -17614,13 +18281,19 @@ const Pruebas = {
             /* Nada sabía contar el tiempo: una caja consignada hace tres
                semanas se veía igual que la de ayer. */
             const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            /* En día de aquí, como las fechas de las cajas: en hora universal,
+               después de las 7 de la noche «hoy» ya era mañana. */
             const hace = d => { const x = new Date(); x.setDate(x.getDate() - d);
-              return x.toISOString().slice(0, 10); };
+              return x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' +
+                String(x.getDate()).padStart(2, '0'); };
             const crear = async (dias, estado) => CajaService.crear({
               fecha: hace(dias), solicitanteId: ctx.fernando.id, municipioId: ctx.municipio.id,
               estado: estado, detalles: [{ categoriaId: cm.id, elemento: 'x', valor: 10000000 }] });
 
             Pruebas.igual(Fecha.diasEntre(hace(0)), 0, 'Hoy son cero días');
+            const noche = new Date(); noche.setHours(23, 30, 0, 0);
+            Pruebas.igual(Fecha.diasEntre(noche.toISOString()), 0,
+              'Algo guardado hoy a las 11:30 de la noche también es de hoy, no de mañana');
             Pruebas.igual(Fecha.diasEntre(hace(41)), 41, 'Cuarenta y un días son 41');
             Pruebas.igual(Fecha.haceCuanto(hace(1)), 'ayer', 'Un día es «ayer»');
 
