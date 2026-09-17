@@ -6401,16 +6401,22 @@ const Modal = (() => {
       const tarea = b.onclick;
       b.onclick = function (e) {
         if (b.dataset.enCurso) return;
+        /* El texto se guarda ANTES de llamar a la tarea. Un botón que se pone
+           él mismo en «Generando…» —copiar imagen, por ejemplo— dejaba ese
+           texto guardado como si fuera el original, y al terminar se quedaba
+           con el reloj puesto para siempre: la única salida era cerrar la
+           ventana. */
+        const antes = b.innerHTML;
         let r;
         try { r = tarea.call(this, e); } catch (err) { throw err; }
         // lo que termina al instante no puede solaparse consigo mismo
         if (!r || typeof r.then !== 'function') return r;
         b.dataset.enCurso = '1';
-        const antes = b.innerHTML;
         /* Sólo se avisa si de verdad tarda: en algo rápido, cambiar el texto
            es un parpadeo que estorba más de lo que informa. */
         const aviso = setTimeout(() => {
-          if (b.isConnected) b.innerHTML = '<span class="spin"></span>Un momento…';
+          /* Si la tarea ya puso su propio aviso, se respeta el suyo. */
+          if (b.isConnected && b.innerHTML === antes) b.innerHTML = '<span class="spin"></span>Un momento…';
         }, 250);
         return r.finally(() => {
           clearTimeout(aviso);
@@ -13390,18 +13396,20 @@ const Documento = {
         '<td>' + esc(ubicacionDe(c)) + '</td>' +
         '<td class="n">' + Money.format(c.total) + '</td>' +
         '<td class="n">' + Money.format(pendDe(c)) + '</td></tr>').join('') +
+      /* Se suma SÓLO lo pendiente. El total de cada caja se sigue viendo en su
+         fila —sirve para reconocerla—, pero sumarlo daba una segunda cifra
+         grande al pie que no es la que hay que consignar: con un giro parcial,
+         una caja de 600.000 con 300.000 pendientes engañaba a simple vista. */
       (variosGrupos
-        ? '<tr class="rr-sub"><td colspan="5">Subtotal de ' + esc(quien) + '</td>' +
-          '<td class="n">' + Money.format(U.sumBy(lista, c => c.total)) + '</td>' +
+        ? '<tr class="rr-sub"><td colspan="6">Subtotal de ' + esc(quien) + '</td>' +
           '<td class="n">' + Money.format(U.sumBy(lista, c => pendDe(c))) + '</td></tr>'
         : '') +
       /* Con una sola persona, su total. Con varias, cada bloque ya lleva su
          subtotal y el total general va una sola vez al final: antes cada
          bloque repetía la misma cifra en dos renglones seguidos. */
       (variosGrupos ? '' :
-        '<tr class="rr-tot"><td colspan="5">TOTAL PENDIENTE POR REEMBOLSAR A ' +
+        '<tr class="rr-tot"><td colspan="6">TOTAL PENDIENTE POR REEMBOLSAR A ' +
           esc(quien.toUpperCase()) + '</td>' +
-          '<td class="n">' + Money.format(totalGeneral) + '</td>' +
           '<td class="n">' + Money.format(pendGeneral) + '</td></tr>') +
       /* Justo debajo del total: se lee la cifra y enseguida a dónde va. */
       cuentaDe(lista) +
@@ -13427,8 +13435,7 @@ const Documento = {
       [...grupos.values()].map(g => bloque(g.etiqueta, g.lista)).join('') +
       (variosGrupos
         ? '<table class="dp-tbl rr-tbl"><tbody><tr class="rr-tot">' +
-          '<td>TOTAL GENERAL · ' + orden.length + ' CAJA(S)</td>' +
-          '<td class="n" style="width:26mm">' + Money.format(totalGeneral) + '</td>' +
+          '<td>TOTAL GENERAL PENDIENTE POR REEMBOLSAR · ' + orden.length + ' CAJA(S)</td>' +
           '<td class="n" style="width:26mm">' + Money.format(pendGeneral) + '</td></tr></tbody></table>'
         : '') +
       '</div>';
@@ -19803,6 +19810,53 @@ const Pruebas = {
               [{ valor: 10000000, rol: RolEstadistico.GASOLINA }, { valor: 5000000, rol: null }], 0);
             Pruebas.igual(calc.gasolina, 10000000,
               'La gasolina se sigue midiendo sin la categoría: el papel vive en el movimiento');
+          } },
+
+        { nombre: 'CRÍTICO · la relación sólo suma lo que hay que consignar', fn: async ctx => {
+            /* Al pie salían dos cifras grandes: la suma de los totales y la de
+               lo pendiente. Con un giro parcial, la primera engaña: no es lo
+               que hay que consignarle. */
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            const nueva = async valor => CajaService.crear({ fecha: '2026-09-14', solicitanteId: ctx.fernando.id,
+              municipioId: ctx.municipio.id, estado: EstadoCaja.CONSIGNADA, consignoId: (PersonaRepo.financiadores()[0] || {}).id,
+              detalles: [{ categoriaId: cm.id, elemento: 'x', valor }] });
+            const a = await nueva(Money.parse('600.000'));
+            const b = await nueva(Money.parse('600.000'));
+            await EntregaService.crear({ cajaId: a.id, fecha: '2026-09-14', monto: Money.parse('300.000'),
+              motivo: 'Sólo había la mitad' });
+            const html = Documento.resumenReembolso([await CajaRepo.get(a.id), b], new Map(), new Map());
+            Pruebas.ok(html.includes(Money.format(30000000)) && html.includes(Money.format(60000000)),
+              'Cada caja sigue enseñando su total y su pendiente');
+            Pruebas.ok(html.includes(Money.format(90000000)), 'Al pie va lo que hay que consignar: 900.000');
+            Pruebas.ok(!html.includes(Money.format(120000000)),
+              'Y ya no aparece la suma de los totales (1.200.000), que no es lo que se gira');
+            const pie = (html.match(/<tr class="rr-tot">[\s\S]*?<\/tr>/) || [''])[0];
+            Pruebas.igual((pie.match(/class="n"/g) || []).length, 1, 'El renglón del total lleva UNA sola cifra');
+          } },
+
+        { nombre: 'CRÍTICO · un botón que enseña su propio aviso vuelve a su texto al terminar', fn: async () => {
+            /* «Copiar imagen» se quedaba con el reloj puesto para siempre: la
+               protección de doble clic guardaba como texto original el aviso
+               que el propio botón acababa de poner. */
+            const pausa = ms => new Promise(r => setTimeout(r, ms));
+            let soltar;
+            const m = Modal.abrir({ titulo: 'Prueba del botón', cuerpo: '<p>x</p>',
+              pie: '<button class="btn" id="bt">Copiar imagen</button>' });
+            const b = m.querySelector('#bt');
+            b.onclick = async () => {
+              b.innerHTML = '<span class="spin"></span>Generando…';
+              try { await new Promise(r => { soltar = r; }); }
+              finally { b.innerHTML = 'Copiar imagen'; }
+            };
+            try {
+              b.click();
+              await pausa(400);
+              Pruebas.ok(/Generando/.test(b.innerHTML), 'Mientras trabaja se ve su propio aviso, no otro');
+              soltar();
+              await pausa(120);
+              Pruebas.igual(b.textContent.trim(), 'Copiar imagen', 'Y al terminar el botón vuelve a su texto');
+              Pruebas.ok(!b.dataset.enCurso, 'Y se puede volver a pulsar');
+            } finally { Modal.cerrar(m); }
           } },
 
         { nombre: 'CRÍTICO · el programa sabe cuánto lleva esperando cada caja', fn: async ctx => {
