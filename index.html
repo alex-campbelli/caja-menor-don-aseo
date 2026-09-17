@@ -685,6 +685,8 @@ html[data-theme="dark"] .marca.m-sinlegal{background:rgba(217,143,6,.18);color:#
 .btn-danger-ghost{color:var(--dang-500)}
 .btn-danger-ghost:hover{background:var(--dang-50)}
 /* Marcar varios adjuntos para eliminarlos de una vez. */
+/* Casilla con su texto al lado, en una línea. */
+.chk-linea{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--text);cursor:pointer;user-select:none}
 .docsel-todos{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;color:var(--text-2);
   cursor:pointer;user-select:none;white-space:nowrap;margin-right:4px}
 .doc-chk-hueco{display:inline-block;width:15px;flex:0 0 15px}
@@ -790,6 +792,11 @@ mark{background:rgba(200,134,13,.28);color:inherit;border-radius:2px;padding:0 1
 .dp-tot td:first-child{background:#f2f2f2;font-weight:700;text-transform:uppercase;font-size:8pt}
 .dp-tot td:last-child{text-align:right;font-variant-numeric:tabular-nums;font-weight:700;width:38mm}
 .dp-tot tr.grand td{background:#d9d9d9;font-size:10.5pt;font-weight:800}
+/* Entregas al líder: lo que se le giró de esta caja, con su motivo. */
+.dp-ent{margin-top:4mm}
+.dp-ent-t{border:1.2px solid #000;border-bottom:none;background:#f2f2f2;padding:1.5mm 3mm;
+  font-size:7.5pt;font-weight:800;text-transform:uppercase;letter-spacing:.04em}
+.dp-ent .dp-tbl tr.rr-tot td{background:#ededed;font-weight:800}
 .dp-obs{border:1.2px solid #000;border-top:none;padding:2mm 3mm;font-size:8pt;min-height:12mm}
 .dp-obs b{font-size:7.5pt;text-transform:uppercase;display:block;margin-bottom:1mm}
 .dp-sign{margin-top:14mm;display:flex;gap:12mm;justify-content:space-between}
@@ -1174,6 +1181,8 @@ const ID = Object.freeze({
   reparto:      () => Ulid.withPrefix('rep'),
   consignacion: () => Ulid.withPrefix('con'),
   aplicacion:   () => Ulid.withPrefix('apl'),
+  /** cada giro de dinero al líder de la caja, que puede ser en varias partes */
+  entrega:      () => Ulid.withPrefix('ent'),
   documento:    () => Ulid.withPrefix('doc'),
   categoria:    () => Ulid.withPrefix('cat'),
   municipio:    () => Ulid.withPrefix('mun'),
@@ -1810,6 +1819,12 @@ const ESQUEMA_IDB = {
                       ['numero', 'numero', { unique: true }], ['fecha', 'fecha'], ['contratoId', 'contratoId'],
                       ['beneficiarioId', 'beneficiarioId'], ['estado', 'estado'], ['mes', 'mes'] ] },
   aplicaciones:   { keyPath: 'id', indices: [ ['consignacionId', 'consignacionId'], ['cajaId', 'cajaId'] ] },
+  /* Lo que se le gira al LÍDER de la caja. Puede ir en varias partes: si quien
+     adelanta el dinero sólo alcanza para la mitad, se registra ese abono y la
+     caja queda debiéndole el resto al líder. Es dinero que SALE hacia el
+     líder; no confundir con `aplicaciones`, que es el dinero que la empresa le
+     devuelve a quien consignó. */
+  entregas:       { keyPath: 'id', indices: [ ['cajaId', 'cajaId'], ['contratoId', 'contratoId'], ['fecha', 'fecha'] ] },
   documentos:     { keyPath: 'id', indices: [
                       ['cajaId', 'cajaId'], ['consignacionId', 'consignacionId'],
                       ['tipo', 'tipo'], ['creadoEn', 'creadoEn'] ] },
@@ -2029,6 +2044,8 @@ class IndexedDBAdapter extends StorageAdapter {
 const EstadoCaja = Object.freeze({
   BORRADOR: 'BORRADOR',
   PENDIENTE: 'PENDIENTE',
+  /** se le giró parte del dinero al líder; se le queda debiendo el resto */
+  CONSIGNADA_PARCIAL: 'CONSIGNADA_PARCIAL',
   CONSIGNADA: 'CONSIGNADA',
   REEMBOLSADA: 'REEMBOLSADA',
   ANULADA: 'ANULADA'
@@ -2038,25 +2055,29 @@ const ESTADO_CAJA_META = {
                  ayuda: 'Todavía se está armando.' },
   PENDIENTE:   { label: 'Pendiente',   pill: 'p-amber', orden: 2,
                  ayuda: 'La caja está lista, pero todavía no le han consignado.' },
-  CONSIGNADA:  { label: 'Consignada',  pill: 'p-blue',  orden: 3,
+  CONSIGNADA_PARCIAL: { label: 'C. Parcial', pill: 'p-violet', orden: 3,
+                 ayuda: 'Se le consignó por partes y todavía falta girarle el resto.' },
+  CONSIGNADA:  { label: 'Consignada',  pill: 'p-blue',  orden: 4,
                  ayuda: 'Ya giraron el dinero. Falta reembolsárselo a quien consignó.' },
-  REEMBOLSADA: { label: 'Reembolsada', pill: 'p-green', orden: 4,
+  REEMBOLSADA: { label: 'Reembolsada', pill: 'p-green', orden: 5,
                  ayuda: 'A quien consignó ya le devolvieron su dinero.' },
-  ANULADA:     { label: 'Anulada',     pill: 'p-red',   orden: 5,
+  ANULADA:     { label: 'Anulada',     pill: 'p-red',   orden: 6,
                  ayuda: 'Se dejó sin efecto. Conserva su número y su histórico.' }
 };
 /** Estados que representan dinero realmente comprometido (entran en el gasto) */
 const ESTADOS_VIVOS = [EstadoCaja.BORRADOR, EstadoCaja.PENDIENTE,
                        EstadoCaja.CONSIGNADA, EstadoCaja.REEMBOLSADA];
 /** Alguien puso el dinero y todavía no se le ha devuelto: es lo que se le debe */
-const ESTADOS_POR_REEMBOLSAR = [EstadoCaja.CONSIGNADA];
+/* Quien puso el dinero espera que se lo devuelvan. Con un giro parcial también:
+   se le debe lo que ya entregó, ni un peso más. */
+const ESTADOS_POR_REEMBOLSAR = [EstadoCaja.CONSIGNADA, EstadoCaja.CONSIGNADA_PARCIAL];
 /** Cajas que aún no están cerradas: se resaltan en el listado */
-const ESTADOS_ABIERTOS = [EstadoCaja.PENDIENTE, EstadoCaja.CONSIGNADA];
+const ESTADOS_ABIERTOS = [EstadoCaja.PENDIENTE, EstadoCaja.CONSIGNADA_PARCIAL, EstadoCaja.CONSIGNADA];
 /* A partir de CONSIGNADA el dinero ya salió: desde ahí tiene sentido exigir el
    comprobante del giro y los soportes de lo que se compró. Antes el aviso de
    «falta comprobante» sólo miraba CONSIGNADA, así que al pasar la caja a
    REEMBOLSADA se esfumaba justo cuando ya se había pagado. */
-const ESTADOS_CON_DINERO_ENTREGADO = [EstadoCaja.CONSIGNADA, EstadoCaja.REEMBOLSADA];
+const ESTADOS_CON_DINERO_ENTREGADO = [EstadoCaja.CONSIGNADA_PARCIAL, EstadoCaja.CONSIGNADA, EstadoCaja.REEMBOLSADA];
 
 /** Estados de antes del cambio → estado equivalente de ahora */
 const ESTADOS_ANTIGUOS = {
@@ -2357,6 +2378,18 @@ const Modelo = {
          fuera del sistema). Evita inventar consignaciones y evita, a la vez,
          que el histórico aparezca como saldo pendiente. */
       reposicionManual: p.reposicionManual ? 1 : 0,
+      /* Lo que de verdad se le ha girado al líder, sumando sus entregas, y
+         cuántas van. Se guardan derivados —igual que el estado— para que el
+         listado no tenga que pedir las entregas de cada caja. Con cero
+         entregas registradas manda lo de siempre: el estado que se puso a
+         mano y el total de la caja. */
+      entregado: p.entregado || 0,
+      nEntregas: p.nEntregas || 0,
+      /* La caja se cerró con lo que se alcanzó a girar: al líder ya no se le
+         debe el resto porque no lo necesitó. Lo que pidió al principio NO se
+         borra —queda en el total y en el impreso—, pero a las estadísticas
+         sólo entra lo que de verdad se consignó. */
+      cierreParcial: p.cierreParcial ? 1 : 0,
       origen: p.origen || Origen.MANUAL,
       legacy: p.legacy || null,
       anuladaEn: p.anuladaEn || null,
@@ -2433,6 +2466,25 @@ const Modelo = {
   },
 
   /** Puente consignación ↔ caja CON MONTO: habilita N:M y reposiciones parciales */
+  /** un giro de dinero al líder de la caja; puede haber varios */
+  entrega(p) {
+    p = p || {};
+    return {
+      id: p.id || ID.entrega(),
+      contratoId: p.contratoId || null,
+      cajaId: p.cajaId,
+      fecha: p.fecha || Fecha.hoy(),
+      monto: p.monto || 0,
+      /** por qué se le entregó sólo una parte; obligatorio cuando queda saldo */
+      motivo: String(p.motivo || '').trim(),
+      banco: String(p.banco || '').trim(),
+      referencia: String(p.referencia || '').trim(),
+      origen: p.origen || Origen.MANUAL,
+      creadoEn: p.creadoEn || Modelo.ahora(),
+      actualizadoEn: Modelo.ahora()
+    };
+  },
+
   aplicacion(p) {
     p = p || {};
     return {
@@ -2786,7 +2838,7 @@ const Nombres = {
    * escritura y la subida fallaría entera.
    */
   BOOLEANOS: new Set(['logoPropio', 'esNoAplica', 'esFinanciador', 'esSolicitante',
-                      'estadistica', 'sistema', 'requiereRevision', 'reposicionManual',
+                      'estadistica', 'sistema', 'requiereRevision', 'reposicionManual', 'cierreParcial',
                       'esGasolina', 'esAceite', 'snapshotHtml']),
   /**
    * Columnas `date` o `timestamptz`. En el modelo local una fecha ausente se
@@ -3810,6 +3862,25 @@ const CategoriaRepo = {
   }
 };
 
+/**
+ * La tabla de entregas llegó después que el resto del sistema. Mientras no se
+ * haya corrido el script en Supabase, preguntarla devuelve un error de tabla
+ * inexistente: en vez de romper la caja o el guardado de una consignación, se
+ * trabaja como antes —sin entregas— y se deja constancia para avisarlo.
+ */
+function faltaLaTabla(e) {
+  return /relation .*does not exist|could not find the table|schema cache|PGRST205|no existe/i.test((e && e.message) || '');
+}
+async function entregasSeguras(consulta) {
+  try { return await consulta(); }
+  catch (e) {
+    if (!faltaLaTabla(e)) throw e;
+    Estado_App.faltaTablaEntregas = true;
+    console.warn('[entregas] la tabla todavía no existe en la nube:', e.message);
+    return [];
+  }
+}
+
 const CajaRepo = {
   get: id => db.get('cajas', id),
 
@@ -3835,6 +3906,8 @@ const CajaRepo = {
   porNumero: async num => (await db.query('cajas', { indice: 'numero', valor: num }))[0] || null,
   detalles: async cajaId => (await db.query('detalles', { indice: 'cajaId', valor: cajaId })).sort(U.by('orden')),
   aplicaciones: cajaId => db.query('aplicaciones', { indice: 'cajaId', valor: cajaId }),
+  entregas: async cajaId => (await entregasSeguras(() => db.query('entregas', { indice: 'cajaId', valor: cajaId })))
+    .sort((a, b) => String(a.fecha).localeCompare(String(b.fecha)) || String(a.creadoEn).localeCompare(String(b.creadoEn))),
   documentos: async cajaId => (await db.query('documentos', { indice: 'cajaId', valor: cajaId }))
                                 .filter(d => d.estado === Estado.ACTIVO).sort(U.by('creadoEn', 'desc')),
   contar: () => db.count('cajas'),
@@ -4157,9 +4230,68 @@ const Finanzas = {
    * consignó y el formulario de consignación sumaban como deuda un dinero que
    * nadie había adelantado. Se ciñe a la constante que ya lo decía.
    */
+  /** Lo que se le ha girado al líder y lo que todavía se le debe. */
+  entregado(caja) { return caja && caja.nEntregas > 0 ? (caja.entregado || 0) : 0; },
+  saldoLider(caja) {
+    if (!caja) return 0;
+    if (caja.estado === EstadoCaja.ANULADA || caja.estado === EstadoCaja.BORRADOR) return 0;
+    /* Cerrada con lo entregado: el líder se conformó con lo que recibió, así
+       que ya no se le debe nada, aunque pidiera más. */
+    if (caja.cierreParcial) return 0;
+    if (caja.nEntregas > 0) return Math.max(0, (caja.total || 0) - (caja.entregado || 0));
+    /* Sin entregas registradas manda el estado puesto a mano: pendiente es que
+       no se le ha girado nada; consignada, que se le giró todo. */
+    return caja.estado === EstadoCaja.PENDIENTE ? (caja.total || 0) : 0;
+  },
+  /**
+   * EL VALOR QUE DE VERDAD SALIÓ. El total de la caja es lo que el líder pidió
+   * al principio y no se toca nunca: sirve para saber qué se había previsto. Lo
+   * que se giró puede ser menos —se consignó por partes, o se cerró con lo que
+   * había— y es esto lo único que cuenta como dinero movido: lo que se le
+   * repone a quien consignó y lo que suman las estadísticas. Nunca entra a las
+   * cuentas un peso que no se pagó.
+   */
+  valorEfectivo(caja) {
+    if (!caja) return 0;
+    return caja.nEntregas > 0 ? (caja.entregado || 0) : (caja.total || 0);
+  },
+  baseReembolso(caja) { return this.valorEfectivo(caja); },
+  /** La caja como la ven las estadísticas: con lo girado, no con lo pedido. */
+  cajaEfectiva(caja) {
+    const total = caja.total || 0;
+    const efectivo = this.valorEfectivo(caja);
+    if (efectivo === total) return caja;
+    const f = total > 0 ? efectivo / total : 0;
+    return Object.assign({}, caja, {
+      total: efectivo,
+      subtotal: Math.round((caja.subtotal || 0) * f),
+      gasolina: Math.round((caja.gasolina || 0) * f),
+      aceite: Math.round((caja.aceite || 0) * f),
+      totalPedido: total
+    });
+  },
+  /**
+   * Reparte lo girado entre las líneas de la caja, en la misma proporción.
+   * Sin esto, el total general diría 300.000 y la suma por categorías 600.000.
+   * El redondeo de cada línea se corrige en la más grande: la suma cuadra al peso.
+   */
+  prorratear(caja, detalles) {
+    const lista = detalles || [];
+    const total = caja.total || 0;
+    const efectivo = this.valorEfectivo(caja);
+    if (!lista.length || efectivo === total || total <= 0) return lista;
+    const f = efectivo / total;
+    const ajustados = lista.map(d => Object.assign({}, d, { valor: Math.round((d.valor || 0) * f) }));
+    const dif = efectivo - U.sumBy(ajustados, d => d.valor || 0);
+    if (dif !== 0) {
+      const mayor = ajustados.reduce((a, b) => ((b.valor || 0) > (a.valor || 0) ? b : a), ajustados[0]);
+      mayor.valor = (mayor.valor || 0) + dif;
+    }
+    return ajustados;
+  },
   pendienteDe(caja, repuesto) {
     if (!caja || !ESTADOS_POR_REEMBOLSAR.includes(caja.estado)) return 0;
-    return Math.max(0, (caja.total || 0) - (repuesto || 0));
+    return Math.max(0, this.baseReembolso(caja) - (repuesto || 0));
   },
   pendiente(caja, aplicaciones) {
     return this.pendienteDe(caja, U.sumBy(aplicaciones || [], a => a.monto || 0));
@@ -4173,14 +4305,34 @@ const Finanzas = {
    * del sistema) se respeta esa declaración mientras no haya aplicaciones.
    */
   estadoPorReposicion(caja, repuesto) {
+    return this.estadoDerivado(caja, repuesto);
+  },
+
+  /**
+   * El estado de la caja sale de los hechos, no de la pantalla:
+   *   · sin entregas registradas manda la reposición, como toda la vida;
+   *   · con entregas, mientras al líder le falte dinero la caja es «C. Parcial»,
+   *     aunque a quien consignó ya le hayan devuelto lo suyo: la caja no está
+   *     terminada hasta que el líder reciba todo.
+   * BORRADOR y ANULADA no se tocan jamás.
+   */
+  estadoDerivado(caja, repuesto) {
     if (!caja) return null;
-    if (caja.estado === EstadoCaja.ANULADA || caja.estado === EstadoCaja.BORRADOR) return caja.estado;
+    if (caja.estado === EstadoCaja.ANULADA) return caja.estado;
     const total = caja.total || 0;
-    if (repuesto <= 0) {
-      if (caja.estado !== EstadoCaja.REEMBOLSADA) return caja.estado;
+    const conEntregas = caja.nEntregas > 0;
+    if (!conEntregas && caja.estado === EstadoCaja.BORRADOR) return caja.estado;
+    if (conEntregas && !caja.cierreParcial) {
+      const entregado = caja.entregado || 0;
+      if (entregado <= 0) return EstadoCaja.PENDIENTE;
+      if (entregado < total) return EstadoCaja.CONSIGNADA_PARCIAL;
+    }
+    const base = this.baseReembolso(caja);
+    if ((repuesto || 0) <= 0) {
+      if (caja.estado !== EstadoCaja.REEMBOLSADA) return conEntregas ? EstadoCaja.CONSIGNADA : caja.estado;
       return caja.reposicionManual ? EstadoCaja.REEMBOLSADA : EstadoCaja.CONSIGNADA;
     }
-    if (repuesto >= total) return EstadoCaja.REEMBOLSADA;
+    if (base > 0 && repuesto >= base) return EstadoCaja.REEMBOLSADA;
     return EstadoCaja.CONSIGNADA;
   },
 
@@ -4195,7 +4347,7 @@ const Finanzas = {
     for (const c of cajas) {
       if (c.estado === EstadoCaja.ANULADA) { anuladas++; continue; }
       nCajas++;
-      gasto += c.total || 0;
+      gasto += Finanzas.valorEfectivo(c);
       gasolina += c.gasolina || 0;
       aceite += c.aceite || 0;
       const rep = (aplicacionesPorCaja && aplicacionesPorCaja.get(c.id)) || 0;
@@ -4368,6 +4520,15 @@ const CajaService = {
       detalles.forEach(d => tx.put('detalles', d));
     });
     await Auditoria.registrar('caja', caja.id, 'CREAR', { numero: caja.numero, total: caja.total });
+    /* Muchas cajas se registran cuando todo ya pasó. Si al escribirla se anota
+       lo que ya se le giró al líder, ese giro queda como su primera entrega y
+       el estado sale de ahí, no del desplegable. */
+    const ini = entrada.entregaInicial;
+    if (ini && (ini.monto || 0) > 0) {
+      await EntregaService.crear(Object.assign({ fecha: caja.fecha }, ini, { cajaId: caja.id }));
+      const fresca = await CajaRepo.get(caja.id);
+      if (fresca) { Bus.emit('cajas:cambio', fresca); return fresca; }
+    }
     Bus.emit('cajas:cambio', caja);
     return caja;
   },
@@ -4446,10 +4607,18 @@ const CajaService = {
     if (!ESTADO_CAJA_META[estado]) throw new ErrorDominio('Estado no válido.', 'ESTADO');
     if (estado === EstadoCaja.ANULADA) return this.anular(cajaId, motivo);
     if (caja.estado === EstadoCaja.ANULADA) throw new ErrorDominio('Una caja anulada no cambia de estado.', 'ANULADA');
+    if (estado === EstadoCaja.CONSIGNADA_PARCIAL && !(caja.nEntregas > 0))
+      throw new ErrorDominio('Para dejar la caja en «C. Parcial» marque «se consignó por partes» ' +
+        'en la caja y registre la entrega: ese estado sale de lo que se le giró.', 'SIN_ENTREGAS');
     const apls = await CajaRepo.aplicaciones(cajaId);
     const repuesto = Finanzas.repuesto(apls);
     // Marcar REPUESTA sin consignación registrada es una DECLARACIÓN explícita
     caja.reposicionManual = (estado === EstadoCaja.REEMBOLSADA && repuesto < caja.total) ? 1 : 0;
+    /* Pasarla a Consignada quedando plata sin girar es una DECISIÓN: el líder
+       no necesitó el resto y se cierra con lo que recibió. Volverla a «C.
+       Parcial» deshace ese cierre y la caja vuelve a deberle la diferencia. */
+    caja.cierreParcial = (estado === EstadoCaja.CONSIGNADA && caja.nEntregas > 0
+      && (caja.entregado || 0) < (caja.total || 0)) ? 1 : 0;
     caja.estado = estado;
     caja.actualizadoEn = Modelo.ahora();
     await db.put('cajas', caja);
@@ -4467,6 +4636,10 @@ const CajaService = {
     if (apls.length) throw new ErrorDominio(
       'No se puede anular: la caja está incluida en ' + apls.length + ' consignación(es). Retírela de la consignación primero.',
       'CON_REPOSICION');
+    const ents = await CajaRepo.entregas(cajaId);
+    if (ents.length) throw new ErrorDominio(
+      'No se puede anular: ya se le entregó dinero al líder (' + ents.length + ' entrega(s)). Quite las entregas primero.',
+      'CON_ENTREGAS');
     caja.estado = EstadoCaja.ANULADA;
     caja.anuladaEn = Modelo.ahora();
     caja.motivoAnulacion = motivo || '';
@@ -4501,9 +4674,11 @@ const CajaService = {
     const apls = await CajaRepo.aplicaciones(cajaId);
     if (apls.length) throw new ErrorDominio('La caja tiene reposiciones asociadas.', 'CON_REPOSICION');
     const docs = await CajaRepo.documentos(cajaId);
-    await db.transaccion(['cajas', 'detalles', 'documentos', 'archivos'], async tx => {
+    await db.transaccion(['cajas', 'detalles', 'documentos', 'archivos', 'entregas'], async tx => {
       const ds = await tx.porIndice('detalles', 'cajaId', cajaId);
       ds.forEach(d => tx.remove('detalles', d.id));
+      const ents = await tx.porIndice('entregas', 'cajaId', cajaId);
+      ents.forEach(e => tx.remove('entregas', e.id));
       docs.forEach(d => { tx.remove('documentos', d.id); tx.remove('archivos', d.id); });
       tx.remove('cajas', cajaId);
     });
@@ -4537,17 +4712,35 @@ const CajaService = {
     const ids = U.uniq((cajaIds || []).filter(Boolean));
     if (!ids.length) return new Map();
     const cajas = await db.getMany('cajas', ids);
-    const apls = await db.query('aplicaciones', { indice: 'cajaId', valores: ids });
+    const [apls, entregas] = await Promise.all([
+      db.query('aplicaciones', { indice: 'cajaId', valores: ids }),
+      entregasSeguras(() => db.query('entregas', { indice: 'cajaId', valores: ids }))
+    ]);
     const repuestoPor = new Map();
     for (const a of apls) repuestoPor.set(a.cajaId, (repuestoPor.get(a.cajaId) || 0) + (a.monto || 0));
+    /* Lo entregado al líder se vuelve a sumar aquí y se guarda en la caja: es
+       lo que después decide su estado y cuánto se le repone a quien consignó. */
+    const entregadoPor = new Map(), cuantasPor = new Map();
+    for (const e of entregas) {
+      entregadoPor.set(e.cajaId, (entregadoPor.get(e.cajaId) || 0) + (e.monto || 0));
+      cuantasPor.set(e.cajaId, (cuantasPor.get(e.cajaId) || 0) + 1);
+    }
 
     const porId = new Map();
     const cambiadas = [];
     for (const caja of cajas) {
       porId.set(caja.id, caja);
-      const nuevo = Finanzas.estadoPorReposicion(caja, repuestoPor.get(caja.id) || 0);
-      if (!nuevo || nuevo === caja.estado) continue;
-      caja.estado = nuevo; caja.actualizadoEn = Modelo.ahora();
+      const entregado = entregadoPor.get(caja.id) || 0;
+      const cuantas = cuantasPor.get(caja.id) || 0;
+      const cambioEntregas = (caja.entregado || 0) !== entregado || (caja.nEntregas || 0) !== cuantas;
+      /* Si se le vuelve a girar dinero, la caja deja de estar cerrada con menos:
+         otra vez manda lo entregado. */
+      if (cambioEntregas && caja.cierreParcial && entregado > (caja.entregado || 0)) caja.cierreParcial = 0;
+      caja.entregado = entregado; caja.nEntregas = cuantas;
+      const nuevo = Finanzas.estadoDerivado(caja, repuestoPor.get(caja.id) || 0);
+      if (!cambioEntregas && (!nuevo || nuevo === caja.estado)) continue;
+      if (nuevo) caja.estado = nuevo;
+      caja.actualizadoEn = Modelo.ahora();
       cambiadas.push(caja);
     }
     if (cambiadas.length) {
@@ -4676,6 +4869,89 @@ const PersonasCruzadas = {
     }
     if (corregidos) { Bus.emit('cajas:cambio', null); Bus.emit('consignaciones:cambio', null); }
     return { corregidos, omitidos };
+  }
+};
+
+/* --------------------------------------------------------------------------
+   EntregaService — el dinero que se le gira al LÍDER de la caja
+   --------------------------------------------------------------------------
+   Una caja de 600.000 no siempre se gira de una: si quien adelanta el dinero
+   sólo tiene 300.000, se le entrega eso y la caja queda debiéndole el resto al
+   líder. Cada entrega deja escrito cuánto, cuándo y por qué sólo esa parte, y
+   eso es lo que sale impreso en el formato de la caja.
+   -------------------------------------------------------------------------- */
+const EntregaService = {
+  /** aviso único cuando falta el paso pendiente en la base de datos */
+  exigirTabla() {
+    if (!Estado_App.faltaTablaEntregas) return;
+    throw new ErrorDominio('Todavía no se puede registrar la entrega: falta un paso en la base de datos. ' +
+      'Ejecute «actualizacion-columnas.sql» en Supabase (SQL Editor) y vuelva a intentarlo.', 'FALTA_TABLA');
+  },
+
+  async crear(entrada) {
+    this.exigirTabla();
+    const caja = await CajaRepo.get(entrada.cajaId);
+    if (!caja) throw new ErrorDominio('Caja no encontrada.', 'NO_EXISTE');
+    if (caja.estado === EstadoCaja.ANULADA) throw new ErrorDominio('Una caja anulada no recibe entregas.', 'ANULADA');
+    const previas = await CajaRepo.entregas(caja.id);
+    const e = Modelo.entrega(Object.assign({}, entrada, { contratoId: caja.contratoId }));
+    const errores = this.validar(e, caja, previas);
+    if (errores.length) throw new ErrorValidacion(errores);
+    await db.put('entregas', e);
+    await CajaService.recalcularReposicionLote([caja.id]);
+    await Auditoria.registrar('caja', caja.id, 'ENTREGA', { monto: e.monto, fecha: e.fecha, motivo: e.motivo });
+    Bus.emit('cajas:cambio', await CajaRepo.get(caja.id));
+    return e;
+  },
+
+  async actualizar(id, entrada) {
+    this.exigirTabla();
+    const previa = await db.get('entregas', id);
+    if (!previa) throw new ErrorDominio('Entrega no encontrada.', 'NO_EXISTE');
+    const caja = await CajaRepo.get(previa.cajaId);
+    if (!caja) throw new ErrorDominio('Caja no encontrada.', 'NO_EXISTE');
+    const e = Modelo.entrega(Object.assign({}, previa, entrada, { id: previa.id, cajaId: previa.cajaId,
+      contratoId: previa.contratoId, creadoEn: previa.creadoEn }));
+    const otras = (await CajaRepo.entregas(caja.id)).filter(x => x.id !== id);
+    const errores = this.validar(e, caja, otras);
+    if (errores.length) throw new ErrorValidacion(errores);
+    await db.put('entregas', e);
+    await CajaService.recalcularReposicionLote([caja.id]);
+    await Auditoria.registrar('caja', caja.id, 'ENTREGA_EDITAR', { monto: e.monto, antes: previa.monto });
+    Bus.emit('cajas:cambio', await CajaRepo.get(caja.id));
+    return e;
+  },
+
+  async eliminar(id) {
+    const e = await db.get('entregas', id);
+    if (!e) return;
+    await db.remove('entregas', e.id);
+    await CajaService.recalcularReposicionLote([e.cajaId]);
+    await Auditoria.registrar('caja', e.cajaId, 'ENTREGA_ELIMINAR', { monto: e.monto, fecha: e.fecha });
+    Bus.emit('cajas:cambio', await CajaRepo.get(e.cajaId));
+  },
+
+  /** lo que falta por girarle al líder sin contar esta entrega */
+  faltante(caja, otras) {
+    return Math.max(0, (caja.total || 0) - U.sumBy(otras || [], x => x.monto || 0));
+  },
+
+  validar(e, caja, otras) {
+    const errores = [];
+    if (!Fecha.valida(e.fecha)) errores.push('La fecha de la entrega no es válida.');
+    if (!e.monto || e.monto <= 0) errores.push('El valor entregado debe ser mayor que cero.');
+    const falta = this.faltante(caja, otras);
+    if (e.monto > falta)
+      errores.push('Son ' + Money.format(e.monto) + ' y a esta caja sólo le faltan ' + Money.format(falta) +
+        ' por entregar. Corrija el valor.');
+    /* El motivo se pide sólo cuando queda saldo: es la explicación de por qué
+       se le dio menos de lo que la caja vale. Girándolo completo no hay nada
+       que explicar. */
+    const quedaSaldo = e.monto < falta;
+    if (quedaSaldo && !e.motivo)
+      errores.push('Escriba el motivo: se le está entregando sólo una parte y queda debiéndole ' +
+        Money.format(falta - e.monto) + '.');
+    return errores;
   }
 };
 
@@ -5202,9 +5478,16 @@ const Analitica = (() => {
        base completa, porque deben abarcar todos los contratos. */
     const ctrId = ContratoRepo.activoId();
     const delContrato = x => !ctrId || !x.contratoId || x.contratoId === ctrId;
-    const cajas = todasCajas.filter(delContrato);
-    const idsCajas = new Set(cajas.map(c => c.id));
-    const detalles = todosDetalles.filter(d => idsCajas.has(d.cajaId));
+    /* LAS ESTADÍSTICAS CUENTAN LO GIRADO, NO LO PEDIDO. Una caja de 600.000 a
+       la que sólo se le consignaron 300.000 entra por 300.000, y sus líneas en
+       la misma proporción, para que el total general y el desglose por
+       categoría digan lo mismo. Las cajas normales no cambian en nada. */
+    const propias = todasCajas.filter(delContrato);
+    const idsCajas = new Set(propias.map(c => c.id));
+    const porCajaDet = U.groupBy(todosDetalles.filter(d => idsCajas.has(d.cajaId)), 'cajaId');
+    const detalles = [];
+    for (const c of propias) detalles.push(...Finanzas.prorratear(c, porCajaDet.get(c.id) || []));
+    const cajas = propias.map(c => Finanzas.cajaEfectiva(c));
     const consignaciones = todasCons.filter(delContrato);
     const repuestoPorCaja = new Map();
     for (const a of aplicaciones) { if (!idsCajas.has(a.cajaId)) continue;
@@ -8272,8 +8555,8 @@ const VistaCaja = {
       texto: 'El registro no existe o fue eliminado.' }); return; }
     Shell.titulo(caja.numero, Comp.nombreSolicitante(caja));
 
-    const [detalles, apls, docs] = await Promise.all([
-      CajaRepo.detalles(id), CajaRepo.aplicaciones(id), CajaRepo.documentos(id)
+    const [detalles, apls, docs, entregas] = await Promise.all([
+      CajaRepo.detalles(id), CajaRepo.aplicaciones(id), CajaRepo.documentos(id), CajaRepo.entregas(id)
     ]);
     const consIds = U.uniq(apls.map(a => a.consignacionId));
     const cons = await db.getMany('consignaciones', consIds);
@@ -8444,6 +8727,10 @@ const VistaCaja = {
         '<dt>Consignó</dt><dd>' + esc(Comp.nombreConsigno(caja)) + '</dd>' +
         '</dl></div></div>' +
 
+      /* Primero el dinero llega al líder; después se le devuelve a quien lo
+         puso. Por eso esta tarjeta va antes que la de reposición. */
+      VistaCaja.tarjetaEntregas(caja, entregas) +
+
       '<div class="card mb16"><div class="card-h"><h3>Reposición</h3>' +
         '<div class="ch-act">' + (pendiente > 0 && caja.estado !== EstadoCaja.ANULADA ?
           '<button class="btn btn-sm btn-primary" data-ir="consignacion-nueva">' + Icon('plus', '', 12) + 'Consignar</button>' : '') + '</div></div>' +
@@ -8577,6 +8864,25 @@ const VistaCaja = {
         Toast.ok('Comentario quitado.');
         VistaCaja.render(cont, params);
       },
+      entregaModo: el => {
+        const b = $('#cardEntregas [data-act="entregaNueva"]');
+        if (b) b.classList.toggle('hidden', !el.checked);
+      },
+      entregaNueva: () => VistaCaja.modalEntrega({ caja, entregas,
+        alGuardar: () => VistaCaja.render(cont, params) }),
+      entregaEditar: el => VistaCaja.modalEntrega({ caja, entregas,
+        entrega: entregas.find(x => x.id === el.dataset.id),
+        alGuardar: () => VistaCaja.render(cont, params) }),
+      entregaEliminar: async el => {
+        const e = entregas.find(x => x.id === el.dataset.id);
+        if (!e) return;
+        if (!await Modal.confirmar({ titulo: 'Quitar la entrega', peligro: true, textoOk: 'Quitar',
+          html: 'Se quitará la entrega de <b>' + Money.format(e.monto) + '</b> del ' + Fecha.corta(e.fecha) +
+            '. La caja volverá a deberle ese dinero al líder.' })) return;
+        await EntregaService.eliminar(e.id);
+        Toast.ok('Entrega quitada.');
+        VistaCaja.render(cont, params);
+      },
       adjuntarComprobante: () => { const i = $('#inComprobante'); if (i) i.click(); },
       adjuntarLegalizacion: () => { const i = $('#inLegalizacion'); if (i) i.click(); },
       masAcciones: () => VistaCaja.menuAcciones(caja, cont, params),
@@ -8615,6 +8921,145 @@ const VistaCaja = {
    * y se comportan igual; lo único que cambia es qué prueban. Una sola función
    * evita que se separen con el tiempo.
    */
+  /** Lo que se le consignó por partes, y lo que falta o por qué se cerró así. */
+  tarjetaEntregas(caja, entregas) {
+    const total = caja.total || 0;
+    const entregado = U.sumBy(entregas, e => e.monto || 0);
+    const saldo = Finanzas.saldoLider(caja);
+    const anulada = caja.estado === EstadoCaja.ANULADA;
+    const sinRegistro = !entregas.length;
+    /* Hasta que no se diga que ESTA caja se consignó por partes, el área no se
+       usa: lo normal es girar el total de una vez.
+       Una caja cerrada con lo entregado también puede recibir más: si días
+       después se decide darle el resto, se registra y la caja se reabre sola.
+       Por eso aquí no basta el saldo, que en una cerrada es cero. */
+    const faltaPorGirar = Math.max(0, total - entregado);
+    const puedeRegistrar = !anulada && (saldo > 0 || (caja.cierreParcial && faltaPorGirar > 0));
+    return '<div class="card mb16" id="cardEntregas"><div class="card-h"><h3>Entregas parciales</h3>' +
+      '<span class="ch-sub">' + (sinRegistro ? 'Cuando no se le consigna el total de una vez'
+        : Money.format(entregado) + ' de ' + Money.format(total) + ' pedidos') + '</span>' +
+      '<div class="ch-act">' + (puedeRegistrar
+        ? '<button class="btn btn-sm btn-primary' + (sinRegistro ? ' hidden' : '') + '" data-act="entregaNueva">' +
+          Icon('plus', '', 12) + 'Registrar entrega</button>'
+        : '') + '</div></div>' +
+      '<div class="card-b">' +
+      (Estado_App.faltaTablaEntregas
+        ? '<div class="alert a-warn" style="padding:9px 11px">' + Icon('warn', '', 14) +
+          '<div>Falta un paso en la base de datos para poder registrar entregas por partes: ejecute ' +
+          '<b>actualizacion-columnas.sql</b> en Supabase (SQL Editor). Mientras tanto todo lo demás funciona igual.</div></div>'
+        : '') +
+      (entregas.length
+        ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th style="width:92px">Fecha</th>' +
+          '<th class="num" style="width:110px">Entregado</th><th>Motivo</th><th style="width:70px"></th></tr></thead><tbody>' +
+          entregas.map(e => '<tr>' +
+            '<td class="nowrap">' + Fecha.corta(e.fecha) + '</td>' +
+            '<td class="num"><b>' + Money.format(e.monto) + '</b></td>' +
+            '<td>' + (e.motivo ? esc(e.motivo) : '<span class="txt-3">—</span>') +
+              (e.referencia ? ' <span class="txt-3 fs11">· ' + esc(e.referencia) + '</span>' : '') + '</td>' +
+            '<td class="nowrap">' +
+              '<button class="btn btn-sm btn-ghost btn-icon" data-act="entregaEditar" data-id="' + attr(e.id) +
+                '" data-tip="Editar">' + Icon('edit', '', 12) + '</button>' +
+              '<button class="btn btn-sm btn-ghost btn-icon" data-act="entregaEliminar" data-id="' + attr(e.id) +
+                '" data-tip="Quitar">' + Icon('trash', '', 12) + '</button>' +
+            '</td></tr>').join('') +
+          '</tbody><tfoot><tr><td>Total entregado</td><td class="num">' + Money.format(entregado) +
+          '</td><td colspan="2"></td></tr></tfoot></table></div>' +
+          (caja.cierreParcial
+            ? '<div class="alert a-info mt12" style="padding:8px 11px">' + Icon('info', '', 13) +
+              '<div><b>Cerrada con lo entregado.</b> Pidió ' + Money.format(total) + ' y se le consignaron ' +
+              Money.format(entregado) + '; no necesitó el resto, así que no se le debe nada. A las estadísticas y al ' +
+              'reembolso sólo entran los ' + Money.format(entregado) + '.' +
+              (faltaPorGirar > 0 ? '<br>Si después se decide darle los ' + Money.format(faltaPorGirar) +
+                ' que faltaban, use <b>Registrar entrega</b>: la caja se reabre sola y las cuentas se ajustan.' : '') +
+              '</div></div>'
+            : saldo > 0
+            ? '<div class="alert a-warn mt12" style="padding:8px 11px">' + Icon('warn', '', 13) +
+              '<div>Falta por consignarle <b>' + Money.format(saldo) + '</b> de los ' + Money.format(total) +
+              ' que pidió. Si al final no lo necesita, cambie el estado de la caja a <b>Consignada</b> y se cierra ' +
+              'con lo entregado.</div></div>'
+            : '<div class="alert a-ok mt12" style="padding:8px 11px">' + Icon('check', '', 13) +
+              '<div>Ya se le consignó todo lo de esta caja.</div></div>')
+        : '<div style="padding:4px 2px">' +
+          (puedeRegistrar
+            ? '<label class="chk-linea"><input type="checkbox" data-act="entregaModo">' +
+              '<span>A esta caja se le consignó <b>por partes</b></span></label>'
+            : '') +
+          '<p class="fs12 txt-2" style="margin:8px 0 0">Márquelo cuando no se le gire el total de una vez. ' +
+          'Al marcarlo se habilita <b>Registrar entrega</b>: se anota cuánto se le consignó, cuándo y por qué sólo esa ' +
+          'parte, y la caja pasa a <b>C. Parcial</b>. Si al final el líder se conforma con lo recibido, cambie el estado ' +
+          'a <b>Consignada</b> y la caja se cierra con lo entregado.</p>' +
+          '<p class="fs12 txt-3" style="margin:6px 0 0">Lo normal —girarle los ' + Money.format(total) +
+          ' de una vez— no necesita nada de esto.</p></div>') +
+      '</div></div>';
+  },
+
+  /** Ventana para registrar o corregir una entrega al líder. */
+  modalEntrega(cfg) {
+    const caja = cfg.caja, e = cfg.entrega || {};
+    const editando = Boolean(e.id);
+    /* Lo que falta SIN contar la entrega que se está escribiendo: al corregir
+       una de 300.000 hay que poder subirla o bajarla dentro de ese hueco. */
+    const faltaSin = Math.max(0, (caja.total || 0) - U.sumBy((cfg.entregas || []).filter(x => x.id !== e.id), x => x.monto || 0));
+    const m = Modal.abrir({
+      titulo: editando ? 'Editar la entrega' : 'Registrar entrega parcial',
+      subtitulo: caja.numero + ' · ' + Comp.nombreSolicitante(caja), ancho: 'narrow',
+      cuerpo:
+        '<div class="alert a-info fs12 mb12" style="padding:8px 11px">' + Icon('info', '', 13) +
+        '<div>El líder pidió <b>' + Money.format(caja.total || 0) + '</b>. Falta por consignarle <b>' +
+          Money.format(faltaSin) + '</b>.</div></div>' +
+        '<div class="row">' +
+          '<div class="field" style="flex:0 0 150px"><label>Fecha <span class="req">*</span></label>' +
+            '<input type="date" class="inp" id="enFecha" value="' + attr(e.fecha || Fecha.hoy()) + '"></div>' +
+          '<div class="field"><label>Valor entregado <span class="req">*</span></label>' +
+            '<input class="inp inp-money" id="enMonto" autocomplete="off" value="' +
+              attr(e.monto ? Money.formatInput(e.monto) : '') + '" placeholder="0"></div>' +
+        '</div>' +
+        '<div class="fs11 mb12"><span class="link" id="enTodo">Poner todo lo que falta (' + Money.format(faltaSin) + ')</span></div>' +
+        '<div class="field"><label>Motivo <span class="req" id="enReq">*</span></label>' +
+          '<input class="inp" id="enMotivo" maxlength="160" autocomplete="off" value="' + attr(e.motivo || '') + '" ' +
+            'placeholder="Ej.: sólo había 300.000 disponibles esta semana"></div>' +
+        '<div class="fs11 txt-3" id="enAyuda"></div>' +
+        '<div class="field mt12"><label>Referencia o banco (opcional)</label>' +
+          '<input class="inp" id="enRef" autocomplete="off" value="' + attr(e.referencia || '') + '" ' +
+            'placeholder="N.° de transacción"></div>' +
+        '<div class="fs12 mt8" id="enError" style="color:var(--dang-500)"></div>',
+      pie: '<button class="btn" data-cerrar>Cancelar</button>' +
+           '<button class="btn btn-primary" id="enOk">' + Icon('save', '', 14) + 'Guardar entrega</button>',
+      alMontar(el) {
+        const inMonto = el.querySelector('#enMonto'), inMotivo = el.querySelector('#enMotivo');
+        const revisar = () => {
+          const v = Money.parse(inMonto.value);
+          const queda = Math.max(0, faltaSin - v);
+          /* El motivo se pide sólo si queda debiendo: es la explicación de por
+             qué se le dio menos. */
+          el.querySelector('#enReq').classList.toggle('hidden', queda <= 0);
+          el.querySelector('#enAyuda').textContent = queda > 0
+            ? 'Quedaría debiéndole ' + Money.format(queda) + '. Escriba por qué: sale impreso en el formato de la caja.'
+            : 'Con esto se le entrega todo lo de la caja.';
+        };
+        inMonto.addEventListener('input', revisar);
+        revisar();
+        el.querySelector('#enTodo').onclick = () => { inMonto.value = Money.formatInput(faltaSin); revisar(); inMotivo.focus(); };
+        el.querySelector('#enOk').onclick = async () => {
+          const datos = { fecha: el.querySelector('#enFecha').value, monto: Money.parse(inMonto.value),
+                          motivo: inMotivo.value.trim(), referencia: el.querySelector('#enRef').value.trim() };
+          try {
+            if (editando) await EntregaService.actualizar(e.id, datos);
+            else await EntregaService.crear(Object.assign({ cajaId: caja.id }, datos));
+          } catch (err) {
+            el.querySelector('#enError').innerHTML = err instanceof ErrorValidacion
+              ? err.errores.map(esc).join('<br>') : esc(err.message);
+            return;
+          }
+          Modal.cerrar(m);
+          Toast.ok(editando ? 'Entrega actualizada.' : 'Entrega registrada por ' + Money.format(datos.monto) + '.');
+          if (cfg.alGuardar) cfg.alGuardar();
+        };
+      }
+    });
+    return m;
+  },
+
   tarjetaDocs(o) {
     return '<div class="card mb16" data-docsel="legalizacion"><div class="card-h"><h3>' + esc(o.destino.titulo) + '</h3>' +
       '<span class="ch-sub">' + esc(o.destino.cuando) +
@@ -9167,10 +9612,30 @@ const VistaCajaForm = {
           '<div class="field" style="flex:2 1 260px"><label>Dirección</label>' +
             '<input class="inp" id="fDireccion" value="' + attr(base.direccion || '') + '" placeholder="Dirección de la operación"></div>' +
           '<div class="field" style="flex:0 0 190px"><label>Estado</label>' +
-            '<select class="inp" id="fEstado">' + Object.keys(ESTADO_CAJA_META).filter(k => k !== EstadoCaja.ANULADA)
+            '<select class="inp" id="fEstado">' + Object.keys(ESTADO_CAJA_META)
+              .filter(k => k !== EstadoCaja.ANULADA && k !== EstadoCaja.CONSIGNADA_PARCIAL)
               .map(k => '<option value="' + k + '"' + (base.estado === k ? ' selected' : '') + '>' +
-                ESTADO_CAJA_META[k].label + '</option>').join('') + '</select></div>' +
+                ESTADO_CAJA_META[k].label + '</option>').join('') + '</select>' +
+            /* «C. Parcial» no se elige a mano: sale de registrar la entrega. */
+            (base.estado === EstadoCaja.CONSIGNADA_PARCIAL
+              ? '<div class="fs11 txt-3 mt4">Está como <b>C. Parcial</b> por sus entregas. Cámbielas en la caja.</div>' : '') +
+            '</div>' +
         '</div>' +
+        (editandoId ? '' :
+        /* Muchas cajas se escriben cuando el giro ya ocurrió. Anotarlo aquí
+           evita guardar, entrar a la caja y registrarlo aparte. */
+        '<div class="divider"></div>' +
+        '<div class="row">' +
+          '<div class="field" style="flex:0 0 210px"><label>Ya se le entregó al líder</label>' +
+            '<input class="inp inp-money" id="fEntregado" autocomplete="off" placeholder="0" value="' +
+              attr(base.entregaInicial && base.entregaInicial.monto ? Money.formatInput(base.entregaInicial.monto) : '') + '"></div>' +
+          '<div class="field"><label>Motivo, si se le entregó sólo una parte</label>' +
+            '<input class="inp" id="fEntregadoMotivo" maxlength="160" autocomplete="off" value="' +
+              attr((base.entregaInicial && base.entregaInicial.motivo) || '') + '" ' +
+              'placeholder="Ej.: sólo había 300.000 disponibles esta semana"></div>' +
+        '</div>' +
+        '<div class="fs11 txt-3" id="fEntregadoAyuda">Déjelo vacío si todavía no se le ha girado nada. ' +
+        'Si se le gira sólo una parte, la caja queda en <b>C. Parcial</b> y se le sigue debiendo el resto.</div>') +
         '</div></div>' +
 
         '<div class="card mb16"><div class="card-h"><h3>Detalles del gasto</h3>' +
@@ -9340,6 +9805,16 @@ const VistaCajaForm = {
     $('#fFecha').addEventListener('change', e => { this.estado.fecha = e.target.value; });
     $('#fDireccion').addEventListener('input', e => { this.estado.direccion = e.target.value; });
     $('#fEstado').addEventListener('change', e => { this.estado.estado = e.target.value; });
+    /* Lo escrito aquí sobrevive a ir a crear una persona y volver. */
+    const enIni = $('#fEntregado'), enMot = $('#fEntregadoMotivo');
+    if (enIni) {
+      const recordar = () => {
+        const monto = Money.parse(enIni.value);
+        this.estado.entregaInicial = monto ? { monto, motivo: enMot ? enMot.value.trim() : '' } : null;
+      };
+      enIni.addEventListener('input', recordar);
+      if (enMot) enMot.addEventListener('input', recordar);
+    }
     $('#fObs').addEventListener('input', e => { this.estado.observaciones = e.target.value; });
     setTimeout(() => { if (!editandoId && !base.solicitanteId) inSol.focus(); }, 80);
   },
@@ -9718,6 +10193,12 @@ const VistaCajaForm = {
       direccion: $('#fDireccion').value.trim(),
       estado: $('#fEstado').value,
       observaciones: $('#fObs').value.trim(),
+      entregaInicial: (() => {
+        const inp = $('#fEntregado');
+        const monto = inp ? Money.parse(inp.value) : 0;
+        if (!monto) return null;
+        return { monto, motivo: ($('#fEntregadoMotivo') || {}).value ? $('#fEntregadoMotivo').value.trim() : '' };
+      })(),
       retencion: e.retencion || 0,
       detalles: e.detalles.filter(d => (d.valor || 0) > 0 || !Txt.vacio(d.categoriaNombre) || !Txt.vacio(d.descripcion))
     };
@@ -10938,7 +11419,7 @@ const VistaContratos = {
     for (const c of cajas) {
       const r = resumen.get(c.contratoId); if (!r) continue;
       if (c.estado !== EstadoCaja.ANULADA) {
-        r.n++; r.total += c.total;
+        r.n++; r.total += Finanzas.valorEfectivo(c);
         r.pendiente += Finanzas.pendienteDe(c, repuesto.get(c.id) || 0);
       }
       if (!r.desde || c.fecha < r.desde) r.desde = c.fecha;
@@ -12362,6 +12843,9 @@ const Documento = {
        porque hoy se esté trabajando en otro contrato */
     const ctr = ContratoRepo.get(caja.contratoId) || ContratoRepo.activo() || {};
     const detalles = o.detalles || await CajaRepo.detalles(caja.id);
+    /* Lo que se le giró al líder va impreso: con un giro parcial, el papel
+       tiene que decir cuánto se le dio, cuándo y por qué sólo esa parte. */
+    const entregas = o.entregas || (caja.nEntregas > 0 ? await CajaRepo.entregas(caja.id) : []);
     const sol = caja.solicitante || {};
     /* Antes se rellenaba hasta 12 filas «por si acaso». Con eso el formato
        llegaba al borde de la hoja y cualquier caja con varios conceptos —o con
@@ -12458,6 +12942,26 @@ const Documento = {
          quitaron del impreso: ocupaban dos bloques y apretaban la hoja. Las
          cifras siguen estando —cada una en su fila del detalle— y la firma de
          quien recibe ya deja constancia de la aceptación. */
+      (entregas.length ? (() => {
+        const entregado = U.sumBy(entregas, e => e.monto || 0);
+        const saldo = Math.max(0, (caja.total || 0) - entregado);
+        return '<div class="dp-ent">' +
+          '<div class="dp-ent-t">' + Documento.ROTULO_ENTREGAS + '</div>' +
+          '<table class="dp-tbl"><thead><tr>' +
+            '<th style="width:22mm">FECHA</th><th style="width:30mm">ENTREGADO</th><th>MOTIVO</th>' +
+          '</tr></thead><tbody>' +
+          entregas.map(e => '<tr>' +
+            '<td class="c">' + Fecha.corta(e.fecha) + '</td>' +
+            '<td class="n">' + Money.format(e.monto) + '</td>' +
+            '<td>' + esc(e.motivo || '—') + (e.referencia ? ' · ' + esc(e.referencia) : '') + '</td></tr>').join('') +
+          '<tr class="rr-tot"><td colspan="1">TOTAL ENTREGADO</td><td class="n">' + Money.format(entregado) + '</td>' +
+            '<td>' + (caja.cierreParcial
+              ? 'Se pidieron ' + Money.format(caja.total || 0) + ' y la caja se cerró con lo entregado: el resto no se necesitó'
+              : saldo > 0 ? 'Queda pendiente por consignar ' + Money.format(saldo) + ' de los ' + Money.format(caja.total || 0) + ' pedidos'
+              : 'Consignado en su totalidad') + '</td></tr>' +
+          '</tbody></table></div>';
+      })() : '') +
+
       (caja.observaciones ? '<div class="dp-obs"><b>Observaciones</b>' + esc(caja.observaciones) + '</div>' : '') +
 
       '<div class="dp-sign">' +
@@ -12480,6 +12984,9 @@ const Documento = {
       '</div>' +
     '</div>';
   },
+
+  /** título de la sección de entregas, arriba de su tabla */
+  ROTULO_ENTREGAS: 'ENTREGAS PARCIALES',
 
   /** documento autocontenido para archivar (incluye su propio CSS) */
   async construirAutonomo(caja, opts) {
@@ -14189,9 +14696,10 @@ const Respaldo = {
   /** verificación de integridad referencial (§43) */
   async verificarIntegridad() {
     const problemas = [];
-    const [cajas, detalles, apls, cons, docs, personas] = await Promise.all([
+    const [cajas, detalles, apls, cons, docs, personas, entregas] = await Promise.all([
       db.getAll('cajas'), db.getAll('detalles'), db.getAll('aplicaciones'),
-      db.getAll('consignaciones'), db.getAll('documentos'), db.getAll('personas')
+      db.getAll('consignaciones'), db.getAll('documentos'), db.getAll('personas'),
+      db.getAll('entregas')
     ]);
     const idsCajas = new Set(cajas.map(c => c.id));
     const idsCons = new Set(cons.map(c => c.id));
@@ -14236,6 +14744,26 @@ const Respaldo = {
     for (const c of cajas) {
       if (nums.has(c.numero)) problemas.push({ tipo: 'Número duplicado', detalle: c.numero });
       nums.set(c.numero, c.id);
+    }
+    /* Lo entregado al líder se guarda sumado en la caja para no pedir las
+       entregas en cada listado. Si esa suma se separa de sus entregas, el
+       estado y lo que se le repone a quien consignó salen mal. */
+    for (const e of entregas) {
+      if (!idsCajas.has(e.cajaId))
+        problemas.push({ tipo: 'Entrega huérfana', detalle: 'La entrega ' + e.id + ' apunta a una caja inexistente.' });
+      if ((e.monto || 0) <= 0)
+        problemas.push({ tipo: 'Entrega sin valor', detalle: 'La entrega ' + e.id + ' no tiene valor.' });
+    }
+    for (const c of cajas) {
+      const suyas = entregas.filter(e => e.cajaId === c.id);
+      const suma = U.sumBy(suyas, e => e.monto || 0);
+      if (suma !== (c.entregado || 0) || suyas.length !== (c.nEntregas || 0))
+        problemas.push({ tipo: 'Entregado inconsistente', detalle: 'Caja ' + c.numero + ': guardado ' +
+          Money.format(c.entregado || 0) + ' en ' + (c.nEntregas || 0) + ' entrega(s) vs. ' + Money.format(suma) +
+          ' en ' + suyas.length + '.', cajaId: c.id });
+      if (suma > (c.total || 0))
+        problemas.push({ tipo: 'Sobre-entrega', detalle: 'Caja ' + c.numero + ': entregado ' + Money.format(suma) +
+          ' supera el total ' + Money.format(c.total) + '.', cajaId: c.id });
     }
     for (const d of docs) {
       if (d.cajaId && !idsCajas.has(d.cajaId)) problemas.push({ tipo: 'Documento huérfano', detalle: d.nombre });
@@ -14494,7 +15022,7 @@ const Migracion = {
     const L = [];
     const T = x => L.push(x);
     const TABLAS = ['configuracion', 'contratos', 'municipios', 'personas', 'categorias', 'cajas',
-                    'detalles', 'consignaciones', 'aplicaciones', 'documentos', 'auditoria',
+                    'detalles', 'entregas', 'consignaciones', 'aplicaciones', 'documentos', 'auditoria',
                     'importaciones', 'secuencias'];
 
     T('-- ============================================================================');
@@ -14602,6 +15130,10 @@ const Migracion = {
     T('  total_detalles int default 0, observaciones text, comentario text,');
     T('  requiere_revision boolean default false, motivo_revision text,');
     T('  reposicion_manual boolean default false,');
+    T('  -- lo girado al lider, sumado, para no pedir las entregas en cada listado');
+    T('  entregado bigint not null default 0, n_entregas int not null default 0,');
+    T('  -- se cerro con lo entregado: el lider no necesito el resto');
+    T('  cierre_parcial boolean default false,');
     T("  origen text default 'MANUAL', legacy jsonb,");
     T('  anulada_en timestamptz, motivo_anulacion text,');
     T('  creado_en timestamptz default now(), actualizado_en timestamptz default now(),');
@@ -14636,6 +15168,21 @@ const Migracion = {
     T('create index if not exists ix_detalles_contrato on detalles (contrato_id);');
     T('create index if not exists ix_detalles_rol on detalles (rol);');
     T('create index if not exists ix_detalles_categoria on detalles (categoria_id);');
+    T('');
+    T('-- Lo que se le gira al LÍDER de la caja. Puede ir en varias partes: por eso');
+    T('-- se guarda cada entrega con su fecha, su valor y el motivo de por qué se');
+    T('-- le dio sólo esa parte.');
+    T('create table if not exists entregas (');
+    T('  id text primary key,');
+    T('  contrato_id text references contratos(id) on delete restrict,');
+    T('  caja_id text not null references cajas(id) on delete cascade,');
+    T('  fecha date not null, monto bigint not null, motivo text,');
+    T('  banco text, referencia text,');
+    T("  origen text default 'MANUAL',");
+    T('  creado_en timestamptz default now(), actualizado_en timestamptz default now(),');
+    T('  constraint ck_entrega_monto check (monto > 0)');
+    T(');');
+    T('create index if not exists ix_entregas_caja on entregas (caja_id);');
     T('');
     T('create table if not exists consignaciones (');
     T('  id text primary key,');
@@ -14759,7 +15306,7 @@ const Migracion = {
 
   /** orden que respeta las claves foráneas */
   ORDEN_SUBIDA: ['configuracion', 'contratos', 'municipios', 'personas', 'categorias', 'cajas',
-                 'detalles', 'consignaciones', 'aplicaciones', 'documentos', 'importaciones',
+                 'detalles', 'entregas', 'consignaciones', 'aplicaciones', 'documentos', 'importaciones',
                  'auditoria', 'secuencias'],
 
   /**
@@ -16931,6 +17478,288 @@ const Pruebas = {
             Pruebas.ok(r.resumen.gastoOperativo !== r.resumen.gastoOperativo + r.resumen.totalRepuesto,
               'Gasto y reposición son magnitudes independientes');
           } },
+        { nombre: 'CRÍTICO · a un líder se le puede girar por partes, y queda escrito por qué', fn: async ctx => {
+            /* La caja de Andrés vale 600.000 y Fabián sólo tiene 300.000: se le
+               abona eso, la caja queda «C. Parcial» y se le sigue debiendo el
+               resto. Antes esto era todo o nada. */
+            const fab = PersonaRepo.financiadores()[0];
+            const caja = await CajaService.crear({
+              fecha: '2026-09-02', solicitanteId: ctx.fernando.id, consignoId: fab.id, estado: EstadoCaja.PENDIENTE,
+              detalles: [{ categoriaNombre: 'Gasolina de la cuadrilla', descripcion: 'Gasolina', valor: Money.parse('600.000') }]
+            });
+            Pruebas.igual(Finanzas.saldoLider(caja), 60000000, 'Sin girarle nada, se le deben los 600.000');
+
+            /* Media entrega sin explicación no pasa: el motivo ES el registro. */
+            await Pruebas.lanza(() => EntregaService.crear({ cajaId: caja.id, fecha: '2026-09-03',
+              monto: Money.parse('300.000') }), 'Un giro parcial sin motivo no se guarda');
+            await Pruebas.lanza(() => EntregaService.crear({ cajaId: caja.id, fecha: '2026-09-03',
+              monto: Money.parse('900.000'), motivo: 'de más' }), 'Ni uno que supere lo que falta');
+
+            await EntregaService.crear({ cajaId: caja.id, fecha: '2026-09-03', monto: Money.parse('300.000'),
+              motivo: 'Fabián sólo tenía 300.000 esta semana' });
+            let actual = await CajaRepo.get(caja.id);
+            Pruebas.igual(actual.estado, EstadoCaja.CONSIGNADA_PARCIAL, 'La caja queda en C. Parcial');
+            Pruebas.igual(actual.entregado, 30000000, 'Con 300.000 entregados');
+            Pruebas.igual(actual.nEntregas, 1, 'Y una entrega registrada');
+            Pruebas.igual(Finanzas.saldoLider(actual), 30000000, 'Se le siguen debiendo 300.000 al líder');
+
+            /* Y a quien puso el dinero se le repone lo que puso, no el total. */
+            Pruebas.igual(Finanzas.pendienteDe(actual, 0), 30000000,
+              'A quien consignó se le deben los 300.000 que entregó, no los 600.000 de la caja');
+            const enPendientes = (await CajaService.pendientesDeReposicion({})).map(c => c.id);
+            Pruebas.ok(enPendientes.includes(caja.id), 'La caja aparece para reponerle a quien consignó');
+
+            /* El impreso deja constancia. */
+            const html = await Documento.construir(actual);
+            Pruebas.ok(html.includes(Documento.ROTULO_ENTREGAS), 'El formato impreso lleva el bloque de entregas');
+            Pruebas.ok(/Fabián sólo tenía 300.000 esta semana/.test(html), 'Con el motivo escrito');
+            Pruebas.ok(/Queda pendiente por consignar/.test(html) && html.includes(Money.format(30000000)),
+              'Y lo que se le queda debiendo');
+
+            /* Se le completa el resto: ahí ya no hay nada que explicar. */
+            await EntregaService.crear({ cajaId: caja.id, fecha: '2026-09-20', monto: Money.parse('300.000') });
+            actual = await CajaRepo.get(caja.id);
+            Pruebas.igual(actual.estado, EstadoCaja.CONSIGNADA, 'Completado el giro, la caja queda Consignada');
+            Pruebas.igual(Finanzas.saldoLider(actual), 0, 'Sin saldo al líder');
+            Pruebas.igual(Finanzas.pendienteDe(actual, 0), 60000000, 'Y ahora sí se le reponen los 600.000 a quien consignó');
+
+            /* Quitar una entrega devuelve la caja a como estaba. */
+            const ents = await CajaRepo.entregas(caja.id);
+            Pruebas.igual(ents.map(e => Fecha.corta(e.fecha)).join(), [Fecha.corta('2026-09-03'), Fecha.corta('2026-09-20')].join(),
+              'Las entregas salen en orden de fecha');
+            await EntregaService.eliminar(ents[1].id);
+            actual = await CajaRepo.get(caja.id);
+            Pruebas.igual(actual.estado, EstadoCaja.CONSIGNADA_PARCIAL, 'Al quitar la última vuelve a C. Parcial');
+            Pruebas.igual(Finanzas.pendienteDe(actual, 0), 30000000, 'Y se le vuelve a deber sólo lo entregado');
+
+            /* Con dinero ya entregado, anular no es tan fácil. */
+            await Pruebas.lanza(() => CajaService.anular(caja.id, 'prueba'),
+              'Una caja con dinero entregado no se anula sin quitar las entregas');
+            ctx.cajaGiroParcial = caja;
+          } },
+
+        { nombre: 'CRÍTICO · mientras falte el paso en la base de datos, todo lo demás sigue funcionando', fn: async ctx => {
+            /* La tabla de entregas es nueva. Si el script todavía no se ha
+               corrido en la nube, abrir una caja o guardar una consignación no
+               puede romperse: se trabaja como antes y se avisa. */
+            const antes = Estado_App.faltaTablaEntregas;
+            const queryOrig = db.query;
+            db.query = function (col, opts) {
+              if (col === 'entregas') return Promise.reject(new Error('relation "public.entregas" does not exist'));
+              return queryOrig.call(this, col, opts);
+            };
+            let caja = null;
+            try {
+              Estado_App.faltaTablaEntregas = false;
+              caja = await CajaService.crear({
+                fecha: '2026-09-02', solicitanteId: ctx.fernando.id, estado: EstadoCaja.CONSIGNADA,
+                consignoId: (PersonaRepo.financiadores()[0] || {}).id,
+                detalles: [{ categoriaNombre: 'Trabajo especial', descripcion: 'Poda', valor: Money.parse('200.000') }]
+              });
+              Pruebas.igual((await CajaRepo.entregas(caja.id)).length, 0, 'Pedir las entregas devuelve vacío en vez de reventar');
+              Pruebas.ok(Estado_App.faltaTablaEntregas, 'Y el programa se entera de que falta el paso');
+              const con = await ConsignacionService.crear({ fecha: '2026-09-06',
+                beneficiarioId: (PersonaRepo.financiadores()[0] || {}).id, valor: Money.parse('200.000'),
+                asignaciones: [{ cajaId: caja.id, monto: Money.parse('200.000') }] });
+              Pruebas.igual((await CajaRepo.get(caja.id)).estado, EstadoCaja.REEMBOLSADA,
+                'Guardar una consignación sigue funcionando igual');
+              await ConsignacionService.eliminar(con.id);
+              const div = document.createElement('div');
+              await VistaCaja.render(div, [caja.id]);
+              Pruebas.ok(/actualizacion-columnas\.sql/.test(div.textContent),
+                'La caja explica el paso que falta, en vez de fallar');
+              let err = null;
+              try { await EntregaService.crear({ cajaId: caja.id, monto: Money.parse('50.000'), motivo: 'x' }); }
+              catch (e) { err = e; }
+              Pruebas.ok(err && err.codigo === 'FALTA_TABLA' && /actualizacion-columnas\.sql/.test(err.message),
+                'Y registrar una entrega dice exactamente qué hay que hacer');
+            } finally {
+              db.query = queryOrig;
+              Estado_App.faltaTablaEntregas = antes;
+            }
+          } },
+
+        { nombre: 'CRÍTICO · la caja de siempre, sin entregas registradas, no cambia en nada', fn: async ctx => {
+            /* Todo lo anterior al cambio sigue igual: sin entregas anotadas, a
+               quien consignó se le repone el total, como toda la vida. */
+            const caja = await CajaService.crear({
+              fecha: '2026-09-02', solicitanteId: ctx.fernando.id, estado: EstadoCaja.CONSIGNADA,
+              consignoId: (PersonaRepo.financiadores()[0] || {}).id,
+              detalles: [{ categoriaNombre: 'Trabajo especial', descripcion: 'Poda', valor: Money.parse('400.000') }]
+            });
+            Pruebas.igual(caja.nEntregas, 0, 'Nace sin entregas registradas');
+            Pruebas.igual(Finanzas.pendienteDe(caja, 0), 40000000, 'Se le repone el total de la caja');
+            Pruebas.igual(Finanzas.saldoLider(caja), 0, 'Marcada como consignada, al líder no se le debe nada');
+            const pend = await CajaService.crear({
+              fecha: '2026-09-02', solicitanteId: ctx.fernando.id, estado: EstadoCaja.PENDIENTE,
+              detalles: [{ categoriaNombre: 'Trabajo especial', descripcion: 'Poda', valor: Money.parse('100.000') }]
+            });
+            Pruebas.igual(Finanzas.pendienteDe(pend, 0), 0, 'Una pendiente no le debe nada a quien consignó');
+            Pruebas.igual(Finanzas.saldoLider(pend), 10000000, 'Pero al líder se le deben sus 100.000');
+          } },
+
+        { nombre: 'CRÍTICO · la caja enseña sus entregas y se registran desde ahí', fn: async ctx => {
+            const pausa = ms => new Promise(r => setTimeout(r, ms));
+            const caja = ctx.cajaGiroParcial;
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            try {
+              await VistaCaja.render(div, [caja.id]);
+              const tarjeta = div.querySelector('#cardEntregas');
+              Pruebas.ok(tarjeta && /Entregas parciales/.test(tarjeta.textContent), 'La caja tiene su tarjeta de entregas parciales');
+              Pruebas.ok(/Fabián sólo tenía 300.000 esta semana/.test(tarjeta.textContent), 'Con el motivo de cada una');
+              Pruebas.ok(/Falta por consignarle/.test(tarjeta.textContent) && tarjeta.textContent.includes(Money.format(30000000)),
+                'Y lo que falta por girarle');
+              Pruebas.ok(/C\. Parcial/.test(div.textContent), 'El estado de la caja se ve como C. Parcial');
+
+              tarjeta.querySelector('[data-act="entregaNueva"]').click();
+              await pausa(60);
+              const v = [...document.querySelectorAll('#modals .modal-bd')].pop();
+              Pruebas.ok(v && /Falta por consignarle/.test(v.textContent) && v.textContent.includes(Money.format(30000000)),
+                'La ventana dice cuánto falta');
+              v.querySelector('#enTodo').click();
+              Pruebas.igual(Money.parse(v.querySelector('#enMonto').value), 30000000, '«Todo lo que falta» llena el valor');
+              Pruebas.ok(v.querySelector('#enReq').classList.contains('hidden'), 'Girando todo, el motivo deja de ser obligatorio');
+              v.querySelector('#enMonto').value = Money.formatInput(Money.parse('100.000'));
+              v.querySelector('#enMonto').dispatchEvent(new Event('input'));
+              Pruebas.ok(!v.querySelector('#enReq').classList.contains('hidden') && /Quedaría debiéndole/.test(v.textContent),
+                'Y si se le da menos, vuelve a pedirlo y dice cuánto quedaría debiendo');
+              v.querySelector('#enOk').click(); await pausa(80);
+              Pruebas.ok(document.body.contains(v) && /motivo/i.test(v.querySelector('#enError').textContent),
+                'Sin motivo no deja guardar, y lo dice dentro de la ventana');
+              v.querySelector('#enMotivo').value = 'Se le completó lo que había';
+              v.querySelector('#enOk').click();
+              for (let i = 0; i < 80 && document.body.contains(v); i++) await pausa(20);
+              const fresca = await CajaRepo.get(caja.id);
+              Pruebas.igual(fresca.entregado, 40000000, 'La entrega nueva queda guardada');
+              Pruebas.igual(fresca.nEntregas, 2, 'Y son dos entregas');
+              Pruebas.igual(fresca.estado, EstadoCaja.CONSIGNADA_PARCIAL, 'La caja sigue en C. Parcial por lo que falta');
+            } finally {
+              for (let i = 0; i < 5 && document.querySelector('#modals .modal-bd'); i++) Modal.cerrarTop();
+              div.remove();
+            }
+          } },
+
+        { nombre: 'CRÍTICO · el área sólo se abre al marcar la casilla, y la caja se puede cerrar con lo entregado', fn: async ctx => {
+            const pausa = ms => new Promise(r => setTimeout(r, ms));
+            const caja = await CajaService.crear({
+              fecha: '2026-09-04', solicitanteId: ctx.fernando.id, estado: EstadoCaja.PENDIENTE,
+              consignoId: (PersonaRepo.financiadores()[0] || {}).id,
+              detalles: [{ categoriaNombre: 'Gasolina de la cuadrilla', descripcion: 'Gasolina', valor: Money.parse('600.000') }]
+            });
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            try {
+              await VistaCaja.render(div, [caja.id]);
+              const card = div.querySelector('#cardEntregas');
+              const boton = card.querySelector('[data-act="entregaNueva"]');
+              Pruebas.ok(boton && boton.classList.contains('hidden'),
+                'Sin marcar nada, no se ofrece registrar entregas: lo normal es girar el total');
+              const casilla = card.querySelector('[data-act="entregaModo"]');
+              Pruebas.ok(Boolean(casilla), 'Hay una casilla para decir que se consignó por partes');
+              casilla.click(); await pausa(40);
+              Pruebas.ok(!div.querySelector('#cardEntregas [data-act="entregaNueva"]').classList.contains('hidden'),
+                'Al marcarla se habilita «Registrar entrega»');
+            } finally { div.remove(); }
+
+            /* «C. Parcial» no se puede poner a mano: sale de lo girado. */
+            await Pruebas.lanza(() => CajaService.cambiarEstado(caja.id, EstadoCaja.CONSIGNADA_PARCIAL),
+              'El estado C. Parcial no se elige a mano sin entregas');
+
+            await EntregaService.crear({ cajaId: caja.id, fecha: '2026-09-05', monto: Money.parse('300.000'),
+              motivo: 'Sólo había 300.000' });
+            Pruebas.igual((await CajaRepo.get(caja.id)).estado, EstadoCaja.CONSIGNADA_PARCIAL, 'Con la entrega queda en C. Parcial');
+
+            /* El líder no necesitó el resto: se cierra con lo entregado. */
+            await CajaService.cambiarEstado(caja.id, EstadoCaja.CONSIGNADA);
+            let actual = await CajaRepo.get(caja.id);
+            Pruebas.igual(actual.estado, EstadoCaja.CONSIGNADA, 'Al pasarla a Consignada, la caja se cierra');
+            Pruebas.igual(actual.cierreParcial, 1, 'Y queda marcado que se cerró con lo entregado');
+            Pruebas.igual(actual.total, 60000000, 'Lo que pidió al principio NO se borra');
+            Pruebas.igual(Finanzas.saldoLider(actual), 0, 'Ya no se le debe nada al líder');
+            Pruebas.igual(Finanzas.pendienteDe(actual, 0), 30000000, 'A quien consignó se le reponen sólo los 300.000 girados');
+            Pruebas.igual(Finanzas.valorEfectivo(actual), 30000000, 'Y para las cuentas la caja vale lo que se giró');
+
+            /* Y el papel lo dice: se pidieron 600.000 y se cerró con 300.000. */
+            const impreso = await Documento.construir(actual);
+            Pruebas.ok(/se cerró con lo entregado/.test(impreso) && impreso.includes(Money.format(60000000)),
+              'El impreso deja constancia de que se cerró con lo entregado, y de lo que se había pedido');
+
+            /* Ni la recalculación ni una consignación la devuelven a C. Parcial. */
+            await CajaService.recalcularReposicion(caja.id);
+            Pruebas.igual((await CajaRepo.get(caja.id)).estado, EstadoCaja.CONSIGNADA, 'El cierre se respeta');
+
+            /* Las estadísticas cuentan 300.000, no 600.000, y el desglose cuadra. */
+            Analitica.invalidar();
+            const r = await Analitica.consultar({ desde: '2026-09-04', hasta: '2026-09-04' });
+            const mia = r.cajas.find(c => c.id === caja.id);
+            Pruebas.igual(mia.total, 30000000, 'En las estadísticas la caja entra por lo girado');
+            Pruebas.igual(mia.totalPedido, 60000000, 'Sin perder lo que se había pedido');
+            const suma = U.sumBy(r.porCategoria, c => c.total);
+            Pruebas.igual(suma, r.resumen.gastoOperativo, 'El total general y el desglose por categoría dicen lo mismo');
+            Analitica.invalidar();
+
+            /* Si días después se decide darle el resto, hay por dónde: la caja
+               cerrada sigue ofreciendo «Registrar entrega». */
+            const div2 = document.createElement('div');
+            div2.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div2);
+            try {
+              await VistaCaja.render(div2, [caja.id]);
+              const card2 = div2.querySelector('#cardEntregas');
+              const boton2 = card2.querySelector('[data-act="entregaNueva"]');
+              Pruebas.ok(boton2 && !boton2.classList.contains('hidden'),
+                'Una caja cerrada con menos todavía deja registrar el resto');
+              Pruebas.ok(/se reabre sola/.test(card2.textContent), 'Y explica que al hacerlo la caja se reabre');
+            } finally { div2.remove(); }
+
+            await EntregaService.crear({ cajaId: caja.id, fecha: '2026-09-25', monto: Money.parse('100.000'),
+              motivo: 'Al final sí necesitó más' });
+            actual = await CajaRepo.get(caja.id);
+            Pruebas.igual(actual.cierreParcial, 0, 'Girarle más deshace el cierre');
+            Pruebas.igual(actual.estado, EstadoCaja.CONSIGNADA_PARCIAL, 'Y la caja vuelve a C. Parcial');
+            Pruebas.igual(Finanzas.saldoLider(actual), 20000000, 'Con lo que falta otra vez a la vista');
+            Pruebas.igual(Finanzas.valorEfectivo(actual), 40000000, 'Y las cuentas ya son por los 400.000 girados');
+
+            /* Y si se le completa TODO, la caja queda consignada del todo. */
+            await EntregaService.crear({ cajaId: caja.id, fecha: '2026-09-28', monto: Money.parse('200.000') });
+            actual = await CajaRepo.get(caja.id);
+            Pruebas.igual(actual.estado, EstadoCaja.CONSIGNADA, 'Completado el resto, la caja queda Consignada');
+            Pruebas.igual(actual.cierreParcial, 0, 'Sin marca de cierre con menos');
+            Pruebas.igual(Finanzas.valorEfectivo(actual), 60000000, 'Y cuenta por los 600.000 completos');
+          } },
+
+        { nombre: 'Al registrar una caja se puede anotar lo que ya se le giró', fn: async ctx => {
+            const pausa = ms => new Promise(r => setTimeout(r, ms));
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            const irOriginal = Router.ir;
+            let cajaId = null;
+            try {
+              await VistaCajaForm.render(div, []);
+              VistaCajaForm.estado.solicitanteId = ctx.fernando.id;
+              VistaCajaForm.estado.municipioId = ctx.municipio.id;
+              div.querySelector('#fSolicitante').value = 'x';
+              const d = VistaCajaForm.estado.detalles[0];
+              d.categoriaNombre = 'Gasolina de la cuadrilla'; d.elemento = 'Gasolina'; d.valor = Money.parse('600.000');
+              div.querySelector('#fEntregado').value = Money.formatInput(Money.parse('300.000'));
+              div.querySelector('#fEntregadoMotivo').value = 'No había más plata ese día';
+              Router.ir = ruta => { cajaId = String(ruta).replace('caja/', ''); };
+              await VistaCajaForm.guardar(null, div);
+              await pausa(120);
+            } finally { Router.ir = irOriginal; div.remove(); }
+            const caja = await CajaRepo.get(cajaId);
+            Pruebas.igual(caja.estado, EstadoCaja.CONSIGNADA_PARCIAL, 'La caja nace en C. Parcial');
+            Pruebas.igual(caja.entregado, 30000000, 'Con lo que ya se le había girado');
+            const ents = await CajaRepo.entregas(cajaId);
+            Pruebas.igual(ents.length, 1, 'Anotado como su primera entrega');
+            Pruebas.igual(ents[0].motivo, 'No había más plata ese día', 'Con su motivo');
+            Pruebas.igual(ents[0].fecha, caja.fecha, 'Y con la fecha de la caja');
+          } },
+
         { nombre: 'Reposición parcial deja saldo pendiente', fn: async ctx => {
             const caja = await CajaService.crear({
               fecha: '2026-05-02', solicitanteId: ctx.fernando.id, estado: EstadoCaja.CONSIGNADA,
@@ -18019,7 +18848,10 @@ const Pruebas = {
             const r = await Analitica.consultar({});
             const ctrId = ContratoRepo.activoId();
             const todas = (await db.getAll('cajas')).filter(c => !ctrId || c.contratoId === ctrId);
-            const sumaVivas = U.sumBy(todas.filter(c => c.estado !== EstadoCaja.ANULADA && c.estado !== EstadoCaja.BORRADOR), c => c.total);
+            /* Lo que cuenta es lo girado: una caja a la que sólo se le
+               consignó una parte entra por esa parte, no por lo que pidió. */
+            const sumaVivas = U.sumBy(todas.filter(c => c.estado !== EstadoCaja.ANULADA && c.estado !== EstadoCaja.BORRADOR),
+              c => Finanzas.valorEfectivo(c));
             Pruebas.igual(r.resumen.gastoOperativo, sumaVivas, 'Sólo cuentan las cajas vivas del contrato activo');
           } },
         { nombre: 'Búsqueda global encuentra por número y por nombre', fn: async ctx => {
