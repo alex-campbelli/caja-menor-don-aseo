@@ -687,6 +687,9 @@ html[data-theme="dark"] .marca.m-sinlegal{background:rgba(217,143,6,.18);color:#
 /* Marcar varios adjuntos para eliminarlos de una vez. */
 /* Casilla con su texto al lado, en una línea. */
 .chk-linea{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--text);cursor:pointer;user-select:none}
+/* Aviso de archivo que ya estaba en otra caja */
+.rep-lista{display:flex;flex-direction:column;gap:6px}
+.rep-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:8px}
 .docsel-todos{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;color:var(--text-2);
   cursor:pointer;user-select:none;white-space:nowrap;margin-right:4px}
 .doc-chk-hueco{display:inline-block;width:15px;flex:0 0 15px}
@@ -1827,7 +1830,7 @@ const ESQUEMA_IDB = {
   entregas:       { keyPath: 'id', indices: [ ['cajaId', 'cajaId'], ['contratoId', 'contratoId'], ['fecha', 'fecha'] ] },
   documentos:     { keyPath: 'id', indices: [
                       ['cajaId', 'cajaId'], ['consignacionId', 'consignacionId'],
-                      ['tipo', 'tipo'], ['creadoEn', 'creadoEn'] ] },
+                      ['tipo', 'tipo'], ['creadoEn', 'creadoEn'], ['hash', 'hash'] ] },
   archivos:       { keyPath: 'docId', indices: [] },
   auditoria:      { keyPath: 'id', indices: [ ['entidadId', 'entidadId'], ['entidad', 'entidad'], ['ts', 'ts'] ] },
   importaciones:  { keyPath: 'id', indices: [ ['creadoEn', 'creadoEn'] ] }
@@ -5443,6 +5446,30 @@ const DocumentoService = {
   },
   errorDuplicado(file) {
     return new ErrorDominio('"' + file.name + '" ya está adjunto (mismo contenido).', 'DUPLICADO');
+  },
+  /**
+   * Los mismos archivos, adjuntos en OTRAS cajas o consignaciones.
+   *
+   * No impide nada: el comprobante de una transferencia que cubre varias cajas
+   * se sube en cada una, y está bien. Sirve para avisar por si fue un error
+   * —el comprobante de Andrés subido en la caja de Robinson—. Si la consulta
+   * falla, simplemente no se avisa: nunca tumba una subida.
+   *   devuelve [{ doc, en: [documentos iguales en otro lado] }]
+   */
+  async enOtrosLados(docs) {
+    const conHuella = (docs || []).filter(d => d && d.hash);
+    if (!conHuella.length) return [];
+    let iguales = [];
+    try { iguales = await db.query('documentos', { indice: 'hash', valores: U.uniq(conHuella.map(d => d.hash)) }); }
+    catch (e) { console.warn('[repetidos] no se pudo revisar:', e && e.message); return []; }
+    const out = [];
+    for (const d of conHuella) {
+      const en = iguales.filter(o => o.hash === d.hash && o.id !== d.id &&
+        !(d.cajaId && o.cajaId === d.cajaId) && !(d.consignacionId && o.consignacionId === d.consignacionId) &&
+        (o.cajaId || o.consignacionId));
+      if (en.length) out.push({ doc: d, en });
+    }
+    return out;
   },
   /** detecta un archivo idéntico ya adjunto a la misma caja */
   async duplicado(hash, cajaId, consignacionId) {
@@ -9409,7 +9436,7 @@ const Expediente = {
   async subir(files, meta, opciones) {
     const lista = [...(files || [])];
     const o = opciones || {};
-    const r = { ok: 0, dup: 0, fallos: [] };
+    const r = { ok: 0, dup: 0, fallos: [], nuevos: [], enOtras: [] };
     if (!lista.length) return r;
     const prog = o.progreso || Progreso.abrir({ total: lista.length,
       titulo: lista.length === 1 ? 'Adjuntando documento' : 'Adjuntando ' + lista.length + ' documentos' });
@@ -9420,26 +9447,85 @@ const Expediente = {
           prog.enFase('Revisando si ya estaba adjunto…', 0.05);
           /* Si ya está, se omite: lo decide el servicio, que es el que sabe
              comparar tanto el archivo elegido como su copia achicada. */
-          await DocumentoService.adjuntar(f, Object.assign({}, meta, {
+          const doc = await DocumentoService.adjuntar(f, Object.assign({}, meta, {
             sinRepetir: true,
             alProgreso: fase => fase === 'subiendo'
               ? prog.enFase('Subiendo al servidor…', 0.5)
               : prog.enFase('Preparando el archivo…', 0.15)
           }));
           r.ok++;
+          if (doc) r.nuevos.push(doc);
         } catch (e) {
           if (e && e.codigo === 'DUPLICADO') { r.dup++; continue; }
           console.error(e);
           r.fallos.push({ nombre: f.name, motivo: (e && e.message) || String(e) });
         } finally { prog.acabar(); }
       }
+      /* Dentro de la misma ventana: así el aviso llega junto con el resultado,
+         y no un momento después con la pantalla ya libre. */
+      if (r.nuevos.length) {
+        prog.rematar('Revisando si ya estaba en otra caja…');
+        try { r.enOtras = await this.buscarRepetidos(r.nuevos); } catch (e) { console.error(e); }
+      }
       if (o.alTerminar) {
         prog.rematar('Actualizando la vista…');
         try { await o.alTerminar(); } catch (e) { console.error(e); }
       }
     } finally { if (!o.progreso) await prog.cerrar(); }
+    r.recargar = o.alTerminar || null;
     if (!o.progreso) this.informar(r);
     return r;
+  },
+
+  /** Los adjuntados que ya estaban en otra caja o consignación, con dónde. */
+  async buscarRepetidos(docs) {
+    const hallados = await DocumentoService.enOtrosLados(docs);
+    if (!hallados.length) return [];
+    const idsCajas = U.uniq(hallados.flatMap(x => x.en.map(o => o.cajaId)).filter(Boolean));
+    const idsCons = U.uniq(hallados.flatMap(x => x.en.map(o => o.consignacionId)).filter(Boolean));
+    const [cajas, cons] = await Promise.all([db.getMany('cajas', idsCajas), db.getMany('consignaciones', idsCons)]);
+    const cajaPor = new Map(cajas.map(c => [c.id, c])), conPor = new Map(cons.map(c => [c.id, c]));
+    return hallados.map(x => ({ doc: x.doc, donde: U.uniq(x.en.map(o => {
+      const c = o.cajaId && cajaPor.get(o.cajaId);
+      if (c) return 'la caja ' + c.numero + ' de ' + Comp.nombreSolicitante(c);
+      const k = o.consignacionId && conPor.get(o.consignacionId);
+      if (k) return 'la consignación ' + k.numero;
+      return null;
+    }).filter(Boolean)) })).filter(x => x.donde.length);
+  },
+
+  /**
+   * Aviso de que un archivo ya estaba en otra caja. No bloquea nada: se
+   * adjuntó igual, porque un mismo comprobante puede cubrir varias cajas. Si
+   * fue un error se quita de aquí con un clic, sin ir a buscarlo.
+   */
+  avisarRepetidos(lista, recargar) {
+    const m = Modal.abrir({
+      titulo: lista.length === 1 ? 'Este archivo ya estaba en otra caja' : lista.length + ' archivos ya estaban en otras cajas',
+      ancho: 'narrow',
+      cuerpo: '<p class="fs13" style="margin:0 0 12px;line-height:1.5">Se adjuntó igual. Está bien si es el comprobante de ' +
+          'una transferencia que cubre varias cajas; si fue un error, quítelo de aquí.</p>' +
+        '<div class="rep-lista">' + lista.map((x, i) =>
+          '<div class="rep-item"><div style="flex:1;min-width:0">' +
+            '<b class="trunc" style="display:block" title="' + attr(x.doc.nombre) + '">' + esc(x.doc.nombre) + '</b>' +
+            '<span class="fs12 txt-2">Ya está en ' + x.donde.map(esc).join(', ') + '</span></div>' +
+            '<button class="btn btn-sm btn-danger-ghost" data-quitar="' + i + '">' + Icon('trash', '', 12) + 'Quitar de aquí</button>' +
+          '</div>').join('') + '</div>',
+      pie: '<button class="btn btn-primary" data-cerrar>Dejarlo así</button>'
+    });
+    m.querySelectorAll('[data-quitar]').forEach(b => {
+      b.onclick = async () => {
+        const x = lista[Number(b.dataset.quitar)];
+        await DocumentoService.eliminar(x.doc.id);
+        const fila = b.closest('.rep-item');
+        b.remove();
+        fila.insertAdjacentHTML('beforeend', '<span class="pill np p-gray">Quitado</span>');
+        Toast.ok('Se quitó «' + x.doc.nombre + '» de aquí. En la otra caja sigue.');
+        Shell.refrescarConteos();
+        try { await (recargar ? recargar() : Router.resolver()); } catch (e) { console.error(e); }
+      };
+    });
+    return m;
   },
 
   /** Cuenta lo que pasó al adjuntar, cuando la pantalla ya está libre. */
@@ -9456,6 +9542,7 @@ const Expediente = {
     }
     if (r.ok) Toast.ok(r.ok === 1 ? 'Documento adjuntado.' : r.ok + ' documentos adjuntados.');
     if (r.dup) Toast.warn(r.dup + ' archivo(s) omitido(s) por estar ya adjuntos (contenido idéntico).');
+    if (r.enOtras && r.enOtras.length) this.avisarRepetidos(r.enOtras, r.recargar);
     Shell.refrescarConteos();
   },
 
@@ -10240,11 +10327,11 @@ const VistaCajaForm = {
           /* Una sola ventana para todos los grupos, y un solo aviso al final. */
           const prog = Progreso.abrir({ total: adj.length,
             titulo: adj.length === 1 ? 'Adjuntando documento' : 'Adjuntando ' + adj.length + ' documentos' });
-          const total = { ok: 0, dup: 0, fallos: [] };
+          const total = { ok: 0, dup: 0, fallos: [], enOtras: [] };
           try {
             for (const [tipo, files] of porTipo.entries()) {
               const r = await Expediente.subir(files, { cajaId: caja.id, tipo: tipo }, { progreso: prog });
-              total.ok += r.ok; total.dup += r.dup; total.fallos.push(...r.fallos);
+              total.ok += r.ok; total.dup += r.dup; total.fallos.push(...r.fallos); total.enOtras.push(...(r.enOtras || []));
             }
           } finally { await prog.cerrar(); }
           Expediente.informar(total);
@@ -15229,6 +15316,8 @@ const Migracion = {
     T(');');
     T('create index if not exists ix_docs_caja on documentos (caja_id);');
     T('create index if not exists ix_docs_consig on documentos (consignacion_id);');
+    T('-- para avisar cuando el mismo archivo ya está en otra caja');
+    T('create index if not exists ix_docs_hash on documentos (hash);');
     T('');
     T('create table if not exists auditoria (');
     T('  id text primary key, entidad text, entidad_id text, accion text, datos jsonb,');
@@ -18777,6 +18866,71 @@ const Pruebas = {
             Pruebas.igual((await CajaRepo.documentos(otra.id)).length, 3, 'Sin «sinRepetir», el servicio guarda lo que le den');
             for (const d of [...await CajaRepo.documentos(caja.id), ...await CajaRepo.documentos(otra.id)])
               await DocumentoService.eliminar(d.id);
+          } },
+
+        { nombre: 'CRÍTICO · el mismo comprobante en otra caja entra igual, pero se avisa dónde estaba', fn: async ctx => {
+            const pausa = ms => new Promise(r => setTimeout(r, ms));
+            const cm = await CategoriaRepo.obtenerOCrear('Gasto de la prueba de repetidos');
+            const nueva = () => CajaService.crear({ fecha: '2026-09-09', solicitanteId: ctx.fernando.id,
+              municipioId: ctx.municipio.id, detalles: [{ categoriaId: cm.id, elemento: 'Varios', valor: 1000000 }] });
+            const a = await nueva(), b = await nueva();
+            const comp = () => new File([new TextEncoder().encode('%PDF-1.4 transferencia 88231')], 'Comprobante.pdf',
+              { type: 'application/pdf' });
+            const meta = cajaId => ({ cajaId, tipo: TipoDocumento.COMPROBANTE_CONSIGNACION });
+            const ultima = () => [...document.querySelectorAll('#modals .modal-bd')].pop();
+            try {
+              const r1 = await Expediente.subir([comp()], meta(a.id));
+              Pruebas.igual(r1.enOtras.length, 0, 'La primera vez no hay nada que avisar');
+              const r2 = await Expediente.subir([comp()], meta(b.id));
+              Pruebas.igual(r2.ok, 1, 'En otra caja se adjunta igual: no se bloquea');
+              Pruebas.ok(r2.enOtras.length === 1 && r2.enOtras[0].donde.some(t => t.includes(a.numero)),
+                'Pero se sabe en qué caja estaba');
+              const v = ultima();
+              Pruebas.ok(v && v.textContent.includes(a.numero) && v.textContent.includes(ctx.fernando.nombre),
+                'El aviso dice la caja y de quién es');
+              Pruebas.ok(v.querySelector('[data-quitar]'), 'Y ofrece quitarlo de aquí');
+
+              const r3 = await Expediente.subir([new File([new TextEncoder().encode('%PDF-1.4 otro distinto')],
+                'Otro.pdf', { type: 'application/pdf' })], meta(b.id));
+              Pruebas.igual(r3.enOtras.length, 0, 'Un archivo distinto no avisa nada');
+
+              v.querySelector('[data-quitar]').click();
+              for (let i = 0; i < 50 && v.querySelector('[data-quitar]'); i++) await pausa(20);
+              await pausa(60);
+              Pruebas.igual((await CajaRepo.documentos(b.id)).map(d => d.nombre).join(), 'Otro.pdf',
+                '«Quitar de aquí» lo saca de esta caja');
+              Pruebas.igual((await CajaRepo.documentos(a.id)).map(d => d.nombre).join(), 'Comprobante.pdf',
+                'Y en la otra caja sigue donde estaba');
+              Pruebas.ok(/Quitado/.test(v.textContent), 'El aviso lo marca como quitado');
+              for (let i = 0; i < 6 && document.querySelector('#modals .modal-bd'); i++) Modal.cerrarTop();
+
+              /* Lo mismo al registrar una caja nueva con el comprobante puesto. */
+              const div = document.createElement('div');
+              div.style.cssText = 'position:fixed;left:-99999px;top:0';
+              document.body.appendChild(div);
+              const irOriginal = Router.ir;
+              let nuevaId = null;
+              try {
+                await VistaCajaForm.render(div, []);
+                VistaCajaForm.estado.solicitanteId = ctx.fernando.id;
+                VistaCajaForm.estado.municipioId = ctx.municipio.id;
+                div.querySelector('#fSolicitante').value = 'x';
+                const d0 = VistaCajaForm.estado.detalles[0];
+                d0.categoriaId = cm.id; d0.categoriaNombre = cm.nombre; d0.elemento = 'Varios'; d0.valor = 1000000;
+                VistaCajaForm.estado.adjuntos = [{ file: comp(), tipo: TipoDocumento.COMPROBANTE_CONSIGNACION }];
+                Router.ir = ruta => { nuevaId = String(ruta).replace('caja/', ''); };
+                await VistaCajaForm.guardar(null, div);
+                await pausa(150);
+              } finally { Router.ir = irOriginal; div.remove(); }
+              const w = ultima();
+              Pruebas.ok(nuevaId && w && /ya estaba en otra caja/.test(w.textContent) && w.textContent.includes(a.numero),
+                'Al guardar una caja nueva con ese comprobante también se avisa');
+              b.id2 = nuevaId;
+            } finally {
+              for (let i = 0; i < 6 && document.querySelector('#modals .modal-bd'); i++) Modal.cerrarTop();
+              for (const id of [a.id, b.id, b.id2].filter(Boolean))
+                for (const d of await CajaRepo.documentos(id)) await DocumentoService.eliminar(d.id);
+            }
           } },
 
         { nombre: 'Generar el formato oficial de la caja', fn: async ctx => {
