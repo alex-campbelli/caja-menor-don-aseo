@@ -1838,6 +1838,20 @@ const ESQUEMA_IDB = {
 const COLECCIONES = Object.keys(ESQUEMA_IDB);
 /** colecciones que forman parte del respaldo de datos (los binarios van aparte) */
 const COLECCIONES_DATOS = COLECCIONES.filter(c => c !== 'archivos');
+/* En la nube las tablas tienen llaves foráneas (en IndexedDB no), así que el
+   ORDEN al vaciar y al guardar importa. Antes se usaba el de ESQUEMA_IDB para
+   las dos cosas: al vaciar borraba los contratos con cajas todavía colgando
+   («violates RESTRICT setting of foreign key constraint cajas_contrato_id_fkey»)
+   y al guardar metía personas antes que los municipios a los que apuntan.
+   Son DOS órdenes, uno el revés del otro en lo que importa:
+     · VACIAR: primero las hijas, después aquello a lo que apuntan;
+     · GUARDAR: primero los padres, después lo que cuelga de ellos.
+   Una prueba los compara con las llaves del esquema real (generarDDL). */
+const ORDEN_VACIAR = ['documentos', 'aplicaciones', 'entregas', 'detalles', 'consignaciones', 'cajas',
+  'personas', 'categorias', 'municipios', 'contratos',
+  'secuencias', 'configuracion', 'auditoria', 'importaciones'];
+const ORDEN_GUARDAR = ['configuracion', 'secuencias', 'contratos', 'municipios', 'personas', 'categorias',
+  'cajas', 'detalles', 'consignaciones', 'aplicaciones', 'entregas', 'documentos', 'auditoria', 'importaciones'];
 
 class IndexedDBAdapter extends StorageAdapter {
   constructor(nombre, version) {
@@ -14745,11 +14759,11 @@ const Respaldo = {
 
     if (modo === 'reemplazar') {
       prog('Vaciando la base de datos…', 5);
-      for (const col of COLECCIONES) await db.clear(col);
+      await this.vaciar();
     }
     let n = 0;
-    const totalCols = COLECCIONES_DATOS.length;
-    for (const col of COLECCIONES_DATOS) {
+    const totalCols = ORDEN_GUARDAR.length;
+    for (const col of ORDEN_GUARDAR) {
       const lista = datos[col] || [];
       prog('Restaurando ' + col + ' (' + lista.length + ')…', 5 + (n / totalCols) * 60);
       if (lista.length) await db.putMany(col, lista);
@@ -14778,6 +14792,16 @@ const Respaldo = {
     await Auditoria.registrar('sistema', 'respaldo', 'RESTAURAR', { modo, archivo: file.name, documentos: restaurados });
     prog('Listo', 100);
     return { manifiesto, contadores: Object.fromEntries(COLECCIONES_DATOS.map(c => [c, (datos[c] || []).length])), documentos: restaurados };
+  },
+
+  /**
+   * Vacía toda la base en el orden que aceptan las llaves de la nube: primero
+   * las hijas. Los binarios de los documentos van antes que todo (en la nube,
+   * `archivos` no es una tabla: no se toca desde aquí).
+   */
+  async vaciar() {
+    await db.clear('archivos');
+    for (const col of ORDEN_VACIAR) await db.clear(col);
   },
 
   /** tras restaurar o importar, el contador debe quedar por encima del máximo existente */
@@ -15101,7 +15125,9 @@ const VistaRespaldos = {
           html: '<p>Se eliminarán <b>todas</b> las cajas menores, personas, consignaciones, documentos e historial.</p>' +
             '<p class="mt8">Esta acción <b>no se puede deshacer</b>. Cree un respaldo antes de continuar.</p>'
         })) return;
-        for (const col of COLECCIONES) await db.clear(col);
+        /* El mismo orden que al restaurar: en la nube, borrar los contratos
+           con cajas colgando fallaba a mitad y dejaba la base a medio vaciar. */
+        await Respaldo.vaciar();
         await Semillas.aplicar(true);
         await Cache.cargar();
         Analitica.invalidar();
@@ -15198,6 +15224,7 @@ const Migracion = {
     T('-- el nombre es único DENTRO de cada contrato, no en toda la base:');
     T('-- dos contratos pueden tener un «Caja menor» cada uno.');
     T('create unique index if not exists ux_municipios_nombre on municipios (contrato_id, nombre_norm);');
+    T('create index if not exists municipios_contrato_id_idx on municipios (contrato_id);');
     T('');
     T('create table if not exists personas (');
     T('  id text primary key, nombre text not null, nombre_norm text, cedula text,');
@@ -15214,6 +15241,7 @@ const Migracion = {
     T('-- el nombre es único DENTRO de cada contrato, no en toda la base:');
     T('-- dos contratos pueden tener un «Caja menor» cada uno.');
     T('create unique index if not exists ux_personas_nombre on personas (contrato_id, nombre_norm);');
+    T('create index if not exists personas_contrato_id_idx on personas (contrato_id);');
     T('create index if not exists ix_personas_estado on personas (estado);');
     T('');
     T('create table if not exists categorias (');
@@ -15227,6 +15255,7 @@ const Migracion = {
     T('-- el nombre es único DENTRO de cada contrato, no en toda la base:');
     T('-- dos contratos pueden tener un «Caja menor» cada uno.');
     T('create unique index if not exists ux_categorias_nombre on categorias (contrato_id, nombre_norm);');
+    T('create index if not exists categorias_contrato_id_idx on categorias (contrato_id);');
     T('');
     T('create table if not exists cajas (');
     T('  id text primary key,');
@@ -15447,10 +15476,8 @@ const Migracion = {
     Toast.ok('Datos exportados en JSON para migración.');
   },
 
-  /** orden que respeta las claves foráneas */
-  ORDEN_SUBIDA: ['configuracion', 'contratos', 'municipios', 'personas', 'categorias', 'cajas',
-                 'detalles', 'entregas', 'consignaciones', 'aplicaciones', 'documentos', 'importaciones',
-                 'auditoria', 'secuencias'],
+  /** orden que respeta las claves foráneas: el mismo con que se restaura */
+  ORDEN_SUBIDA: ORDEN_GUARDAR,
 
   /**
    * Copia la base local a Supabase. Es idempotente: todo va como upsert por
@@ -20997,6 +21024,78 @@ const Pruebas = {
             Pruebas.ok(caja, 'La caja recuperó su mismo identificador');
             Pruebas.igual(caja.total, 30000000, 'Los importes se conservan exactos');
           } },
+        { nombre: 'CRÍTICO · el orden de vaciar y de guardar respeta las llaves del esquema', fn: () => {
+            /* Se sacan las llaves del esquema que genera el propio programa (el
+               mismo de la nube): si mañana aparece una tabla o una llave nueva,
+               esta prueba exige que los dos órdenes la respeten. */
+            const ddl = Migracion.generarDDL();
+            const llaves = {};
+            for (const m of ddl.matchAll(/create table if not exists (\w+) \(([\s\S]*?)\n\);/g)) {
+              llaves[m[1]] = [...m[2].matchAll(/references (\w+)\(/g)].map(r => r[1])
+                .filter(r => r !== m[1] && COLECCIONES_DATOS.includes(r));
+            }
+            const mismas = l => l.slice().sort().join() === COLECCIONES_DATOS.slice().sort().join() && new Set(l).size === l.length;
+            Pruebas.ok(mismas(ORDEN_VACIAR), 'El orden para vaciar tiene cada tabla una sola vez');
+            Pruebas.ok(mismas(ORDEN_GUARDAR), 'Y el de guardar también');
+            Pruebas.ok(Object.keys(llaves).length >= 14 && llaves.cajas.includes('contratos') && llaves.personas.includes('municipios'),
+              'Las llaves salen del esquema real (cajas → contratos, personas → municipios…)');
+            const malas = [];
+            for (const [t, padres] of Object.entries(llaves)) {
+              if (!COLECCIONES_DATOS.includes(t)) continue;
+              for (const p of padres) {
+                if (ORDEN_GUARDAR.indexOf(p) > ORDEN_GUARDAR.indexOf(t)) malas.push('guardar ' + t + ' antes que ' + p);
+                if (ORDEN_VACIAR.indexOf(t) > ORDEN_VACIAR.indexOf(p)) malas.push('vaciar ' + p + ' antes que ' + t);
+              }
+            }
+            Pruebas.igual(malas.join(' · '), '', 'Ninguna tabla se guarda antes que aquello a lo que apunta, ni se vacía después');
+            Pruebas.ok(Migracion.ORDEN_SUBIDA === ORDEN_GUARDAR, 'La subida a la nube usa el mismo orden');
+            for (const t of ['personas', 'categorias', 'municipios'])
+              Pruebas.ok(ddl.includes('create index if not exists ' + t + '_contrato_id_idx on ' + t + ' (contrato_id);'),
+                'El esquema lleva el índice ' + t + '_contrato_id_idx, como la base real');
+          } },
+
+        { nombre: 'CRÍTICO · restaurar y borrar todo vacían y guardan en ese orden', fn: async ctx => {
+            /* Se espía el orden real de las llamadas: la restauración de verdad
+               sigue ocurriendo, sólo se anota por dónde pasa. */
+            const clearOrig = db.clear, putManyOrig = db.putMany;
+            const vaciadas = [], guardadas = [];
+            db.clear = function (col) { vaciadas.push(col); return clearOrig.call(this, col); };
+            db.putMany = function (col, lista) { guardadas.push(col); return putManyOrig.call(this, col, lista); };
+            try {
+              await Respaldo.restaurar(ctx.respaldo, 'reemplazar');
+            } finally { db.clear = clearOrig; db.putMany = putManyOrig; }
+            Pruebas.igual(vaciadas.join(','), ['archivos'].concat(ORDEN_VACIAR).join(','),
+              'Vacía primero los archivos y luego las tablas, hijas antes que padres');
+            const enOrden = guardadas.filter(c => ORDEN_GUARDAR.includes(c));
+            Pruebas.ok(enOrden.length >= 8 && enOrden.every((c, i) => i === 0 || ORDEN_GUARDAR.indexOf(enOrden[i - 1]) <= ORDEN_GUARDAR.indexOf(c)),
+              'Y guarda los padres antes que lo que cuelga de ellos: ' + enOrden.join(' → '));
+            Pruebas.igual(await db.count('cajas'), ctx.contadoresAntes.cajas, 'Y la restauración sigue completa');
+
+            /* «Borrar toda la información» vacía igual. Aquí NO se borra nada de
+               verdad: sólo se anota el orden en que lo haría. */
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            const orig = { confirmar: Modal.confirmar, aplicar: Semillas.aplicar, cargar: Cache.cargar, render: Shell.render,
+                           conteos: Shell.refrescarConteos, ir: Router.ir, clear: db.clear };
+            const pedidas = [];
+            try {
+              await VistaRespaldos.render(div);
+              Modal.confirmar = async () => true;
+              Semillas.aplicar = async () => {}; Cache.cargar = async () => {};
+              Shell.render = () => {}; Shell.refrescarConteos = async () => {}; Router.ir = () => {};
+              db.clear = async col => { pedidas.push(col); };
+              await Acciones.borrarTodo();
+            } finally {
+              Modal.confirmar = orig.confirmar; Semillas.aplicar = orig.aplicar; Cache.cargar = orig.cargar;
+              Shell.render = orig.render; Shell.refrescarConteos = orig.conteos; Router.ir = orig.ir; db.clear = orig.clear;
+              Analitica.invalidar();
+              div.remove();
+            }
+            Pruebas.igual(pedidas.join(','), ['archivos'].concat(ORDEN_VACIAR).join(','),
+              '«Borrar toda la información» vacía en el mismo orden');
+          } },
+
         { nombre: 'Los documentos sobreviven a la restauración', fn: async ctx => {
             const docs = await CajaRepo.documentos(ctx.caja300.id);
             Pruebas.ok(docs.length > 0, 'Debe haber documentos');
