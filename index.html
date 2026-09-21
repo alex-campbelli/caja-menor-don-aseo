@@ -2674,14 +2674,24 @@ const Validar = {
  *   No hay modo local: el sistema trabaja siempre contra el servidor.
  *   true  → Supabase; pide correo y contraseña al arrancar
  */
+/* Desde septiembre de 2026 caja menor vive en el proyecto sig-don-aseo (el
+   mismo de firmas, la academia y gestión documental), en su propio esquema
+   «caja»: ninguna de sus tablas se cruza con las de los otros programas. */
 const SUPABASE_POR_DEFECTO = {
-  url: 'https://shjvygwwlhpdxdrzxapy.supabase.co',
-  anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNoanZ5Z3d3bGhwZHhkcnp4YXB5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyODcyNDQsImV4cCI6MjEwMzg2MzI0NH0.Zm4wROT3Gdi41wJtwlFm3LSOt5HB08GLbKnCMGnwi_c'
+  url: 'https://nqkiepqaujlgmkvsevdr.supabase.co',
+  anonKey: 'sb_publishable_cl1Dx7YVlYr4JO9qOWlZ6g_9h9oP2p0'
 };
+/* Cada consulta a la API lleva el esquema. Sin estos encabezados PostgREST
+   usaría «public», que es de los otros programas (allí hay otra tabla
+   «documentos» y otra «auditoria»). */
+const ESQUEMA_NUBE = 'caja';
+const CAB_ESQUEMA = { 'Accept-Profile': ESQUEMA_NUBE, 'Content-Profile': ESQUEMA_NUBE };
 
 const Nube = {
-  CLAVE_PREFS: 'dacm.nube.v1',
-  CLAVE_SESION: 'dacm.sesion.v1',
+  /* v2: la conexión y la sesión de antes eran del Supabase anterior; con claves
+     nuevas ningún navegador sigue conectado allá y todos entran de nuevo. */
+  CLAVE_PREFS: 'dacm.nube.v2',
+  CLAVE_SESION: 'dacm.sesion.v2',
 
   config() {
     let guardado = {};
@@ -2816,8 +2826,9 @@ const Nube = {
   async esquemaListo() {
     const c = this.config();
     try {
+      const tk = await this.token();
       const r = await fetch(c.url + '/rest/v1/contratos?select=id&limit=1', {
-        headers: { apikey: c.anonKey, Authorization: 'Bearer ' + (await this.token() || c.anonKey) }
+        headers: Object.assign({ apikey: c.anonKey }, tk ? { Authorization: 'Bearer ' + tk } : {}, CAB_ESQUEMA)
       });
       if (r.status === 404) return { listo: false, motivo: 'Las tablas todavía no existen.' };
       if (r.ok) return { listo: true };
@@ -2890,7 +2901,7 @@ class SupabaseAdapter extends StorageAdapter {
     const c = cfg || Nube.config();
     this.url = c.url;
     this.anonKey = c.anonKey;
-    this.bucket = 'soportes';
+    this.bucket = 'caja-soportes';
     this.listo = false;
   }
 
@@ -2920,7 +2931,7 @@ class SupabaseAdapter extends StorageAdapter {
       'apikey': this.anonKey,
       'Authorization': 'Bearer ' + token,
       'Content-Type': 'application/json'
-    }, extra || {});
+    }, CAB_ESQUEMA, extra || {});
   }
 
   async _pedir(ruta, opts) {
@@ -3292,7 +3303,7 @@ const Conexion = {
         let tk = null;
         try { tk = await Nube.token(); } catch (e) { /* la red se juzga abajo */ }
         const r = await fetch(c.url + '/rest/v1/configuracion?select=id&limit=1', {
-          headers: { apikey: c.anonKey, Authorization: 'Bearer ' + (tk || c.anonKey) },
+          headers: Object.assign({ apikey: c.anonKey }, tk ? { Authorization: 'Bearer ' + tk } : {}, CAB_ESQUEMA),
           cache: 'no-store'
         });
         if (r.status === 401) this.rechazoSesion('El servidor no aceptó la sesión.');
@@ -15123,10 +15134,17 @@ const Migracion = {
     T('-- ' + APP.nombre + ' v' + APP.version + ' — esquema PostgreSQL / Supabase (datos v' + APP.esquema + ')');
     T('-- Generado el ' + Fecha.stamp(Fecha.ahora()));
     T('--');
-    T('-- CÓMO USARLO');
+    T('-- DÓNDE VIVE');
+    T('--   En el proyecto de Supabase sig-don-aseo (el mismo de firmas, la academia');
+    T('--   y gestión documental), en su propio esquema: caja. Así ninguna de sus');
+    T('--   tablas se cruza con las de los otros programas.');
+    T('--');
+    T('-- CÓMO USARLO (sólo para rehacerlo en otro proyecto)');
     T('--   1. Supabase → SQL Editor → New query → pegue TODO esto → Run.');
-    T('--   2. Authentication → Users → Add user (correo y contraseña).');
-    T('--   3. Guarde la Project URL y la clave anon public (Project Settings → API).');
+    T('--   2. Project Settings → Data API → Exposed schemas: agregue  caja.');
+    T('--   3. Dé acceso a cada persona (debe tener cuenta en Authentication):');
+    T('--        insert into caja.usuarios (user_id, correo)');
+    T("--        select id, email from auth.users where email = 'correo@ejemplo.com';");
     T('--');
     T('-- DISEÑO');
     T('--   · Identificadores ULID con prefijo (TEXT). Las claves ya coinciden:');
@@ -15134,9 +15152,12 @@ const Migracion = {
     T('--   · El dinero es BIGINT en CENTAVOS. Nunca float.');
     T('--   · contrato_id acota cajas, detalles y consignaciones: cada contrato');
     T('--     es una unidad económica cerrada. Los catálogos se comparten.');
-    T('--   · RLS activo en todo. La clave anon es pública por diseño; lo que');
-    T('--     protege los datos es la sesión iniciada, no la clave.');
+    T('--   · RLS activo en todo: sólo entran las cuentas de caja.usuarios, con');
+    T('--     sesión iniciada. La clave pública no abre nada por sí sola.');
     T('-- ============================================================================');
+    T('');
+    T('create schema if not exists caja;');
+    T('set search_path = caja, public;');
     T('');
     T('create table if not exists configuracion (');
     T("  id text primary key default 'cfg_default',");
@@ -15338,7 +15359,7 @@ const Migracion = {
     T('-- ---------------------------------------------------------------------------');
     T('-- VISTAS: el saldo pendiente NUNCA se almacena, se deriva.');
     T('-- ---------------------------------------------------------------------------');
-    T('create or replace view v_caja_saldo as');
+    T('create or replace view v_caja_saldo with (security_invoker = true) as');
     T('select c.id, c.contrato_id, c.numero, c.fecha, c.total, c.estado,');
     T('       coalesce(sum(a.monto), 0) as repuesto,');
     T("       case when c.estado in ('ANULADA','BORRADOR','REEMBOLSADA') then 0");
@@ -15347,7 +15368,7 @@ const Migracion = {
     T('group by c.id;');
     T('');
     T('-- Gasto operativo y dinero repuesto son magnitudes DISTINTAS: no se suman.');
-    T('create or replace view v_resumen_mes as');
+    T('create or replace view v_resumen_mes with (security_invoker = true) as');
     T('select c.contrato_id, c.mes,');
     T("       sum(c.total)    filter (where c.estado <> 'ANULADA') as gasto_operativo,");
     T("       sum(c.gasolina) filter (where c.estado <> 'ANULADA') as gasolina,");
@@ -15356,27 +15377,53 @@ const Migracion = {
     T('from cajas c group by c.contrato_id, c.mes order by c.contrato_id, c.mes;');
     T('');
     T('-- ---------------------------------------------------------------------------');
-    T('-- SEGURIDAD — esto es lo que protege los datos, no la clave anon.');
-    T('-- Sin sesión iniciada la API no devuelve ni acepta absolutamente nada.');
+    T('-- SEGURIDAD — sólo las cuentas de caja.usuarios, con sesión iniciada. Las');
+    T('-- demás cuentas del proyecto (firmas, academia…) no ven nada, y sin sesión');
+    T('-- la API no devuelve ni acepta absolutamente nada.');
     T('-- ---------------------------------------------------------------------------');
+    T('create table if not exists usuarios (');
+    T('  user_id uuid primary key references auth.users(id) on delete cascade,');
+    T('  correo text, creado_en timestamptz not null default now(),');
+    T('  desactivado_en timestamptz   -- vacío = con acceso');
+    T(');');
+    T('');
+    T('create or replace function caja.tiene_acceso() returns bool');
+    T("  language sql stable security definer set search_path = '' as $$");
+    T('  select exists (select 1 from caja.usuarios u where u.user_id = auth.uid() and u.desactivado_en is null)');
+    T('$$;');
+    T('revoke all on function caja.tiene_acceso() from public, anon;');
+    T('grant execute on function caja.tiene_acceso() to authenticated;');
+    T('');
     TABLAS.forEach(t => T('alter table ' + t + ' enable row level security;'));
+    T('alter table usuarios enable row level security;   -- sin reglas: nadie la lee por la API');
     T('');
     TABLAS.forEach(t => {
-      T('drop policy if exists "' + t + '_auth" on ' + t + ';');
-      T('create policy "' + t + '_auth" on ' + t + ' for all to authenticated using (true) with check (true);');
+      T('drop policy if exists caja_acceso on ' + t + ';');
+      T('create policy caja_acceso on ' + t + ' for all to authenticated');
+      T('  using ((select caja.tiene_acceso())) with check ((select caja.tiene_acceso()));');
     });
     T('');
-    T('-- ---------------------------------------------------------------------------');
-    T('-- SOPORTES: bucket PRIVADO (facturas, fotos, comprobantes)');
-    T('-- ---------------------------------------------------------------------------');
-    T("insert into storage.buckets (id, name, public) values ('soportes', 'soportes', false)");
-    T('  on conflict (id) do nothing;');
+    T('revoke all on all tables in schema caja from public, anon, authenticated;');
+    T('revoke all on schema caja from public, anon;');
+    T('grant usage on schema caja to authenticated, service_role;');
+    T('grant select, insert, update, delete on all tables in schema caja to authenticated;');
+    T('revoke all on usuarios from authenticated;');
+    T('grant all on all tables in schema caja to service_role;');
     T('');
-    T('drop policy if exists "soportes_auth" on storage.objects;');
-    T('create policy "soportes_auth" on storage.objects for all to authenticated');
-    T("  using (bucket_id = 'soportes') with check (bucket_id = 'soportes');");
+    T('-- ---------------------------------------------------------------------------');
+    T('-- SOPORTES: carpeta PRIVADA (facturas, fotos, comprobantes), sólo para caja');
+    T('-- ---------------------------------------------------------------------------');
+    T("insert into storage.buckets (id, name, public) values ('caja-soportes', 'caja-soportes', false)");
+    T('  on conflict (id) do update set public = false;');
     T('');
-    T('-- Listo. Ahora cree el usuario en Authentication → Users → Add user.');
+    T('drop policy if exists caja_soportes on storage.objects;');
+    T('create policy caja_soportes on storage.objects for all to authenticated');
+    T("  using (bucket_id = 'caja-soportes' and (select caja.tiene_acceso()))");
+    T("  with check (bucket_id = 'caja-soportes' and (select caja.tiene_acceso()));");
+    T('');
+    T("notify pgrst, 'reload schema';");
+    T('');
+    T('-- Listo. Falta exponer el esquema caja (Data API) y dar acceso en caja.usuarios.');
     return L.join('\n');
   },
 
@@ -15848,11 +15895,14 @@ const Pruebas = {
               'Ninguna columna en coma flotante ni tipo money');
             ['subtotal', 'retencion', 'total', 'gasolina', 'aceite'].forEach(c =>
               Pruebas.ok(new RegExp(c + ' bigint').test(sql), 'La columna ' + c + ' debe ser bigint'));
-            Pruebas.igual((ddl.match(/enable row level security/g) || []).length, COLECCIONES_DATOS.length,
-              'RLS en todas las tablas');
+            // cada tabla de datos con su RLS (la lista de acceso, caja.usuarios, también lo tiene)
+            COLECCIONES_DATOS.forEach(col => Pruebas.ok(ddl.includes('alter table ' + col + ' enable row level security;'),
+              'RLS en la tabla ' + col));
             Pruebas.ok(ddl.includes('to authenticated'), 'Las políticas exigen sesión iniciada');
             Pruebas.ok(!ddl.includes('to anon'), 'Nada abierto al rol anónimo');
-            Pruebas.ok(ddl.includes("'soportes'"), 'Bucket privado de soportes');
+            Pruebas.ok(ddl.includes("'caja-soportes', 'caja-soportes', false"), 'Carpeta privada de soportes (caja-soportes)');
+            Pruebas.ok(ddl.includes('create schema if not exists caja;'), 'Todo va en el esquema caja');
+            Pruebas.ok(!/using \(true\)/.test(sql), 'Ninguna regla abierta a cualquier cuenta con sesión');
             Pruebas.ok(ddl.includes('contrato_id text references contratos(id)'), 'Las cajas apuntan al contrato');
           } },
         { nombre: 'CRÍTICO · ningún campo del modelo se queda sin columna', fn: () => {
