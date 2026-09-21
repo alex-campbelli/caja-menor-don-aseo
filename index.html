@@ -21167,7 +21167,10 @@ const Sesion = {
       (async () => {
         await Conexion.comprobar(true);
         const e = $('#sesEstado'); if (!e) return;
-        const vivo = Conexion.calcular() === 'envivo';
+        /* En esta pantalla todavía no hay sesión, y en sig-don-aseo los
+           visitantes no tienen acceso al esquema caja: el servidor contesta
+           «sin permiso» (401), que también prueba que está disponible. */
+        const vivo = ['envivo', 'sesion'].includes(Conexion.calcular());
         e.innerHTML = '<span class="conx-p conx-p-' + (vivo ? 'ok' : 'mal') +
           '" style="display:inline-block;margin-right:6px;vertical-align:middle"></span>' +
           (vivo ? 'Servidor disponible' + (Conexion.latencia !== null ? ' · ' + Conexion.latencia + ' ms' : '')
