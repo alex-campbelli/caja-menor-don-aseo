@@ -647,12 +647,24 @@ html[data-theme="dark"] .marca.m-sinlegal{background:rgba(217,143,6,.18);color:#
 .caja-coment .cc-txt{color:var(--text-2);background:var(--info-50);border-radius:6px;padding:2px 8px}
 .caja-coment .link{background:none;border:0;padding:0;cursor:pointer;font-family:inherit}
 
-/* Barra de lo marcado: flotante, encima de todo y sin tapar la última fila */
-.selbar{position:sticky;bottom:0;z-index:20;margin-top:12px;pointer-events:none}
-.selbar-in{pointer-events:auto;display:flex;align-items:center;gap:10px;flex-wrap:wrap;
-  background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-lg);
-  box-shadow:var(--sh-3);padding:9px 12px;font-size:12.5px}
-.selbar-sep{width:1px;height:16px;background:var(--border)}
+/* Barra de lo marcado: flota abajo mientras se recorre la lista, para ver
+   la suma sin bajar hasta el final. El sticky va en #selBarra, que es hijo
+   directo de la vista y por eso puede moverse a lo largo de toda la página.
+   Puesto en .selbar no hacía nada: su caja mide lo mismo que ella y no le
+   quedaba hacia dónde moverse. */
+#selBarra{position:sticky;bottom:14px;z-index:20;pointer-events:none}
+.selbar{margin-top:12px}
+.selbar-in{pointer-events:auto;display:flex;align-items:center;gap:22px;flex-wrap:wrap;
+  background:var(--surface);border:1px solid var(--border-strong);border-radius:16px;
+  box-shadow:var(--sh-pop);padding:12px 16px 12px 20px;font-size:12.5px}
+.selbar-dato{display:flex;flex-direction:column;gap:2px;min-width:0}
+.selbar-dato small{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3)}
+.selbar-dato b{font-size:16px;font-variant-numeric:tabular-nums;color:var(--text)}
+.selbar-pend b{font-size:20px;color:var(--accent)}
+.selbar-in .btn{flex:0 0 auto}
+/* el número de marcadas dentro del botón */
+.btn-cuenta{display:inline-grid;place-items:center;min-width:20px;height:18px;padding:0 6px;margin-left:2px;
+  border-radius:9px;background:var(--accent);color:#fff;font-size:11px;font-weight:700;font-variant-numeric:tabular-nums}
 .hidden{display:none !important}
 .det-fila>td{background:var(--surface-2);padding:0!important;border-top:0}
 /* La celda ocupa las 13 columnas, asi que sin tope la tabla interna se
@@ -3700,7 +3712,33 @@ const PersonaRepo = {
        aquí sería ofrecer a alguien que en esta lista no existe. */
     const ctrId = ContratoRepo.activoId();
     if (p && p.estado === Estado.ACTIVO && (!ctrId || p.contratoId === ctrId)) return p;
-    return this.financiadores()[0] || null;
+    /* Sin uno elegido para el contrato se tomaba el primero por orden
+       alfabético, y «Don Aseo Ltda» va antes que «Fabián Castro»: cada
+       consignación del hospital salía a nombre de la propia empresa. Se
+       prefiere a una persona; la empresa sigue en la lista para elegirla. */
+    const lista = this.financiadores();
+    return lista.find(x => !this.esLaEmpresa(x)) || lista[0] || null;
+  },
+  /**
+   * ¿Esta ficha es la propia empresa (Don Aseo) y no una persona? Se reconoce
+   * por el cargo «Empresa», por llamarse como la empresa de la configuración o
+   * por tener su NIT como documento.
+   */
+  esLaEmpresa(p) {
+    if (!p) return false;
+    const cfg = ConfigRepo.get() || {};
+    const letras = s => Txt.norm(s).replace(/[^a-z0-9]/g, '');
+    const digitos = s => String(s || '').replace(/\D/g, '');
+    if (Txt.norm(p.cargo) === 'empresa') return true;
+    if (cfg.empresa && letras(p.nombre) && letras(p.nombre) === letras(cfg.empresa)) return true;
+    return Boolean(cfg.nit && digitos(p.cedula) && digitos(p.cedula) === digitos(cfg.nit));
+  },
+  /** Los que adelantan dinero en un contrato dado (no necesariamente el activo). */
+  financiadoresDe(contratoId) {
+    if (!contratoId) return [];
+    return [...Cache.personas.values()]
+      .filter(p => p.contratoId === contratoId && p.esFinanciador && p.estado === Estado.ACTIVO)
+      .sort(U.by('nombre'));
   },
   get(id) { return Cache.personas.get(id) || null; },
   /** La persona, si pertenece a un contrato DISTINTO de `contratoId`; si no, null. */
@@ -8094,6 +8132,23 @@ const VistaCajas = {
       Finanzas.pendienteDe(c, repuesto.get(c.id) || 0) > 0);
   },
 
+  /**
+   * ¿Están marcadas ya todas las de esta página que esperan reembolso? Entonces
+   * el mismo botón las desmarca. Se decide mirando lo marcado, no recordando el
+   * último clic: si se marcan a mano, el botón también lo sabe.
+   */
+  porReembolsarMarcadas(pagina, repuesto) {
+    const suyas = VistaCajas.pendientesDe(pagina, repuesto);
+    return suyas.length > 0 && suyas.every(c => VistaCajas.seleccion.has(c.id));
+  },
+  botonReembolsar(pagina, repuesto, todas) {
+    if (!VistaCajas.porReembolsarMarcadas(pagina, repuesto)) return Icon('check', '', 14) + 'Marcar por reembolsar';
+    /* Cuántas quitaría el segundo clic: las que esperan reembolso y están
+       marcadas, también las de otras páginas si se sumaron. */
+    const n = VistaCajas.pendientesDe(todas || pagina, repuesto).filter(c => VistaCajas.seleccion.has(c.id)).length;
+    return Icon('x', '', 14) + 'Desmarcar por reembolsar <span class="btn-cuenta">' + n + '</span>';
+  },
+
   barraSeleccion() {
     const ctx = VistaCajas._ctx;
     if (!ctx) return '';
@@ -8106,12 +8161,14 @@ const VistaCajas = {
       .filter(c => !VistaCajas.seleccion.has(c.id)).length;
     const total = U.sumBy(sel, c => c.total);
     const pend = U.sumBy(sel, c => Finanzas.pendienteDe(c, ctx.repuesto.get(c.id) || 0));
+    /* Cada cifra con su rótulo encima, y el pendiente —lo que hay que
+       consignar— más grande que el resto: es la cifra que se busca. */
     return '<div class="selbar">' +
       '<div class="selbar-in">' +
-        '<b>' + sel.length + '</b> caja(s) marcada(s)' +
-        '<span class="selbar-sep"></span>' +
-        'Total <b>' + Money.format(total) + '</b>' +
-        (pend ? '<span class="selbar-sep"></span>Pendiente <b>' + Money.format(pend) + '</b>' : '') +
+        '<div class="selbar-dato"><small>Cajas marcadas</small><b>' + sel.length + '</b></div>' +
+        '<div class="selbar-dato"><small>Total</small><b>' + Money.format(total) + '</b></div>' +
+        (pend ? '<div class="selbar-dato selbar-pend"><small>Pendiente por reembolsar</small><b>' +
+          Money.format(pend) + '</b></div>' : '') +
         '<span style="flex:1"></span>' +
         (faltan ? '<button class="btn btn-sm" data-act="selPorReembolsarTodas">' + Icon('check', '', 13) +
           'Marcar también las ' + faltan + ' de otras páginas</button>' : '') +
@@ -8148,6 +8205,8 @@ const VistaCajas = {
       ctx.pagina.every(c => VistaCajas.seleccion.has(c.id));
     const barra = ctx.cont.querySelector('#selBarra');
     if (barra) barra.innerHTML = VistaCajas.barraSeleccion();
+    const boton = ctx.cont.querySelector('[data-act="selPorReembolsar"]');
+    if (boton) boton.innerHTML = VistaCajas.botonReembolsar(ctx.pagina, ctx.repuesto, ctx.todas);
   },
 
   async render(cont) {
@@ -8310,8 +8369,9 @@ const VistaCajas = {
       '<div class="ph-sub">' + todas.length.toLocaleString('es-CO') + ' registro(s) · Total ' + Money.format(sumTotal) +
       ' · Pendiente ' + Money.format(sumPend) + '</div></div>' +
       '<div class="ph-actions">' +
-      '<button class="btn" data-act="selPorReembolsar" title="Marca las cajas de esta página que ya se consignaron y todavía no se han reembolsado">' +
-        Icon('check', '', 14) + 'Marcar por reembolsar</button>' +
+      '<button class="btn" data-act="selPorReembolsar" title="Marca las cajas de esta página que ya se consignaron y ' +
+        'todavía no se han reembolsado. Si ya están marcadas, un segundo clic las desmarca">' +
+        VistaCajas.botonReembolsar(pagina, repuesto, todas) + '</button>' +
       '<button class="btn" data-act="exportarExcel">' + Icon('download', '', 14) + 'Excel</button>' +
       '<button class="btn" data-act="exportarCsv">' + Icon('download', '', 14) + 'CSV</button>' +
       '<button class="btn btn-primary" data-ir="caja-nueva">' + Icon('plus', '', 14) + 'Nueva caja</button>' +
@@ -8538,6 +8598,15 @@ const VistaCajas = {
          cuarenta, sin poder comprobar cuáles. Lo que queda fuera se ofrece
          aparte, en la barra de abajo, y sigue estando a un clic. */
       selPorReembolsar: () => {
+        /* Segundo clic: si ya están todas marcadas, se desmarcan. Se quitan
+           TODAS las que esperan reembolso, también las que se sumaron con
+           «Marcar también las de otras páginas», que salen del mismo grupo;
+           lo marcado a mano que no espera reembolso se queda como está. */
+        if (VistaCajas.porReembolsarMarcadas(pagina, repuesto)) {
+          VistaCajas.pendientesDe(todas, repuesto).forEach(c => VistaCajas.seleccion.delete(c.id));
+          VistaCajas.refrescarSeleccion();
+          return;
+        }
         VistaCajas.seleccion.clear();
         VistaCajas.pendientesDe(pagina, repuesto).forEach(c => VistaCajas.seleccion.add(c.id));
         if (!VistaCajas.seleccion.size) Toast.warn('En esta página no hay cajas pendientes de reembolso.');
@@ -11653,11 +11722,17 @@ const VistaContratos = {
         '<div class="field"><label>Prefijo de consignación <span class="req">*</span></label>' +
         '<input class="inp mono" id="kPrefCon" style="text-transform:uppercase" autocomplete="off" maxlength="8" value="' +
           attr(esNuevo ? '' : (c.prefijoConsignacion || 'CON')) + '" placeholder="Ej.: HGMC"></div>' +
+        /* Las personas de ESTE contrato, no las del activo: al editar el del
+           hospital estando en COMFENALCO, la lista ofrecía la gente de
+           COMFENALCO, que en el hospital no existe. */
         '<div class="field"><label>Quien adelanta el dinero por defecto</label>' +
         '<select class="inp" id="kFinanciador"><option value="">— sin preseleccionar —</option>' +
-        PersonaRepo.todas().filter(p => p.esFinanciador).map(p => '<option value="' + p.id + '"' +
+        PersonaRepo.financiadoresDe(c.id).map(p => '<option value="' + p.id + '"' +
           (c.financiadorPorDefectoId === p.id ? ' selected' : '') + '>' + esc(p.nombre) + '</option>').join('') +
-        '</select></div>' +
+        '</select>' +
+        (PersonaRepo.financiadoresDe(c.id).length ? '' :
+          '<div class="fs11 txt-3 mt4">Se elige cuando el contrato tenga sus personas.</div>') +
+        '</div>' +
         '</div>' +
         /* Se rellena en vivo: cómo quedarán los números, o por qué no se puede. */
         '<div class="alert a-info" id="kPrefAviso" style="padding:9px 11px"></div>' +
@@ -15837,6 +15912,74 @@ const Pruebas = {
     throw new Error(msg || 'Se esperaba un error y no ocurrió');
   },
 
+  /**
+   * Huella del formato imprimible, tal como lo copia el visor del respaldo (lo arma
+   * el chat de la mudanza). Si cambia, hay que volver a armar el visor.
+   */
+  async huellaFormato() {
+    /* Lo que copia el visor del respaldo: el objeto Documento entero, TODO lo
+       que usa siguiendo la cadena (Objeto.método, this.método, funciones
+       globales y CONSTANTES), los modelos de las tablas que lee y sus estilos
+       de impresión. Se deja fuera sólo lo de la pantalla que no sale en el
+       papel: ventanas, avisos, menú, conexión y la base de datos en sí. */
+    const FUERA = new Set(['Modal', 'Toast', 'Cargando', 'Bus', 'Auditoria', 'Shell', 'Router', 'Progreso',
+                           'Conexion', 'Nube', 'Sesion', 'db', 'Pruebas', 'Acciones', 'Estado_App',
+                           /* guardar y leer archivos, y los avisos de error: no cambian lo impreso */
+                           'DocumentoService', 'Compresor', 'manejarError', 'PrefijoPropio']);
+    const limpio = s => String(s).replace(/\s+/g, ' ').trim();
+    const fuente = v => typeof v === 'function' ? limpio(v.toString())
+      : limpio(JSON.stringify(v, (k, x) => typeof x === 'function' ? x.toString() : x));
+    const obtener = n => { try { return new Function('return ' + n)(); } catch (e) { return undefined; } };
+    const nativa = f => /\{\s*\[native code\]\s*\}/.test(Function.prototype.toString.call(f));
+    const referencias = (nombre, src) => {
+      const refs = new Set();
+      const obj = nombre.includes('.') ? nombre.split('.')[0] : null;
+      if (obj) for (const m of src.matchAll(/\bthis\.([A-Za-z_$][\w$]*)\b/g)) refs.add(obj + '.' + m[1]);
+      for (const m of src.matchAll(/\b([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\b/g)) refs.add(m[1] + '.' + m[2]);
+      for (const m of src.matchAll(/\b([A-Za-z_$][\w$]*)\s*\(/g)) refs.add(m[1]);
+      for (const m of src.matchAll(/\b([A-Z][A-Z0-9_]{2,})\b/g)) refs.add(m[1]);
+      return refs;
+    };
+    const piezas = new Map();
+    const cola = [];
+    /* los campos con _ son memoria de trabajo (p. ej. el CSS ya calculado), no código */
+    for (const k of Object.keys(Documento).filter(k => !k.startsWith('_'))) cola.push('Documento.' + k);
+    for (const k of ['caja', 'detalle', 'entrega', 'consignacion', 'aplicacion', 'documento', 'configuracion', 'contrato', 'persona'])
+      cola.push('Modelo.' + k);
+    while (cola.length) {
+      const n = cola.shift();
+      if (piezas.has(n) || FUERA.has(n.split('.')[0])) continue;
+      const v = obtener(n);
+      if (v === undefined || v === null) continue;
+      if (typeof v === 'function' && nativa(v)) continue;
+      if (typeof v === 'object' && (v.nodeType || v === window || v === document)) continue;
+      const esConstante = /^[A-Z][A-Z0-9_]{2,}$/.test(n.split('.').pop());
+      if (typeof v !== 'function' && !esConstante && !n.startsWith('Documento.')) continue;   // funciones y CONSTANTES
+      const src = fuente(v);
+      piezas.set(n, src);
+      if (typeof v === 'function') for (const r of referencias(n, src)) if (!piezas.has(r)) cola.push(r);
+    }
+    /* estilos: del texto de la página (no del navegador, que los reescribe a su manera) */
+    const css = [...document.querySelectorAll('style')].map(s => s.textContent).join('\n').replace(/\/\*[\s\S]*?\*\//g, '');
+    const bloques = txt => { const out = []; let i = 0;
+      while (i < txt.length) { const a = txt.indexOf('{', i); if (a < 0) break;
+        let nivel = 1, j = a + 1; while (j < txt.length && nivel) { if (txt[j] === '{') nivel++; else if (txt[j] === '}') nivel--; j++; }
+        out.push({ sel: limpio(txt.slice(i, a)), cuerpo: txt.slice(a + 1, j - 1) }); i = j; }
+      return out; };
+    const del = /\.doc-page|\.dp-|\.rr-|\.doc-comp/;
+    const estilos = [];
+    for (const b of bloques(css)) {
+      if (/^@media[^{]*print/.test(b.sel)) estilos.push(b.sel + '{' + limpio(b.cuerpo) + '}');
+      else if (b.sel.startsWith('@')) { for (const d of bloques(b.cuerpo)) if (del.test(d.sel)) estilos.push(b.sel + ' ' + d.sel + '{' + limpio(d.cuerpo) + '}'); }
+      else if (del.test(b.sel)) estilos.push(b.sel + '{' + limpio(b.cuerpo) + '}');
+    }
+    const nombres = [...piezas.keys()].sort();
+    const texto = nombres.map(k => k + '=' + piezas.get(k)).join('\n') + '\nestilos=' + estilos.join('\n');
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(texto));
+    return { huella: [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16),
+             piezas: nombres, reglasCss: estilos.length };
+  },
+
   SUITE: [
     {
       nombre: 'Núcleo: dinero, fechas e identificadores',
@@ -16712,6 +16855,59 @@ const Pruebas = {
             const prop = PersonaRepo.financiadorPorDefecto();
             Pruebas.ok(prop && prop.id === ctx.fabB.id, 'Propone el suyo en cuanto lo tiene');
           } },
+        { nombre: 'CRÍTICO · por defecto se propone a quien adelanta el dinero, no a la propia empresa', fn: async ctx => {
+            /* En el hospital cada consignación salía a nombre de «Don Aseo Ltda»:
+               sin uno elegido se tomaba el primero por orden alfabético. */
+            const original = ContratoRepo.activoId();
+            const pausa = ms => new Promise(r => setTimeout(r, ms));
+            const otro = await ContratoRepo.guardar({ nombre: 'CONTRATO DEL FINANCIADOR', prefijoCaja: 'FN', prefijoConsignacion: 'FNC' });
+            const divs = [];
+            try {
+              await ContratoRepo.cambiarActivo(otro.id);
+              const empresa = await PersonaRepo.guardar({ nombre: 'Don Aseo Ltda', cedula: '8.120.001.527',
+                esFinanciador: 1, esSolicitante: 0, banco: 'Bancolombia' });
+              const fabian = await PersonaRepo.guardar({ nombre: 'Fabián del Hospital', cedula: '1065132721',
+                esFinanciador: 1, esSolicitante: 1, banco: 'Bancolombia' });
+              Pruebas.ok(PersonaRepo.esLaEmpresa(empresa) && !PersonaRepo.esLaEmpresa(fabian),
+                'La empresa se reconoce, aunque se escriba distinto de la configuración');
+              Pruebas.igual((PersonaRepo.financiadorPorDefecto() || {}).nombre, 'Fabián del Hospital',
+                'Sin uno elegido, se propone a la persona, no a la empresa');
+              Pruebas.ok(PersonaRepo.financiadores().some(p => p.id === empresa.id),
+                'La empresa sigue en la lista para elegirla cuando haga falta');
+
+              const d1 = document.createElement('div'); divs.push(d1);
+              d1.style.cssText = 'position:fixed;left:-99999px;top:0'; document.body.appendChild(d1);
+              await VistaConsignacionForm.render(d1, []);
+              await pausa(40);
+              Pruebas.igual(d1.querySelector('#kBenef').value, 'Fabián del Hospital', 'La consignación nueva viene a nombre de Fabián');
+              const d2 = document.createElement('div'); divs.push(d2);
+              d2.style.cssText = 'position:fixed;left:-99999px;top:0'; document.body.appendChild(d2);
+              await VistaCajaForm.render(d2, []);
+              await pausa(40);
+              Pruebas.igual(d2.querySelector('#fConsigno').value, 'Fabián del Hospital', 'Y la caja nueva también');
+
+              /* Si el contrato tiene uno elegido, manda ese, aunque sea la empresa. */
+              await ContratoRepo.guardar({ id: otro.id, financiadorPorDefectoId: empresa.id });
+              Pruebas.igual(PersonaRepo.financiadorPorDefecto().id, empresa.id, 'Lo elegido en el contrato manda');
+
+              /* Al editar el contrato estando en otro, la lista es la de ESE contrato. */
+              await ContratoRepo.cambiarActivo(original);
+              VistaContratos.modal(ContratoRepo.get(otro.id));
+              await pausa(40);
+              const sel = [...document.querySelectorAll('#modals .modal-bd')].pop().querySelector('#kFinanciador');
+              const nombres = [...sel.options].map(o => o.textContent);
+              Pruebas.ok(nombres.includes('Fabián del Hospital') && nombres.includes('Don Aseo Ltda'),
+                'Al editar un contrato desde otro, ofrece la gente de ese contrato');
+              Pruebas.ok(!PersonaRepo.financiadores().some(p => nombres.includes(p.nombre) && p.contratoId !== otro.id),
+                'Y no la del contrato en que se está');
+              Pruebas.igual(sel.value, empresa.id, 'Con el elegido marcado');
+            } finally {
+              for (let i = 0; i < 5 && document.querySelector('#modals .modal-bd'); i++) Modal.cerrarTop();
+              divs.forEach(d => d.remove());
+              await ContratoRepo.cambiarActivo(original);
+            }
+          } },
+
         { nombre: 'CRÍTICO · una consignación no puede cruzar contratos', fn: async ctx => {
             await ContratoRepo.cambiarActivo(ctx.ctrB.id);
             const fab = ctx.fabB;
@@ -18587,6 +18783,105 @@ const Pruebas = {
             }
           } },
 
+        { nombre: 'CRÍTICO · la barra de totales acompaña al bajar por la lista', fn: async ctx => {
+            /* Para ver la suma de lo marcado había que bajar hasta el final. La
+               barra ya decía ser flotante, pero el sticky estaba en un elemento
+               sin espacio para moverse. Aquí se pinta la lista dentro de una
+               ventana de 500 px con barra de desplazamiento propia. */
+            const tamPrevio = Prefs.get('paginaTam');
+            const filtrosPrevios = Estado_App.filtrosCajas;
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0;width:1400px;height:500px;overflow:auto';
+            document.body.appendChild(div);
+            try {
+              Prefs.set('paginaTam', 25);
+              Estado_App.filtrosCajas = Object.assign({}, filtrosPrevios, { texto: '', estado: '', pagina: 1 });
+              VistaCajas.seleccion.clear();
+              await VistaCajas.render(div);
+              await correrAccion(Acciones.selPorReembolsar, div.querySelector('[data-act="selPorReembolsar"]'), { type: 'click' });
+              const barra = div.querySelector('#selBarra .selbar-in');
+              Pruebas.ok(barra && div.scrollHeight > div.clientHeight + 300, 'La lista es más alta que la ventana y hay algo marcado');
+              const aLaVista = () => { const r = barra.getBoundingClientRect(), v = div.getBoundingClientRect();
+                return r.height > 0 && r.top >= v.top && r.bottom <= v.bottom + 1; };
+              div.scrollTop = 0;
+              Pruebas.ok(aLaVista(), 'Arriba del todo, la barra ya se ve abajo, sin bajar');
+              div.scrollTop = Math.round((div.scrollHeight - div.clientHeight) / 2);
+              Pruebas.ok(aLaVista(), 'A mitad de la lista, sigue a la vista');
+              Pruebas.ok(/Pendiente por reembolsar/.test(barra.textContent), 'Con el pendiente, que es la cifra que se busca');
+            } finally {
+              div.remove();
+              VistaCajas.seleccion.clear();
+              Prefs.set('paginaTam', tamPrevio);
+              Estado_App.filtrosCajas = filtrosPrevios;
+            }
+          } },
+
+        { nombre: 'CRÍTICO · un segundo clic en «Marcar por reembolsar» desmarca lo que marcó', fn: async ctx => {
+            /* Para quitar lo marcado había que desmarcar caja por caja. */
+            const cm = await CategoriaRepo.obtenerOCrear('Caja menor');
+            for (let i = 0; i < 7; i++)
+              await CajaService.crear({ fecha: '2026-10-1' + i, solicitanteId: ctx.fernando.id,
+                municipioId: ctx.municipio.id, estado: EstadoCaja.CONSIGNADA,
+                detalles: [{ categoriaId: cm.id, descripcion: 'Desmarcable ' + i, valor: 2000000 + i }] });
+            /* una que no espera reembolso, marcada a mano: no debe tocarse */
+            const aMano = await CajaService.crear({ fecha: '2026-10-19', solicitanteId: ctx.fernando.id,
+              municipioId: ctx.municipio.id, estado: EstadoCaja.PENDIENTE,
+              detalles: [{ categoriaId: cm.id, descripcion: 'Desmarcable a mano', valor: 3000000 }] });
+            const tamPrevio = Prefs.get('paginaTam');
+            const filtrosPrevios = Estado_App.filtrosCajas;
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            const clic = async () => correrAccion(Acciones.selPorReembolsar,
+              div.querySelector('[data-act="selPorReembolsar"]'), { type: 'click' });
+            const texto = () => div.querySelector('[data-act="selPorReembolsar"]').textContent;
+            try {
+              Prefs.set('paginaTam', 5);
+              Estado_App.filtrosCajas = Object.assign({}, filtrosPrevios, { texto: 'Desmarcable', estado: '', pagina: 1 });
+              VistaCajas.seleccion.clear();
+              await VistaCajas.render(div);
+              const suyas = VistaCajas.pendientesDe(VistaCajas._ctx.pagina, VistaCajas._ctx.repuesto);
+              Pruebas.ok(suyas.length > 0 && /^Marcar por reembolsar$/.test(texto().trim()), 'Al entrar, el botón marca');
+
+              await clic();
+              Pruebas.ok(suyas.every(c => VistaCajas.seleccion.has(c.id)), 'El primer clic marca las de la página');
+              Pruebas.ok(/Desmarcar por reembolsar/.test(texto()), 'Y el botón pasa a decir «Desmarcar por reembolsar»');
+
+              Acciones.selUna({ checked: true, dataset: { id: aMano.id } });
+              await correrAccion(Acciones.selPorReembolsarTodas, document.createElement('button'), { type: 'click' });
+              await clic();
+              Pruebas.igual(VistaCajas.pendientesDe(VistaCajas._ctx.todas, VistaCajas._ctx.repuesto)
+                .filter(c => VistaCajas.seleccion.has(c.id)).length, 0,
+                'El segundo clic desmarca todas las que esperan reembolso, también las de otras páginas');
+              Pruebas.ok(VistaCajas.seleccion.has(aMano.id), 'Lo marcado a mano que no espera reembolso se queda');
+              Pruebas.ok(/^Marcar por reembolsar$/.test(texto().trim()), 'Y el botón vuelve a decir «Marcar por reembolsar»');
+
+              /* Si después de marcar se quita una a mano, el botón vuelve a marcar. */
+              await clic();
+              Acciones.selUna({ checked: false, dataset: { id: suyas[0].id } });
+              Pruebas.ok(/^Marcar por reembolsar$/.test(texto().trim()), 'Con una desmarcada a mano, el botón vuelve a marcar');
+              await clic();
+              Pruebas.ok(suyas.every(c => VistaCajas.seleccion.has(c.id)), 'Y al pulsarlo quedan todas marcadas otra vez');
+
+              /* Al volver a pintar la vista, el botón conserva lo que corresponde. */
+              await VistaCajas.render(div);
+              Pruebas.ok(/Desmarcar por reembolsar/.test(texto()), 'Al volver a la pantalla, el botón sigue sabiendo que desmarca');
+
+              /* Y dice cuántas van marcadas: las de la página, y si se suman
+                 las de otras páginas, también esas. */
+              const cuenta = () => Number((div.querySelector('[data-act="selPorReembolsar"] .btn-cuenta') || {}).textContent);
+              Pruebas.igual(cuenta(), suyas.length, 'El botón dice cuántas van marcadas');
+              await correrAccion(Acciones.selPorReembolsarTodas, document.createElement('button'), { type: 'click' });
+              Pruebas.igual(cuenta(), VistaCajas.pendientesDe(VistaCajas._ctx.todas, VistaCajas._ctx.repuesto).length,
+                'Al sumar las de otras páginas, el número sube');
+            } finally {
+              div.remove();
+              VistaCajas.seleccion.clear();
+              Prefs.set('paginaTam', tamPrevio);
+              Estado_App.filtrosCajas = filtrosPrevios;
+            }
+          } },
+
         { nombre: 'Una caja ya reembolsada no se marca', fn: async ctx => {
             /* Sólo las que tienen saldo. Marcar una saldada la metería en la
                relación de lo que hay que devolver, que ya se devolvió. */
@@ -19008,6 +19303,22 @@ const Pruebas = {
               for (const id of [a.id, b.id, b.id2].filter(Boolean))
                 for (const d of await CajaRepo.documentos(id)) await DocumentoService.eliminar(d.id);
             }
+          } },
+
+        { nombre: 'AVISO · el formato imprimible sigue igual al que copia el visor del respaldo', fn: async () => {
+            /* El visor del respaldo (lo arma el chat de la mudanza) copia tal cual
+               el formato imprimible: el objeto Documento, todo lo que usa, los
+               modelos de las tablas que lee y sus estilos de impresión. Esta
+               prueba falla cuando algo de eso cambia, para que no se olvide
+               volver a armarlo. Con el visor ya armado, se pone aquí la huella
+               nueva y la prueba vuelve a pasar. */
+            const HUELLA_DEL_VISOR = 'c6d33aca7ccdc04b';
+            const h = await Pruebas.huellaFormato();
+            Pruebas.ok(h.piezas.includes('Documento.construir') && h.piezas.includes('Finanzas.valorEfectivo') && h.reglasCss > 20,
+              'La huella abarca el formato, lo que usa y sus estilos');
+            Pruebas.igual(h.huella, HUELLA_DEL_VISOR,
+              'El formato imprimible cambió: HAY QUE VOLVER A ARMAR EL VISOR EN EL CHAT DE LA MUDANZA. ' +
+              'Cuando esté armado, ponga aquí la huella nueva (' + h.huella + ')');
           } },
 
         { nombre: 'Generar el formato oficial de la caja', fn: async ctx => {
