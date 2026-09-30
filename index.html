@@ -15220,6 +15220,11 @@ const VistaRespaldos = {
       '<p class="fs12 txt-2 mb12">Los datos están en PostgreSQL. Cada fila lleva un identificador ULID en texto ' +
       'que hace de clave primaria y foránea, así que el esquema de abajo describe exactamente lo que hay ' +
       'en el servidor. Útil para auditoría o para levantar un entorno de pruebas.</p>' +
+      /* El esquema de abajo crea la lista de acceso, pero quién entra se decide
+         en el Portal desde 2026: aquí no hay nada que administrar. */
+      '<div class="alert a-info mb12" style="padding:9px 11px">' + Icon('info', '', 14) +
+      '<div>Los usuarios y sus accesos se administran en el ' +
+      '<a href="' + attr(PORTAL_URL) + '" target="_blank" rel="noopener">Portal</a>, no aquí.</div></div>' +
       '<div class="flex g8 wrap">' +
       '<button class="btn" data-act="ddl">' + Icon('db', '', 14) + 'Descargar esquema SQL</button>' +
       '<button class="btn" data-act="verDdl">' + Icon('eye', '', 14) + 'Ver esquema</button>' +
@@ -15395,7 +15400,10 @@ const Migracion = {
     T('-- CÓMO USARLO (sólo para rehacerlo en otro proyecto)');
     T('--   1. Supabase → SQL Editor → New query → pegue TODO esto → Run.');
     T('--   2. Project Settings → Data API → Exposed schemas: agregue  caja.');
-    T('--   3. Dé acceso a cada persona (debe tener cuenta en Authentication):');
+    T('--   3. Los accesos NO se dan aquí: se administran en el Portal,');
+    T('--      ' + PORTAL_URL);
+    T('--      Sólo en un proyecto nuevo, donde todavía no hay Portal, se da el');
+    T('--      primer acceso a mano (la cuenta debe existir en Authentication):');
     T('--        insert into caja.usuarios (user_id, correo)');
     T("--        select id, email from auth.users where email = 'correo@ejemplo.com';");
     T('--');
@@ -15679,7 +15687,8 @@ const Migracion = {
     T('');
     T("notify pgrst, 'reload schema';");
     T('');
-    T('-- Listo. Falta exponer el esquema caja (Data API) y dar acceso en caja.usuarios.');
+    T('-- Listo. Falta exponer el esquema caja (Data API). Los accesos se administran');
+    T('-- en el Portal: ' + PORTAL_URL);
     return L.join('\n');
   },
 
@@ -16616,6 +16625,29 @@ const Pruebas = {
               Nube.guardarSesion(null);
               if (previa) localStorage.setItem(Nube.CLAVE_SESION, previa); else localStorage.removeItem(Nube.CLAVE_SESION);
             }
+          } },
+
+        { nombre: 'Los usuarios y los accesos se administran en el Portal, no en caja menor', fn: async () => {
+            /* Caja nunca tuvo pantalla de usuarios, pero el esquema que se puede
+               descargar todavía explicaba cómo dar el acceso a mano en Supabase.
+               Desde que los accesos los reparte el Portal, eso desorienta. */
+            const sql = Migracion.generarDDL();
+            Pruebas.ok(sql.includes(PORTAL_URL), 'El esquema que se descarga manda al Portal para los accesos');
+            Pruebas.ok(!/3\. Dé acceso a cada persona/.test(sql), 'Y ya no dice que se den aquí');
+            Pruebas.ok(sql.includes('en el Portal: ' + PORTAL_URL),
+              'Y al terminar de correrlo recuerda con un enlace dónde se dan los accesos');
+            Pruebas.ok(/create table if not exists usuarios/.test(sql) && /function caja\.tiene_acceso/.test(sql),
+              'Pero sigue creando la lista de acceso y su función, que son las que usa el Portal');
+
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            try {
+              await VistaRespaldos.render(div);
+              Pruebas.ok(/se administran en el Portal/i.test(div.textContent),
+                'La pantalla lo dice donde antes estaban las instrucciones');
+              Pruebas.ok(Boolean(div.querySelector('a[href="' + PORTAL_URL + '"]')), 'Con el enlace para ir');
+            } finally { div.remove(); }
           } },
 
         { nombre: 'Se rechazan URL y claves mal formadas', fn: async () => {
