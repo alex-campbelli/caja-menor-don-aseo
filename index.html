@@ -139,6 +139,9 @@ html[data-theme="dark"] ::-webkit-scrollbar-thumb{background:#37454f}
 .sb-user-es{color:#5c6d79;font-size:10px;margin-top:1px}
 .sb-salir{flex:0 0 auto;width:26px;height:26px;border:0;border-radius:6px;background:transparent;color:#7b8b97;cursor:pointer;display:grid;place-items:center}
 .sb-salir:hover{background:rgba(220,76,76,.18);color:#ff8a8a}
+.sb-portal{display:flex;align-items:center;gap:8px;padding:6px 7px;margin-bottom:6px;border-radius:8px;
+  color:#8fa3b0;font-size:11.5px;font-weight:600;text-decoration:none;cursor:pointer}
+.sb-portal:hover{background:rgba(255,255,255,.06);color:#c6d3dc}
 .sb-ver{color:#4a5a66;font-size:10px;margin-top:7px;text-align:center}
 /* Barra lateral contraída: una columna de iconos. Da 172 px más a la vista, y
    el listado de cajas los convierte en nombres más completos. En móvil no se
@@ -172,6 +175,8 @@ html[data-theme="dark"] ::-webkit-scrollbar-thumb{background:#37454f}
   html.sb-mini .sb-toggle .sb-toggle-ic{transform:none}
   html.sb-mini .sb-foot{padding:8px 8px 10px}
   html.sb-mini .sb-user{justify-content:center;background:transparent;padding:4px 0}
+  html.sb-mini .sb-portal{justify-content:center;padding:6px 0}
+  html.sb-mini .sb-portal span{display:none}
 }
 @media (max-width:860px){ .sb-toggle{display:none} }
 .main{flex:1;min-width:0;margin-left:var(--sidebar-w);display:flex;flex-direction:column}
@@ -2587,9 +2592,20 @@ const Modelo = {
       id: ID.auditoria(),
       entidad, entidadId, accion,
       datos: datos || null,
-      usuario: 'local',
+      usuario: Modelo.quienEdita(),
       ts: Modelo.ahora()
     };
+  },
+
+  /**
+   * Con qué nombre queda firmado un movimiento: el correo de la sesión. Antes
+   * decía siempre «local», de cuando entraba una sola persona desde un solo
+   * equipo; ahora que los accesos se reparten desde el Portal, eso no nombra a
+   * nadie. Sin sesión —el banco de pruebas— se conserva «local», que es lo que
+   * dicen también las filas viejas.
+   */
+  quienEdita() {
+    try { const s = Nube.sesion(); return (s && s.correo) || 'local'; } catch (e) { return 'local'; }
   }
 };
 
@@ -2713,6 +2729,44 @@ const SUPABASE_POR_DEFECTO = {
 const ESQUEMA_NUBE = 'caja';
 const CAB_ESQUEMA = { 'Accept-Profile': ESQUEMA_NUBE, 'Content-Profile': ESQUEMA_NUBE };
 
+/* ── La puerta del Portal ──────────────────────────────────────────────────
+   Desde el Portal se entra sin volver a escribir la contraseña: la dirección
+   trae un pase de un solo uso («#pase=…») que se canjea por una sesión.
+
+   Se lee AQUÍ ARRIBA, antes de que nadie mire la dirección, y se borra de la
+   barra en el acto: si se quedara, el router tomaría «pase=…» por el nombre de
+   una vista y caería en «no encontrado», y al recargar se reintentaría un pase
+   ya gastado. El pase no se guarda en ninguna parte ni queda en la auditoría:
+   lo único que sobrevive es la sesión que devolvió el servidor. */
+const PORTAL_URL = 'https://alex-campbelli.github.io/portal-don-aseo/';
+const CLAVE_PESTANA = 'portal.pestana';   // la misma marca que usan los demás programas
+
+/** Saca el pase de una dirección. Aparte para poder probarlo. */
+function leerPase(hash) {
+  const m = /(?:^#|&)pase=([^&]+)/.exec(hash || '');
+  if (!m) return null;
+  try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; }
+}
+
+const PASE = (() => {
+  const p = leerPase(location.hash);
+  if (!p) return null;
+  history.replaceState(null, '', location.pathname + location.search);
+  /* La marca se queda en la pestaña: al recargar se sigue sabiendo que esta
+     ventana vino del Portal, aunque el pase ya se haya gastado. */
+  try { sessionStorage.setItem(CLAVE_PESTANA, Date.now().toString(36) + Math.random().toString(36).slice(2, 10)); } catch (e) {}
+  return p;
+})();
+
+/**
+ * ¿Esta pestaña se abrió desde el Portal? Se mira la marca cada vez, en lugar
+ * de recordarla en una constante, para que siga valiendo después de recargar
+ * y para poder probarlo.
+ */
+function desdePortal() {
+  try { return Boolean(sessionStorage.getItem(CLAVE_PESTANA)); } catch (e) { return false; }
+}
+
 const Nube = {
   /* v2: la conexión y la sesión de antes eran del Supabase anterior; con claves
      nuevas ningún navegador sigue conectado allá y todos entran de nuevo. */
@@ -2733,12 +2787,30 @@ const Nube = {
   },
   configurada() { const c = this.config(); return Boolean(c.url && c.anonKey); },
 
+  /**
+   * Dónde vive la sesión. En una pestaña abierta desde el Portal vive SÓLO en
+   * esa pestaña: al cerrarla se acaba, no se mezcla con la de quien trabaja en
+   * este equipo y cerrar sesión aquí no toca la de los demás programas. En una
+   * pestaña normal, donde está desde siempre, para no pedir la contraseña cada
+   * mañana. Si el navegador no deja guardar nada (modo privado), se devuelve
+   * null y la sesión simplemente no se recuerda.
+   */
+  almacen() {
+    try { return desdePortal() ? sessionStorage : localStorage; } catch (e) { return null; }
+  },
   sesion() {
-    try { return JSON.parse(localStorage.getItem(this.CLAVE_SESION) || 'null'); } catch { return null; }
+    try {
+      const a = this.almacen();
+      return a ? JSON.parse(a.getItem(this.CLAVE_SESION) || 'null') : null;
+    } catch (e) { return null; }
   },
   guardarSesion(s) {
-    if (s) localStorage.setItem(this.CLAVE_SESION, JSON.stringify(s));
-    else localStorage.removeItem(this.CLAVE_SESION);
+    const a = this.almacen();
+    if (!a) return;
+    try {
+      if (s) a.setItem(this.CLAVE_SESION, JSON.stringify(s));
+      else a.removeItem(this.CLAVE_SESION);
+    } catch (e) {}
   },
 
   /* ---------------- Autenticación ---------------- */
@@ -2758,6 +2830,37 @@ const Nube = {
       access_token: j.access_token, refresh_token: j.refresh_token,
       expira: Date.now() + (j.expires_in || 3600) * 1000,
       correo: (j.user && j.user.email) || correo
+    };
+    this.guardarSesion(s);
+    return s;
+  },
+
+  /**
+   * Cambia el pase del Portal por una sesión. Es el mismo enlace mágico de
+   * Supabase que se enviaría por correo, sólo que el Portal lo entrega en
+   * mano: sirve una vez y vence en una hora. Devuelve la sesión o null, sin
+   * lanzar: si el pase ya se usó o venció, se pide la contraseña como siempre.
+   */
+  async canjearPase(pase) {
+    if (!pase) return null;
+    const c = this.config();
+    let r;
+    try {
+      r = await fetch(c.url + '/auth/v1/verify', {
+        method: 'POST',
+        headers: { apikey: c.anonKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'email', token_hash: pase })
+      });
+    } catch (e) { return null; }
+    if (!r.ok) return null;
+    const j = await r.json().catch(() => null);
+    if (!j || !j.access_token) return null;
+    /* Aquí se guarda el vencimiento en milisegundos, como el resto del
+       sistema; el servidor lo manda en segundos. */
+    const s = {
+      access_token: j.access_token, refresh_token: j.refresh_token,
+      expira: Date.now() + (j.expires_in || 3600) * 1000,
+      correo: (j.user && j.user.email) || ''
     };
     this.guardarSesion(s);
     return s;
@@ -2794,13 +2897,43 @@ const Nube = {
     const c = this.config(); const s = this.sesion();
     if (s) {
       try {
-        await fetch(c.url + '/auth/v1/logout', {
+        /* Sólo esta sesión. Sin «scope=local», Supabase cierra TODAS las de la
+           cuenta: salir de caja menor sacaría a la persona del Portal y de los
+           demás programas. */
+        await fetch(c.url + '/auth/v1/logout?scope=local', {
           method: 'POST',
           headers: { 'apikey': c.anonKey, 'Authorization': 'Bearer ' + s.access_token }
         });
       } catch {}
     }
     this.guardarSesion(null);
+  },
+
+  /**
+   * ¿Esta cuenta tiene acceso a caja menor? Lo decide el servidor con
+   * caja.tiene_acceso(), la misma función que protege todas las tablas.
+   * Devuelve true, false, o NULL cuando no se pudo saber (red caída, servidor
+   * mudo, respuesta rara). Ante la duda no se le cierra la puerta a nadie:
+   * dejar afuera a quien sí tiene acceso es peor que dejarlo entrar y que
+   * falle lo de siempre.
+   */
+  async tieneAcceso() {
+    const c = this.config();
+    let tk = null;
+    try { tk = await this.token(); } catch (e) { return null; }
+    if (!tk) return null;
+    let r;
+    try {
+      r = await fetch(c.url + '/rest/v1/rpc/tiene_acceso', {
+        method: 'POST',
+        headers: Object.assign({ apikey: c.anonKey, Authorization: 'Bearer ' + tk,
+                                 'Content-Type': 'application/json' }, CAB_ESQUEMA),
+        body: '{}'
+      });
+    } catch (e) { return null; }
+    if (!r.ok) return null;
+    const j = await r.json().catch(() => null);
+    return typeof j === 'boolean' ? j : null;
   },
 
   /**
@@ -7390,6 +7523,11 @@ const Shell = {
     const version = '<div class="sb-ver">' + esc(APP.nombre) + ' v' + APP.version + '</div>';
     if (!s) return '<div class="sb-foot">' + version + '</div>';
     return '<div class="sb-foot">' +
+      /* La vuelta al Portal, donde están los demás programas. Se abre en otra
+         pestaña para no perder lo que se esté haciendo aquí. */
+      '<a class="sb-portal" href="' + attr(PORTAL_URL) + '" target="_blank" rel="noopener" ' +
+        'title="Ir al Portal, donde están los demás programas" data-tip="Ir al Portal">' +
+        Icon('back', '', 14) + '<span>Portal</span></a>' +
       '<div class="sb-user">' +
         '<div class="sb-user-ic">' + Icon('nube', '', 13) + '</div>' +
         '<div class="sb-user-tx">' +
@@ -8674,6 +8812,22 @@ const VistaCajas = {
    VISTA · DETALLE DE CAJA
    ========================================================================== */
 const VistaCaja = {
+  /**
+   * Una línea del historial de la caja: qué se hizo, cuándo y —desde que entra
+   * más de una persona— quién. De un correo se muestra lo de antes de la arroba,
+   * que es lo que distingue; el correo entero queda en el título. Las filas
+   * viejas dicen «local» y no nombran a nadie: ahí no se inventa un autor.
+   */
+  lineaAuditoria(a) {
+    const u = (a && a.usuario) || '';
+    const quien = !u || u === 'local' ? '' : u;
+    return '<div class="fs11 flex aic g6" style="padding:3px 0">' +
+      '<span class="pill np p-gray">' + esc(a.accion) + '</span>' +
+      '<span class="txt-3">' + Fecha.stamp(a.ts) + '</span>' +
+      (quien ? '<span class="txt-3" title="' + attr(quien) + '">· ' + esc(quien.split('@')[0]) + '</span>' : '') +
+      '</div>';
+  },
+
   async render(cont, params) {
     const id = params[0];
     cont.innerHTML = Comp.cargando();
@@ -8940,9 +9094,7 @@ const VistaCaja = {
             .map(([k, v]) => '<dt>' + esc(k) + '</dt><dd>' + esc(typeof v === 'object' ? JSON.stringify(v) : v) + '</dd>').join('') +
           '</dl></div>' : '') +
         (auditoria.length ? '<div class="mt12"><div class="fs11 txt-3 mb8" style="font-weight:700;letter-spacing:.06em;text-transform:uppercase">Auditoría</div>' +
-          auditoria.slice(0, 8).map(a => '<div class="fs11 flex aic g6" style="padding:3px 0">' +
-            '<span class="pill np p-gray">' + esc(a.accion) + '</span>' +
-            '<span class="txt-3">' + Fecha.stamp(a.ts) + '</span></div>').join('') + '</div>' : '') +
+          auditoria.slice(0, 8).map(a => VistaCaja.lineaAuditoria(a)).join('') + '</div>' : '') +
         '</div></div>' +
       '</div></div>' +
 
@@ -16252,6 +16404,220 @@ const Pruebas = {
             Pruebas.ok(!Shell.pieSesion().includes('data-gact="salir"'), 'Sin sesión no se ofrece salir');
             if (previa) localStorage.setItem(Nube.CLAVE_SESION, previa);
           } },
+        { nombre: 'CRÍTICO · una cuenta sin acceso ve un aviso claro, no una caída del sistema', fn: async () => {
+            /* Con los accesos repartidos desde el Portal, entrar con una cuenta
+               que no está en caja.usuarios es normal. Antes el arranque seguía,
+               el servidor le negaba todo y se terminaba en «No se pudo conectar
+               con el servidor»: parecía que el sistema se hubiera caído. */
+            const fetchReal = window.fetch;
+            const responder = (cuerpo, ok) => () => Promise.resolve({
+              ok: ok !== false, status: ok === false ? 500 : 200,
+              json: () => Promise.resolve(cuerpo)
+            });
+            const previa = localStorage.getItem(Nube.CLAVE_SESION);
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            try {
+              Nube.guardarSesion({ access_token: 'x', refresh_token: 'y',
+                                   expira: Date.now() + 3600000, correo: 'ajena@donaseo.co' });
+              window.fetch = responder(true);
+              Pruebas.igual(await Nube.tieneAcceso(), true, 'Con acceso, el servidor dice que sí');
+              window.fetch = responder(false);
+              Pruebas.igual(await Nube.tieneAcceso(), false, 'Sin acceso, dice que no');
+
+              /* Ante la duda no se decide: dejar afuera a quien sí tiene acceso
+                 es peor que dejarlo entrar y que falle lo de siempre. */
+              window.fetch = () => Promise.reject(new TypeError('Failed to fetch'));
+              Pruebas.igual(await Nube.tieneAcceso(), null, 'Si la red se cae, no se sabe');
+              window.fetch = responder(null, false);
+              Pruebas.igual(await Nube.tieneAcceso(), null, 'Si el servidor responde con error, tampoco');
+              window.fetch = responder({ message: 'no existe' });
+              Pruebas.igual(await Nube.tieneAcceso(), null, 'Ni si contesta algo que no es sí o no');
+
+              const arr = arrancar.toString();
+              Pruebas.ok(/tieneAcceso\(\) === false/.test(arr),
+                'El arranque sólo cierra la puerta cuando el servidor dijo que no');
+              Pruebas.ok(/sinAcceso/.test(arr), 'Y en ese caso muestra el aviso');
+
+              Sesion.sinAcceso('ajena@donaseo.co', div);
+              const t = div.textContent;
+              Pruebas.ok(/no tiene acceso a caja menor/i.test(t), 'El aviso dice lo que pasa de verdad');
+              Pruebas.ok(!/No se pudo conectar/i.test(t), 'Y no culpa al servidor de una caída que no hubo');
+              Pruebas.ok(t.includes('ajena@donaseo.co'), 'Dice con qué cuenta entró');
+              Pruebas.ok(/administrador/i.test(t), 'Y a quién pedirle el acceso');
+              Pruebas.ok(Boolean(div.querySelector('#sinAccComprobar') && div.querySelector('#sinAccOtra')),
+                'Ofrece volver a comprobar y entrar con otra cuenta');
+
+              Sesion.olvidarSesion();
+              Pruebas.igual(Nube.sesion(), null, 'Entrar con otra cuenta olvida la sesión de este navegador');
+              Pruebas.ok(!/logout/.test(Sesion.olvidarSesion.toString()),
+                'Sin cerrarla en el servidor: es la misma cuenta de los demás programas');
+            } finally {
+              window.fetch = fetchReal;
+              div.remove();
+              if (previa) localStorage.setItem(Nube.CLAVE_SESION, previa);
+              else localStorage.removeItem(Nube.CLAVE_SESION);
+            }
+          } },
+
+        { nombre: 'CRÍTICO · el pase del Portal se canjea una vez y no se guarda en ninguna parte', fn: async () => {
+            /* Desde el Portal se entra sin escribir la contraseña: la dirección
+               trae un pase de un solo uso. Si el pase se quedara en la barra, el
+               router lo tomaría por una vista (404) y al recargar se reintentaría
+               uno ya gastado. */
+            Pruebas.igual(leerPase('#pase=abc123'), 'abc123', 'Se saca el pase de la dirección');
+            Pruebas.igual(leerPase('#/cajas'), null, 'Una dirección normal no trae pase');
+            Pruebas.igual(leerPase(''), null, 'Ni una vacía');
+            Pruebas.igual(leerPase('#otra=1&pase=xy%2Bz'), 'xy+z', 'Aunque venga detrás de otra cosa, y llega entero');
+            Pruebas.igual(leerPase('#pase=abc&otra=1'), 'abc', 'Y no se traga lo que venga detrás');
+            Pruebas.igual(leerPase('#pase=mal%ZZ'), 'mal%ZZ', 'Un pase mal escrito no tumba el arranque');
+
+            const fuente = [...document.querySelectorAll('script')].map(s => s.textContent).join('\n');
+            Pruebas.ok(/const PASE = \(\(\) => \{[\s\S]{0,400}history\.replaceState/.test(fuente),
+              'El pase se borra de la barra de direcciones apenas se lee');
+            Pruebas.ok(!/pase=/.test(location.hash), 'Y ahora mismo no hay ningún pase a la vista');
+
+            const arr = arrancar.toString();
+            Pruebas.ok(/PASE && !await Nube\.canjearPase\(PASE\)/.test(arr),
+              'El arranque canjea el pase antes de pedir la contraseña');
+            Pruebas.ok(/ya se usó o venció/.test(arr), 'Y explica por qué la pide si el pase no sirvió');
+            Pruebas.ok(/if \(aviso\) err\(aviso\)/.test(Sesion.pedirCredenciales.toString()),
+              'La pantalla de acceso muestra ese aviso');
+
+            const fetchReal = window.fetch;
+            const previa = localStorage.getItem(Nube.CLAVE_SESION);
+            const marca = sessionStorage.getItem(CLAVE_PESTANA);
+            try {
+              sessionStorage.removeItem(CLAVE_PESTANA);
+              Nube.guardarSesion(null);
+              window.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({
+                access_token: 'tok', refresh_token: 'ref', expires_in: 3600,
+                user: { email: 'fabian@donaseoltda.com' } }) });
+              const s = await Nube.canjearPase('EL-PASE-SECRETO');
+              Pruebas.igual(s.correo, 'fabian@donaseoltda.com', 'El pase trae de vuelta una sesión con su correo');
+              Pruebas.ok(s.expira > Date.now() + 3500000 && s.expira < Date.now() + 3700000,
+                'El vencimiento queda en milisegundos, como el resto del sistema');
+              Pruebas.igual((Nube.sesion() || {}).access_token, 'tok', 'Y queda guardada');
+              const todo = [localStorage, sessionStorage].map(a => JSON.stringify(a)).join(' ');
+              Pruebas.ok(!/EL-PASE-SECRETO/.test(todo), 'El pase no se guarda en ninguna parte');
+
+              Nube.guardarSesion(null);
+              window.fetch = () => Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: 'expired' }) });
+              Pruebas.igual(await Nube.canjearPase('gastado'), null, 'Un pase gastado no da sesión');
+              Pruebas.igual(Nube.sesion(), null, 'Y no deja nada a medias');
+              window.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ error: 'raro' }) });
+              Pruebas.igual(await Nube.canjearPase('x'), null, 'Una respuesta sin sesión no vale, aunque venga con buena cara');
+              Pruebas.igual(Nube.sesion(), null, 'Y no se guarda una sesión sin llave');
+              window.fetch = () => Promise.reject(new TypeError('Failed to fetch'));
+              Pruebas.igual(await Nube.canjearPase('x'), null, 'Si la red se cae, tampoco');
+              Pruebas.igual(await Nube.canjearPase(null), null, 'Sin pase no se le pregunta nada al servidor');
+            } finally {
+              window.fetch = fetchReal;
+              Nube.guardarSesion(null);
+              if (marca) sessionStorage.setItem(CLAVE_PESTANA, marca); else sessionStorage.removeItem(CLAVE_PESTANA);
+              if (previa) localStorage.setItem(Nube.CLAVE_SESION, previa); else localStorage.removeItem(Nube.CLAVE_SESION);
+            }
+          } },
+
+        { nombre: 'CRÍTICO · la sesión abierta desde el Portal vive sólo en esa pestaña', fn: () => {
+            /* Si se guardara donde siempre, quedaría en el equipo después de
+               cerrar la ventana, y al salir de caja menor se cerraría también la
+               del Portal y la de los demás programas. */
+            const marca = sessionStorage.getItem(CLAVE_PESTANA);
+            const previa = localStorage.getItem(Nube.CLAVE_SESION);
+            const dePestana = sessionStorage.getItem(Nube.CLAVE_SESION);
+            try {
+              sessionStorage.removeItem(CLAVE_PESTANA);
+              Pruebas.ok(!desdePortal(), 'Sin la marca, es una pestaña normal');
+              Pruebas.ok(Nube.almacen() === localStorage, 'Y la sesión vive donde siempre');
+              Nube.guardarSesion({ access_token: 'de-siempre', expira: Date.now() + 3600000, correo: 'juan@donaseo.co' });
+
+              sessionStorage.setItem(CLAVE_PESTANA, 'marca-de-prueba');
+              Pruebas.ok(desdePortal(), 'Con la marca, la pestaña es del Portal');
+              Pruebas.ok(Nube.almacen() === sessionStorage, 'Y la sesión vive sólo ahí');
+              Pruebas.igual(Nube.sesion(), null, 'La del equipo no se ve desde la pestaña del Portal');
+              Nube.guardarSesion({ access_token: 'del-portal', expira: Date.now() + 3600000, correo: 'fabian@donaseo.co' });
+              Pruebas.igual((Nube.sesion() || {}).access_token, 'del-portal', 'Se guarda la del Portal');
+              Pruebas.ok(!/del-portal/.test(localStorage.getItem(Nube.CLAVE_SESION) || ''),
+                'Sin tocar la que estaba en el equipo');
+              Nube.guardarSesion(null);
+              Pruebas.igual(Nube.sesion(), null, 'Al salir se olvida la de la pestaña');
+
+              sessionStorage.removeItem(CLAVE_PESTANA);
+              Pruebas.igual((Nube.sesion() || {}).access_token, 'de-siempre',
+                'Y la del equipo siguió ahí todo el tiempo');
+
+              Pruebas.ok(/auth\/v1\/logout\?scope=local/.test(Nube.salir.toString()),
+                'Cerrar sesión cierra sólo ésta, no la del Portal ni la de los otros programas');
+              Pruebas.ok(!/logout/.test(Sesion.olvidarSesion.toString()),
+                'Y olvidar la sesión no llama al servidor siquiera');
+            } finally {
+              if (marca) sessionStorage.setItem(CLAVE_PESTANA, marca); else sessionStorage.removeItem(CLAVE_PESTANA);
+              if (dePestana) sessionStorage.setItem(Nube.CLAVE_SESION, dePestana); else sessionStorage.removeItem(Nube.CLAVE_SESION);
+              if (previa) localStorage.setItem(Nube.CLAVE_SESION, previa); else localStorage.removeItem(Nube.CLAVE_SESION);
+            }
+          } },
+
+        { nombre: 'Se puede volver al Portal desde el menú y desde el aviso de sin acceso', fn: () => {
+            const previa = localStorage.getItem(Nube.CLAVE_SESION);
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            try {
+              Nube.guardarSesion({ access_token: 'x', expira: Date.now() + 3600000, correo: 'juan@donaseo.co' });
+              const pie = Shell.pieSesion();
+              Pruebas.ok(pie.includes(PORTAL_URL), 'El menú tiene el enlace al Portal');
+              Pruebas.ok(/target="_blank"/.test(pie), 'Que se abre aparte, sin perder lo que se esté haciendo');
+
+              Sesion.sinAcceso('ajena@donaseo.co', div, true);
+              Pruebas.ok(Boolean(div.querySelector('#sinAccPortal')), 'Viniendo del Portal, se ofrece volver al Portal');
+              Pruebas.ok(!div.querySelector('#sinAccOtra'), 'Y no «entrar con otra cuenta»: la cuenta la decide el Portal');
+              Pruebas.ok(Boolean(div.querySelector('#sinAccComprobar')), 'Volver a comprobar se ofrece siempre');
+
+              Sesion.sinAcceso('ajena@donaseo.co', div, false);
+              Pruebas.ok(Boolean(div.querySelector('#sinAccOtra')), 'Entrando por la dirección de siempre, se ofrece otra cuenta');
+              Pruebas.ok(!div.querySelector('#sinAccPortal'), 'Y no se manda a un Portal del que no vino');
+            } finally {
+              div.remove();
+              if (previa) localStorage.setItem(Nube.CLAVE_SESION, previa); else localStorage.removeItem(Nube.CLAVE_SESION);
+            }
+          } },
+
+        { nombre: 'CRÍTICO · cada movimiento queda firmado con el correo de quien lo hizo', fn: async () => {
+            /* Decía siempre «local», de cuando entraba una sola persona desde un
+               solo equipo. Con los accesos repartidos desde el Portal, eso no
+               nombra a nadie: no se sabría quién registró, cerró o anuló una caja. */
+            const previa = localStorage.getItem(Nube.CLAVE_SESION);
+            const auditoriaAntes = Auditoria.activa;
+            try {
+              Nube.guardarSesion(null);
+              Pruebas.igual(Modelo.auditoria('caja', 'c1', 'CREAR', null).usuario, 'local',
+                'Sin sesión se conserva «local», como las filas viejas');
+              Nube.guardarSesion({ access_token: 'x', expira: Date.now() + 3600000, correo: 'fabian@donaseoltda.com' });
+              Pruebas.igual(Modelo.auditoria('caja', 'c1', 'CREAR', null).usuario, 'fabian@donaseoltda.com',
+                'Con sesión, firma con el correo');
+
+              /* En las pruebas la bitácora está apagada para no ensuciar; aquí
+                 se enciende un momento para ver lo que se guarda de verdad. */
+              Auditoria.activa = true;
+              await Auditoria.registrar('caja', 'firma-de-prueba', 'CAMBIO_ESTADO', { estado: 'CONSIGNADA' });
+              const filas = await Auditoria.porEntidad('firma-de-prueba');
+              Pruebas.ok(filas.length > 0 && filas.every(a => a.usuario === 'fabian@donaseoltda.com'),
+                'Y lo que se guarda de verdad lleva ese correo');
+
+              const linea = VistaCaja.lineaAuditoria(filas[0]);
+              Pruebas.ok(/fabian@donaseoltda\.com/.test(linea), 'El historial de la caja lo muestra');
+              Pruebas.ok(/>· fabian</.test(linea), 'Abreviado, que es lo que distingue');
+              Pruebas.ok(!/local/.test(VistaCaja.lineaAuditoria({ accion: 'CREAR', ts: Modelo.ahora(), usuario: 'local' })),
+                'Una fila vieja no inventa un autor');
+            } finally {
+              Auditoria.activa = auditoriaAntes;
+              Nube.guardarSesion(null);
+              if (previa) localStorage.setItem(Nube.CLAVE_SESION, previa); else localStorage.removeItem(Nube.CLAVE_SESION);
+            }
+          } },
+
         { nombre: 'Se rechazan URL y claves mal formadas', fn: async () => {
             await Pruebas.lanza(() => Nube.probar('http://algo.com', 'x'.repeat(60)), 'Debe exigir https y dominio supabase.co');
             await Pruebas.lanza(() => Nube.probar('https://abc.supabase.co', 'corta'), 'Debe rechazar una clave corta');
@@ -21519,7 +21885,7 @@ const VistaPruebas = {
    ========================================================================== */
 const Sesion = {
   /** pide credenciales y no devuelve hasta que haya una sesión válida */
-  pedirCredenciales() {
+  pedirCredenciales(aviso) {
     return new Promise(resolve => {
       const cfg = Nube.config();
       const app = $('#app');
@@ -21587,11 +21953,67 @@ const Sesion = {
                 : 'El servidor no responde');
       })();
 
+      /* Quien llega con un pase gastado merece saber por qué se le pide la
+         contraseña: si no, parece que el Portal no sirviera. */
+      if (aviso) err(aviso);
+
       $('#sesEntrar').onclick = entrar;
       $('#sesClave').addEventListener('keydown', e => { if (e.key === 'Enter') entrar(); });
       $('#sesCorreo').addEventListener('keydown', e => { if (e.key === 'Enter') $('#sesClave').focus(); });
     });
-  }
+  },
+
+  /**
+   * La cuenta es buena, pero no está en la lista de acceso a caja menor.
+   * Antes esto no se distinguía: el arranque seguía, el servidor le negaba
+   * todo y se terminaba en «No se pudo conectar con el servidor», que parece
+   * una caída del sistema cuando lo único que falta es un permiso.
+   */
+  htmlSinAcceso(correo, delPortal) {
+    return '<div style="position:fixed;inset:0;display:grid;place-items:center;background:var(--bg);padding:20px;overflow:auto">' +
+      '<div style="width:100%;max-width:440px">' +
+        '<div style="text-align:center;margin-bottom:22px">' +
+          '<img src="' + MARCA_DON_ASEO + '" alt="" style="width:60px;height:60px;border-radius:14px;' +
+            'display:block;margin:0 auto 14px;object-fit:cover">' +
+          '<div style="font-size:17px;font-weight:650">' + esc(APP.nombre) + '</div>' +
+          '<div style="color:var(--text-3);font-size:12.5px;margin-top:3px">' + esc(APP.empresa) + '</div>' +
+        '</div>' +
+        '<div class="card"><div class="card-b">' +
+          '<div class="alert a-warn mb12" style="padding:9px 11px">' + Icon('shield', '', 14) +
+          '<div><b>Su cuenta no tiene acceso a caja menor.</b></div></div>' +
+          '<p class="fs13 txt-2 mb12">Entró bien' + (correo ? ' como <b>' + esc(correo) + '</b>' : '') +
+          ', pero esta cuenta todavía no está autorizada para ver la caja menor. Pídale el acceso al ' +
+          'administrador; cuando se lo den, pulse «Volver a comprobar» y entrará sin escribir la contraseña otra vez.</p>' +
+          /* Desde el Portal, la cuenta la decide el Portal: ahí no tiene
+             sentido ofrecer «entrar con otra», sino volver. */
+          '<div class="flex g8 wrap">' +
+            '<button class="btn btn-primary" id="sinAccComprobar">' + Icon('refresh', '', 14) + 'Volver a comprobar</button>' +
+            (delPortal
+              ? '<button class="btn" id="sinAccPortal">' + Icon('back', '', 14) + 'Volver al Portal</button>'
+              : '<button class="btn" id="sinAccOtra">' + Icon('salir', '', 14) + 'Entrar con otra cuenta</button>') +
+          '</div>' +
+        '</div></div>' +
+        '<div class="fs11 txt-3" style="text-align:center;margin-top:14px;line-height:1.6">' +
+          'No se perdió nada: la información sigue en el servidor. Sólo falta que autoricen esta cuenta.' +
+        '</div>' +
+      '</div></div>';
+  },
+
+  sinAcceso(correo, cont, delPortal) {
+    const app = cont || $('#app');
+    app.innerHTML = this.htmlSinAcceso(correo, delPortal === undefined ? desdePortal() : delPortal);
+    const c = app.querySelector('#sinAccComprobar');
+    if (c) c.onclick = () => location.reload();
+    const o = app.querySelector('#sinAccOtra');
+    if (o) o.onclick = () => { Sesion.olvidarSesion(); location.reload(); };
+    const p = app.querySelector('#sinAccPortal');
+    if (p) p.onclick = () => { Sesion.olvidarSesion(); location.href = PORTAL_URL; };
+  },
+
+  /* Sólo se olvida la sesión en ESTE navegador. No se cierra en el servidor
+     porque es la misma cuenta de los demás programas del sistema: sacarla de
+     todos por no tener acceso aquí sería peor el remedio. */
+  olvidarSesion() { Nube.guardarSesion(null); }
 };
 
 
@@ -21993,7 +22415,26 @@ async function arrancar() {
       'Este archivo no tiene servidor configurado. Use la dirección publicada del sistema.', 'SIN_NUBE');
 
     msg('Conectando con el servidor…');
-    if (!await Nube.token()) await Sesion.pedirCredenciales();
+    /* El pase del Portal se canjea ANTES de decidir si hay que pedir la
+       contraseña. Es de un solo uso: si ya se gastó o venció, no se insiste,
+       se pide la contraseña y se explica por qué. */
+    let avisoPase = '';
+    if (PASE && !await Nube.canjearPase(PASE))
+      avisoPase = 'El enlace del Portal ya se usó o venció. Vuelva al Portal y entre otra vez, ' +
+                  'o ingrese aquí con su correo y su contraseña.';
+    if (!await Nube.token()) await Sesion.pedirCredenciales(avisoPase);
+
+    /* Una cuenta puede ser buena y aun así no estar en la lista de acceso a
+       caja menor, algo normal desde que los accesos se reparten desde el
+       Portal. Sin esta comprobación el arranque seguía, el servidor le negaba
+       la primera escritura y se terminaba en la pantalla de fallo, como si el
+       sistema estuviera caído. Sólo se cierra la puerta cuando el servidor
+       dice que NO: si no se pudo preguntar, se sigue como siempre. */
+    msg('Comprobando su acceso…');
+    if (await Nube.tieneAcceso() === false) {
+      Sesion.sinAcceso((Nube.sesion() || {}).correo);
+      return;
+    }
 
     msg('Abriendo la base de datos…');
     db = new SupabaseAdapter();
