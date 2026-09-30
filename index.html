@@ -102,6 +102,12 @@ html[data-theme="dark"] ::-webkit-scrollbar-thumb{background:#37454f}
 .sb-ctr .sb-ctr-pie span{font-size:10.5px;color:#5c6d79}
 .sb-ctr .sb-ctr-pie a{font-size:10.5px;color:#7f97a8;cursor:pointer;font-weight:600}
 .sb-ctr .sb-ctr-pie a:hover{color:#cfdae2;text-decoration:none}
+/* La vuelta al Portal: mismo aspecto que un ítem del menú, pero separada de
+   él por una línea, porque lleva fuera del programa. */
+.sb-vuelta{padding:10px 8px 0}
+.sb-vuelta .sb-portal{color:#8fa3b0;text-decoration:none}
+.sb-vuelta .sb-portal:hover{color:#dfe8ee}
+.sb-vuelta .sb-ico{transform:translateX(-1px)}
 .sb-nav{flex:1;overflow-y:auto;padding:10px 8px 16px}
 .sb-nav::-webkit-scrollbar-thumb{background:#233039;border-color:var(--sidebar-bg)}
 .sb-sec{color:#5c6d79;font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
@@ -139,9 +145,6 @@ html[data-theme="dark"] ::-webkit-scrollbar-thumb{background:#37454f}
 .sb-user-es{color:#5c6d79;font-size:10px;margin-top:1px}
 .sb-salir{flex:0 0 auto;width:26px;height:26px;border:0;border-radius:6px;background:transparent;color:#7b8b97;cursor:pointer;display:grid;place-items:center}
 .sb-salir:hover{background:rgba(220,76,76,.18);color:#ff8a8a}
-.sb-portal{display:flex;align-items:center;gap:8px;padding:6px 7px;margin-bottom:6px;border-radius:8px;
-  color:#8fa3b0;font-size:11.5px;font-weight:600;text-decoration:none;cursor:pointer}
-.sb-portal:hover{background:rgba(255,255,255,.06);color:#c6d3dc}
 .sb-ver{color:#4a5a66;font-size:10px;margin-top:7px;text-align:center}
 /* Barra lateral contraída: una columna de iconos. Da 172 px más a la vista, y
    el listado de cajas los convierte en nombres más completos. En móvil no se
@@ -175,8 +178,7 @@ html[data-theme="dark"] ::-webkit-scrollbar-thumb{background:#37454f}
   html.sb-mini .sb-toggle .sb-toggle-ic{transform:none}
   html.sb-mini .sb-foot{padding:8px 8px 10px}
   html.sb-mini .sb-user{justify-content:center;background:transparent;padding:4px 0}
-  html.sb-mini .sb-portal{justify-content:center;padding:6px 0}
-  html.sb-mini .sb-portal span{display:none}
+  html.sb-mini .sb-vuelta{padding:6px 8px 0}
 }
 @media (max-width:860px){ .sb-toggle{display:none} }
 .main{flex:1;min-width:0;margin-left:var(--sidebar-w);display:flex;flex-direction:column}
@@ -2738,7 +2740,7 @@ const CAB_ESQUEMA = { 'Accept-Profile': ESQUEMA_NUBE, 'Content-Profile': ESQUEMA
    una vista y caería en «no encontrado», y al recargar se reintentaría un pase
    ya gastado. El pase no se guarda en ninguna parte ni queda en la auditoría:
    lo único que sobrevive es la sesión que devolvió el servidor. */
-const PORTAL_URL = 'https://alex-campbelli.github.io/portal-don-aseo/';
+const PORTAL_URL = 'https://panel.donaseoltda.com/';
 const CLAVE_PESTANA = 'portal.pestana';   // la misma marca que usan los demás programas
 
 /** Saca el pase de una dirección. Aparte para poder probarlo. */
@@ -7478,6 +7480,7 @@ const Shell = {
     app.innerHTML =
       '<aside class="sidebar" id="sidebar">' +
         this.htmlMarca(cfg) +
+        this.htmlVuelta(this.menuContraido()) +
         /* Contraída no cabe el selector de contrato, pero el contrato activo
            tiene que seguir a la vista: trabajar en el equivocado sin notarlo
            es de los errores caros. Salen sus iniciales, y el nombre al pasar. */
@@ -7514,6 +7517,21 @@ const Shell = {
   },
 
   /**
+   * La vuelta al Portal, donde están los demás programas. Va arriba, pegada a
+   * la marca y antes del primer ítem, y en el MISMO sitio en los cinco
+   * programas del sistema: quien salta de uno a otro no tiene que buscarlo.
+   * Abre en esta misma pestaña, también como en los demás.
+   */
+  htmlVuelta(mini) {
+    return '<div class="sb-vuelta">' +
+      '<a class="sb-item sb-portal" id="sbPortal" href="' + attr(PORTAL_URL) + '" ' +
+        'title="Ir al Portal, donde están los demás programas"' +
+        (mini ? ' data-tip="Portal"' : '') + '>' +
+        Icon('back', 'sb-ico', 17) + '<span>Portal</span></a>' +
+      '</div>';
+  },
+
+  /**
    * Pie de la barra lateral: quién tiene la sesión abierta, y cómo cerrarla.
    * La base es compartida, así que el correo del que está escribiendo es un
    * dato de operación, no un adorno: va siempre visible, no dentro de un menú.
@@ -7523,11 +7541,6 @@ const Shell = {
     const version = '<div class="sb-ver">' + esc(APP.nombre) + ' v' + APP.version + '</div>';
     if (!s) return '<div class="sb-foot">' + version + '</div>';
     return '<div class="sb-foot">' +
-      /* La vuelta al Portal, donde están los demás programas. Se abre en otra
-         pestaña para no perder lo que se esté haciendo aquí. */
-      '<a class="sb-portal" href="' + attr(PORTAL_URL) + '" target="_blank" rel="noopener" ' +
-        'title="Ir al Portal, donde están los demás programas" data-tip="Ir al Portal">' +
-        Icon('back', '', 14) + '<span>Portal</span></a>' +
       '<div class="sb-user">' +
         '<div class="sb-user-ic">' + Icon('nube', '', 13) + '</div>' +
         '<div class="sb-user-tx">' +
@@ -7615,6 +7628,10 @@ const Shell = {
   ajustarMenu() {
     const mini = this.menuContraido();
     document.documentElement.classList.toggle('sb-mini', mini);
+    /* Contraído no se ve el texto: el nombre sale al pasar por encima, como
+       en los demás ítems. */
+    const v = $('#sbPortal');
+    if (v) { if (mini) v.setAttribute('data-tip', 'Portal'); else v.removeAttribute('data-tip'); }
     const t = $('#sbToggle');
     if (t) {
       t.setAttribute('data-tip', mini ? 'Expandir el menú' : 'Contraer el menú para dar más espacio a la vista');
@@ -16575,9 +16592,19 @@ const Pruebas = {
             document.body.appendChild(div);
             try {
               Nube.guardarSesion({ access_token: 'x', expira: Date.now() + 3600000, correo: 'juan@donaseo.co' });
-              const pie = Shell.pieSesion();
-              Pruebas.ok(pie.includes(PORTAL_URL), 'El menú tiene el enlace al Portal');
-              Pruebas.ok(/target="_blank"/.test(pie), 'Que se abre aparte, sin perder lo que se esté haciendo');
+              /* Va arriba y abre en la misma pestaña: en los cinco programas
+                 del sistema está en el mismo sitio y se comporta igual. */
+              const vuelta = Shell.htmlVuelta(false);
+              Pruebas.ok(vuelta.includes(PORTAL_URL), 'El menú tiene el enlace al Portal');
+              Pruebas.ok(/class="sb-item/.test(vuelta), 'Con el mismo aspecto que los demás ítems del menú');
+              Pruebas.ok(!/target="_blank"/.test(vuelta), 'Y abre en esta misma pestaña, como en los otros programas');
+              Pruebas.ok(!Shell.pieSesion().includes(PORTAL_URL), 'Ya no está abajo, donde estaba antes');
+              const orden = Shell.render.toString();
+              Pruebas.ok(orden.indexOf('htmlMarca') < orden.indexOf('htmlVuelta') &&
+                         orden.indexOf('htmlVuelta') < orden.indexOf('sb-nav'),
+                'Justo debajo de la marca y antes del primer ítem del menú');
+              Pruebas.ok(/data-tip="Portal"/.test(Shell.htmlVuelta(true)) && !/data-tip/.test(vuelta),
+                'Con el menú contraído, el nombre sale al pasar por encima');
 
               Sesion.sinAcceso('ajena@donaseo.co', div, true);
               Pruebas.ok(Boolean(div.querySelector('#sinAccPortal')), 'Viniendo del Portal, se ofrece volver al Portal');
@@ -16631,6 +16658,11 @@ const Pruebas = {
             /* Caja nunca tuvo pantalla de usuarios, pero el esquema que se puede
                descargar todavía explicaba cómo dar el acceso a mano en Supabase.
                Desde que los accesos los reparte el Portal, eso desorienta. */
+            /* El Portal vive en el dominio de la empresa desde el 30/09/2026; si
+               alguna vez vuelve a una dirección de GitHub Pages, es que quedó una
+               a medio migrar. */
+            Pruebas.ok(/^https:\/\/[\w.-]+\/$/.test(PORTAL_URL) && !/github\.io/.test(PORTAL_URL),
+              'La dirección del Portal es una sola, con https y sin rastros de GitHub Pages');
             const sql = Migracion.generarDDL();
             Pruebas.ok(sql.includes(PORTAL_URL), 'El esquema que se descarga manda al Portal para los accesos');
             Pruebas.ok(!/3\. Dé acceso a cada persona/.test(sql), 'Y ya no dice que se den aquí');
