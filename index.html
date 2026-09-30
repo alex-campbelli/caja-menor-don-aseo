@@ -15238,10 +15238,11 @@ const VistaRespaldos = {
       'que hace de clave primaria y foránea, así que el esquema de abajo describe exactamente lo que hay ' +
       'en el servidor. Útil para auditoría o para levantar un entorno de pruebas.</p>' +
       /* El esquema de abajo crea la lista de acceso, pero quién entra se decide
-         en el Portal desde 2026: aquí no hay nada que administrar. */
+         en el Portal desde 2026: aquí no hay nada que administrar. La nota no
+         lleva enlace a propósito: en la navegación normal hay una sola puerta
+         al Portal, la de arriba de la barra, igual en los cinco programas. */
       '<div class="alert a-info mb12" style="padding:9px 11px">' + Icon('info', '', 14) +
-      '<div>Los usuarios y sus accesos se administran en el ' +
-      '<a href="' + attr(PORTAL_URL) + '" target="_blank" rel="noopener">Portal</a>, no aquí.</div></div>' +
+      '<div>Los usuarios y sus accesos se administran en el Portal, no aquí.</div></div>' +
       '<div class="flex g8 wrap">' +
       '<button class="btn" data-act="ddl">' + Icon('db', '', 14) + 'Descargar esquema SQL</button>' +
       '<button class="btn" data-act="verDdl">' + Icon('eye', '', 14) + 'Ver esquema</button>' +
@@ -16678,7 +16679,11 @@ const Pruebas = {
               await VistaRespaldos.render(div);
               Pruebas.ok(/se administran en el Portal/i.test(div.textContent),
                 'La pantalla lo dice donde antes estaban las instrucciones');
-              Pruebas.ok(Boolean(div.querySelector('a[href="' + PORTAL_URL + '"]')), 'Con el enlace para ir');
+              /* Sin enlace propio: en la navegación normal hay una sola puerta al
+                 Portal, la de arriba de la barra, igual que en los otros programas. */
+              Pruebas.ok(!div.querySelector('a[href="' + PORTAL_URL + '"]'),
+                'Pero la nota no lleva enlace: la única puerta es la de la barra');
+              Pruebas.ok(Shell.htmlVuelta(false).includes(PORTAL_URL), 'Que sigue ahí');
             } finally { div.remove(); }
           } },
 
