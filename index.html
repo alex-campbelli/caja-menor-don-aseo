@@ -3480,7 +3480,7 @@ const Conexion = {
   },
 
   iniciar() {
-    if (this._iniciado) return;
+    if (this._iniciado || this._apagado) return;
     this._iniciado = true;
     this._timer = setInterval(() => this.latir(), this.LATIDO);
     addEventListener('online', () => this.comprobar(true));
@@ -3490,7 +3490,17 @@ const Conexion = {
     this.comprobar(true);
   },
 
+  /* Se apaga cuando la persona pierde el acceso: ya no hay nada que vigilar y
+     seguir tocando el servidor con una cuenta sin permiso no lleva a ningún
+     lado. Vuelve a encenderse al recargar. */
+  detener() {
+    this._apagado = true;
+    clearInterval(this._timer);
+    this._timer = null;
+  },
+
   latir() {
+    if (this._apagado) return;
     this.pintar();                 // la caducidad se ve aunque no ocurra nada
     if (document.hidden) return;   // pestaña oculta: no se gasta red ni batería
     if (Date.now() - this.ultimoIntento >= this.INTERVALO) this.comprobar(false);
@@ -16687,6 +16697,133 @@ const Pruebas = {
             } finally { div.remove(); }
           } },
 
+        { nombre: 'CRÍTICO · si le quitan el acceso con la página abierta, no se sigue trabajando', fn: async () => {
+            /* El servidor deja de entregar datos en el acto, pero lo que ya
+               estaba en pantalla se seguía viendo hasta recargar: la persona
+               trabajaba un rato creyendo que todo iba bien. */
+            const previa = localStorage.getItem(Nube.CLAVE_SESION);
+            const accesoReal = Nube.tieneAcceso, salirReal = Nube.salir;
+            const avisoReal = Sesion.sinAcceso, pararReal = Conexion.detener;
+            const cacheReal = { config: Cache.config, contratos: Cache.contratos, personas: Cache.personas,
+                                municipios: Cache.municipios, categorias: Cache.categorias };
+            const avisos = []; let salidas = 0, preguntas = 0, conexionParada = 0, respuesta = true;
+            Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+            try {
+              Nube.guardarSesion({ access_token: 'x', expira: Date.now() + 3600000, correo: 'ajena@donaseo.co' });
+              Nube.tieneAcceso = async () => { preguntas++; return respuesta; };
+              Nube.salir = async () => { salidas++; Nube.guardarSesion(null); };
+              Sesion.sinAcceso = (correo, cont, delPortal, perdido) => avisos.push({ correo, perdido });
+              Conexion.detener = () => { conexionParada++; };
+              Centinela.detener();
+              Centinela._encendido = true;      // sin poner en marcha el reloj de verdad
+
+              await Centinela.revisar();
+              Pruebas.igual(preguntas, 1, 'Con la página abierta se le pregunta al servidor');
+              Pruebas.igual(avisos.length, 0, 'Si sigue teniendo acceso, no pasa nada');
+
+              respuesta = null;
+              await Centinela.revisar();
+              Pruebas.igual(avisos.length, 0, 'Si no se pudo saber, no se saca a nadie');
+              Pruebas.ok(Boolean(Nube.sesion()), 'Y la sesión sigue en pie');
+
+              /* Con una ventana abierta —un gasto a medio registrar— no puede
+                 quedar nada encima del aviso. */
+              Modal.abrir({ titulo: 'Gasto a medio registrar', cuerpo: '<p>1.234.567</p>' });
+              Toast.ok('Guardado');
+              respuesta = false;
+              await Centinela.revisar();
+              Pruebas.ok(!document.querySelector('#modals .modal-bd'), 'Las ventanas abiertas se cierran');
+              Pruebas.igual(($('#toasts') || {}).innerHTML, '', 'Y los avisos de abajo también');
+              Pruebas.igual(avisos.length, 1, 'Cuando el servidor dice que no, se avisa');
+              Pruebas.ok(avisos[0].perdido === true, 'Con el texto de «ya no tiene acceso», no el de «nunca lo tuvo»');
+              Pruebas.igual(avisos[0].correo, 'ajena@donaseo.co', 'Diciendo de qué cuenta se trata');
+              Pruebas.igual(salidas, 1, 'Se cierra la sesión de esta pestaña');
+              Pruebas.igual(Nube.sesion(), null, 'Que deja de existir');
+              Pruebas.igual(conexionParada, 1, 'Se deja de tocar el servidor');
+              Pruebas.ok(!Centinela._encendido, 'Y el centinela se apaga: ya no hay nada que vigilar');
+              Pruebas.igual(Cache.personas.size, 0, 'Lo que estaba cargado se borra de la memoria');
+              Pruebas.igual(Cache.config, null, 'Todo, hasta la configuración');
+
+              /* Los dos textos son distintos a propósito. */
+              const perdido = Sesion.htmlSinAcceso('ajena@donaseo.co', false, true);
+              const nunca = Sesion.htmlSinAcceso('ajena@donaseo.co', false, false);
+              Pruebas.ok(/Ya no tiene acceso/.test(perdido) && /Volver a entrar/.test(perdido),
+                'El aviso de que se lo quitaron dice justo eso');
+              Pruebas.ok(/hable con el administrador/.test(perdido), 'Y a quién acudir si es un error');
+              Pruebas.ok(/a salvo en el servidor/.test(perdido), 'Y que lo guardado no se perdió');
+              Pruebas.ok(!/Ya no tiene acceso/.test(nunca), 'El de quien nunca lo tuvo sigue siendo el de antes');
+
+              Pruebas.ok(/Centinela\.iniciar\(\)/.test(arrancar.toString()),
+                'El arranque pone a vigilar en cuanto se entra');
+            } finally {
+              delete document.hidden;
+              Centinela.detener();
+              Nube.tieneAcceso = accesoReal; Nube.salir = salirReal;
+              Sesion.sinAcceso = avisoReal; Conexion.detener = pararReal;
+              Object.assign(Cache, cacheReal);
+              Analitica.invalidar();
+              if (previa) localStorage.setItem(Nube.CLAVE_SESION, previa); else localStorage.removeItem(Nube.CLAVE_SESION);
+            }
+          } },
+
+        { nombre: 'El centinela mira una vez por minuto, sólo con la pestaña a la vista y de una en una', fn: async () => {
+            /* Es una consulta diminuta, pero por cada pestaña abierta de cada
+               persona: no puede convertirse en una lluvia sobre el servidor. */
+            Pruebas.igual(Centinela.CADA, 60000, 'Una revisión por minuto');
+            const previa = localStorage.getItem(Nube.CLAVE_SESION);
+            const accesoReal = Nube.tieneAcceso;
+            let preguntas = 0, soltar = null;
+            Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+            try {
+              Nube.guardarSesion({ access_token: 'x', expira: Date.now() + 3600000, correo: 'juan@donaseo.co' });
+              Nube.tieneAcceso = () => { preguntas++; return new Promise(r => { soltar = r; }); };
+              Centinela.detener();
+              Centinela._encendido = true;
+
+              const a = Centinela.revisar();
+              const b = Centinela.revisar();
+              Pruebas.igual(preguntas, 1, 'Con una revisión en curso no se lanza otra');
+              soltar(true); await a; await b;
+
+              /* De aquí en adelante responde al momento: si algo se quedara
+                 esperando, la prueba se colgaría en vez de decir qué falló. */
+              Nube.tieneAcceso = async () => { preguntas++; return true; };
+              preguntas = 0;
+              Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+              await Centinela.revisar();
+              Pruebas.igual(preguntas, 0, 'Con la pestaña escondida no se gasta red ni batería');
+
+              Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+              Nube.guardarSesion(null);
+              await Centinela.revisar();
+              Pruebas.igual(preguntas, 0, 'Sin sesión no hay nada que revisar');
+
+              /* Al volver a la pestaña se mira enseguida: pudo pasar una hora. */
+              Nube.guardarSesion({ access_token: 'x', expira: Date.now() + 3600000, correo: 'juan@donaseo.co' });
+              Nube.tieneAcceso = async () => { preguntas++; return true; };
+              Centinela.detener();
+              Centinela.iniciar();
+              document.dispatchEvent(new Event('visibilitychange'));
+              await new Promise(r => setTimeout(r, 40));
+              Pruebas.igual(preguntas, 1, 'Al volver a la pestaña se revisa en el momento');
+
+              /* Apagado, el oyente tiene que soltarse de verdad: si se quedara
+                 puesto, volvería a disparar en cuanto algo encendiera la
+                 bandera. Se comprueba encendiéndola a mano, sin el reloj. */
+              Centinela.detener();
+              Centinela._encendido = true;
+              document.dispatchEvent(new Event('visibilitychange'));
+              await new Promise(r => setTimeout(r, 40));
+              Pruebas.igual(preguntas, 1, 'Apagado, el oyente de la pestaña queda suelto');
+              Centinela._encendido = false;
+            } finally {
+              delete document.hidden;
+              Centinela.detener();
+              Nube.tieneAcceso = accesoReal;
+              if (previa) localStorage.setItem(Nube.CLAVE_SESION, previa); else localStorage.removeItem(Nube.CLAVE_SESION);
+            }
+          } },
+
         { nombre: 'Se rechazan URL y claves mal formadas', fn: async () => {
             await Pruebas.lanza(() => Nube.probar('http://algo.com', 'x'.repeat(60)), 'Debe exigir https y dominio supabase.co');
             await Pruebas.lanza(() => Nube.probar('https://abc.supabase.co', 'corta'), 'Debe rechazar una clave corta');
@@ -22038,7 +22175,7 @@ const Sesion = {
    * todo y se terminaba en «No se pudo conectar con el servidor», que parece
    * una caída del sistema cuando lo único que falta es un permiso.
    */
-  htmlSinAcceso(correo, delPortal) {
+  htmlSinAcceso(correo, delPortal, perdido) {
     return '<div style="position:fixed;inset:0;display:grid;place-items:center;background:var(--bg);padding:20px;overflow:auto">' +
       '<div style="width:100%;max-width:440px">' +
         '<div style="text-align:center;margin-bottom:22px">' +
@@ -22049,28 +22186,37 @@ const Sesion = {
         '</div>' +
         '<div class="card"><div class="card-b">' +
           '<div class="alert a-warn mb12" style="padding:9px 11px">' + Icon('shield', '', 14) +
-          '<div><b>Su cuenta no tiene acceso a caja menor.</b></div></div>' +
-          '<p class="fs13 txt-2 mb12">Entró bien' + (correo ? ' como <b>' + esc(correo) + '</b>' : '') +
-          ', pero esta cuenta todavía no está autorizada para ver la caja menor. Pídale el acceso al ' +
-          'administrador; cuando se lo den, pulse «Volver a comprobar» y entrará sin escribir la contraseña otra vez.</p>' +
+          '<div><b>' + (perdido ? 'Ya no tiene acceso a caja menor.' : 'Su cuenta no tiene acceso a caja menor.') +
+          '</b></div></div>' +
+          '<p class="fs13 txt-2 mb12">' + (perdido
+            ? 'Mientras trabajaba le retiraron el acceso' + (correo ? ' a <b>' + esc(correo) + '</b>' : '') +
+              ', así que la sesión se cerró aquí. Lo que alcanzó a guardar está a salvo en el servidor. ' +
+              'Si cree que es un error, hable con el administrador.'
+            : 'Entró bien' + (correo ? ' como <b>' + esc(correo) + '</b>' : '') +
+              ', pero esta cuenta todavía no está autorizada para ver la caja menor. Pídale el acceso al ' +
+              'administrador; cuando se lo den, pulse «Volver a comprobar» y entrará sin escribir la contraseña otra vez.') +
+          '</p>' +
           /* Desde el Portal, la cuenta la decide el Portal: ahí no tiene
              sentido ofrecer «entrar con otra», sino volver. */
           '<div class="flex g8 wrap">' +
-            '<button class="btn btn-primary" id="sinAccComprobar">' + Icon('refresh', '', 14) + 'Volver a comprobar</button>' +
+            '<button class="btn btn-primary" id="sinAccComprobar">' + Icon('refresh', '', 14) +
+              (perdido ? 'Volver a entrar' : 'Volver a comprobar') + '</button>' +
             (delPortal
               ? '<button class="btn" id="sinAccPortal">' + Icon('back', '', 14) + 'Volver al Portal</button>'
               : '<button class="btn" id="sinAccOtra">' + Icon('salir', '', 14) + 'Entrar con otra cuenta</button>') +
           '</div>' +
         '</div></div>' +
         '<div class="fs11 txt-3" style="text-align:center;margin-top:14px;line-height:1.6">' +
-          'No se perdió nada: la información sigue en el servidor. Sólo falta que autoricen esta cuenta.' +
+          (perdido
+            ? 'Lo que ya estaba guardado sigue en el servidor. Si le devuelven el acceso, vuelva a entrar.'
+            : 'No se perdió nada: la información sigue en el servidor. Sólo falta que autoricen esta cuenta.') +
         '</div>' +
       '</div></div>';
   },
 
-  sinAcceso(correo, cont, delPortal) {
+  sinAcceso(correo, cont, delPortal, perdido) {
     const app = cont || $('#app');
-    app.innerHTML = this.htmlSinAcceso(correo, delPortal === undefined ? desdePortal() : delPortal);
+    app.innerHTML = this.htmlSinAcceso(correo, delPortal === undefined ? desdePortal() : delPortal, perdido);
     const c = app.querySelector('#sinAccComprobar');
     if (c) c.onclick = () => location.reload();
     const o = app.querySelector('#sinAccOtra');
@@ -22083,6 +22229,81 @@ const Sesion = {
      porque es la misma cuenta de los demás programas del sistema: sacarla de
      todos por no tener acceso aquí sería peor el remedio. */
   olvidarSesion() { Nube.guardarSesion(null); }
+};
+
+/* ==========================================================================
+   EL CENTINELA — revisa, con la página abierta, que el acceso siga en pie
+   --------------------------------------------------------------------------
+   Cuando el Portal le quita el acceso a alguien, el servidor lo cumple en el
+   acto: no le entrega nada nuevo y le rechaza lo que intente guardar. Pero la
+   pantalla que ya estaba cargada se sigue viendo hasta recargar, y la persona
+   trabaja un rato creyendo que todo va bien. Esto lo corta.
+
+   Es deliberadamente tímido: sólo cierra la puerta cuando el servidor dice que
+   NO. Si no se pudo preguntar —red caída, servidor mudo, la función todavía no
+   existe— no hace nada y lo intenta en la siguiente vuelta. Sacar a alguien por
+   un error de red sería peor que el problema que arregla.
+   ========================================================================== */
+const Centinela = {
+  CADA: 60000,
+  _timer: null,
+  _enCurso: false,
+  _encendido: false,
+  _alVolver: null,
+
+  iniciar() {
+    if (this._encendido) return;
+    this._encendido = true;
+    this._timer = setInterval(() => this.revisar(), this.CADA);
+    /* Al volver a la pestaña se mira enseguida: es justo cuando la persona
+       retoma el trabajo, y puede llevar horas fuera. */
+    this._alVolver = () => { if (!document.hidden) this.revisar(); };
+    document.addEventListener('visibilitychange', this._alVolver);
+  },
+
+  detener() {
+    this._encendido = false;
+    clearInterval(this._timer);
+    this._timer = null;
+    if (this._alVolver) document.removeEventListener('visibilitychange', this._alVolver);
+    this._alVolver = null;
+  },
+
+  async revisar() {
+    /* Oculta no se gasta red ni batería; sin sesión no hay nada que revisar; y
+       una revisión a la vez, que si la red va lenta se amontonarían. */
+    if (!this._encendido || this._enCurso || document.hidden || !Nube.sesion()) return;
+    this._enCurso = true;
+    try {
+      if (await Nube.tieneAcceso() === false) await this.cerrarPuerta();
+    } finally {
+      this._enCurso = false;
+    }
+  },
+
+  /** Le quitaron el acceso: se borra lo cargado, se cierra la sesión y se avisa. */
+  async cerrarPuerta() {
+    const correo = (Nube.sesion() || {}).correo;
+    const delPortal = desdePortal();
+    this.detener();
+    if (typeof Conexion !== 'undefined' && Conexion.detener) Conexion.detener();
+    try { await Nube.salir(); } catch (e) {}
+    /* Lo que estaba en memoria se va con la pantalla: la lista de cajas, los
+       catálogos y los filtros son datos que ya no le corresponde ver. */
+    try {
+      Cache.contratos = new Map(); Cache.personas = new Map();
+      Cache.municipios = new Map(); Cache.categorias = new Map();
+      Cache.config = null;
+      Analitica.invalidar();
+      /* Las ventanas, los avisos de abajo y la copia de impresión cuelgan del
+         documento, NO de la pantalla: sin esto se quedarían encima del aviso,
+         con datos a la vista (un gasto a medio registrar, por ejemplo). */
+      for (let i = 0; i < 20 && document.querySelector('#modals .modal-bd'); i++) Modal.cerrarTop();
+      ['#modals', '#toasts', '#printRoot'].forEach(s => { const e = $(s); if (e) e.innerHTML = ''; });
+      const velo = $('#scrim'); if (velo) velo.classList.remove('on');
+    } catch (e) {}
+    Sesion.sinAcceso(correo, null, delPortal, true);
+  }
 };
 
 
@@ -22516,6 +22737,8 @@ async function arrancar() {
     Shell.render();
     Tip.iniciar();
     Conexion.iniciar();
+    /* Desde aquí, la página revisa sola que el acceso siga en pie. */
+    Centinela.iniciar();
     Shell.aplicarFavicon();
     registrarRutas();
     Router.iniciar();
