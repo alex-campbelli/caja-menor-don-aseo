@@ -3225,7 +3225,7 @@ class SupabaseAdapter extends StorageAdapter {
    */
   _exigirEscritura() {
     if (Permiso.soloLectura()) throw new ErrorDominio(
-      'Su cuenta es de solo consulta: puede ver, imprimir y descargar, pero no registrar ni cambiar nada.',
+      'Su cuenta es de solo consulta: puede ver, imprimir y exportar, pero no registrar ni cambiar nada.',
       'SOLO_CONSULTA');
   }
   async put(col, doc) {
@@ -7675,7 +7675,7 @@ const Shell = {
     }
     if (!lista.length) {
       el.innerHTML = '<label>Contrato</label>' +
-        '<div class="sb-ctr-pie"><a data-ir="contratos">Crear el primer contrato</a></div>';
+        '<div class="sb-ctr-pie">' + Permiso.si('<a data-ir="contratos">Crear el primer contrato</a>') + '</div>';
       return;
     }
     el.innerHTML =
@@ -7684,8 +7684,11 @@ const Shell = {
       lista.map(c => '<option value="' + attr(c.id) + '"' + (act && act.id === c.id ? ' selected' : '') + '>' +
         esc(c.nombre) + (c.estado === 'FINALIZADO' ? ' (finalizado)' : '') + '</option>').join('') +
       '</select>' +
+      /* El selector se queda: en solo consulta cambiar de contrato no escribe
+         nada, se recuerda en este navegador. Lo que no se ofrece es entrar a
+         administrarlos. */
       '<div class="sb-ctr-pie"><span>' + lista.length + ' contrato(s)</span>' +
-      '<a data-ir="contratos">Administrar</a></div>';
+      Permiso.si('<a data-ir="contratos">Administrar</a>') + '</div>';
   },
 
   /* Pantallas que ya tienen su propio «Nueva caja» en la cabecera: ahí el de
@@ -7753,10 +7756,19 @@ const Shell = {
     const alias = { caja: 'cajas', 'caja-editar': 'cajas', persona: 'personas', consignacion: 'consignaciones',
                     municipio: 'municipios', categoria: 'categorias' };
     const act = alias[activa] || activa;
-    /* En solo consulta no se ofrecen las pantallas que sólo sirven para
-       registrar: no se «deshabilitan», no están. */
-    const SOLO_ESCRIBIR = ['caja-nueva', 'importar'];
-    return this.NAV.filter(n => Permiso.escribir || !SOLO_ESCRIBIR.includes(n.id)).map(n => {
+    /* En solo consulta se quitan las pantallas de registrar y TODA la sección
+       de sistema: contratos, copias de seguridad, configuración y pruebas. No
+       se «deshabilitan», no están. Un título de sección que se queda sin nada
+       debajo tampoco se dibuja. */
+    const SOLO_ESCRIBIR = ['caja-nueva', 'importar', 'contratos', 'respaldos', 'configuracion', 'pruebas'];
+    let lista = Permiso.escribir ? this.NAV : this.NAV.filter(n => n.sec || !SOLO_ESCRIBIR.includes(n.id));
+    lista = lista.filter((n, i) => {
+      if (!n.sec) return true;
+      const resto = lista.slice(i + 1);
+      const corte = resto.findIndex(x => x.sec);
+      return (corte === -1 ? resto : resto.slice(0, corte)).length > 0;
+    });
+    return lista.map(n => {
       if (n.sec) return '<div class="sb-sec">' + esc(n.sec) + '</div>';
       const cuenta = n.badge && this.conteos[n.badge] ? this.conteos[n.badge].toLocaleString('es-CO') : '';
       const b = cuenta ? '<span class="sb-badge">' + cuenta + '</span>' : '';
@@ -7773,8 +7785,8 @@ const Shell = {
    */
   htmlNivel() {
     if (Permiso.escribir) return '';
-    return '<div class="sb-nivel" title="Puede ver, imprimir y descargar todo. Para registrar, pídale el acceso ' +
-      'total al administrador">' + Icon('eye', '', 13) + '<span>Solo consulta</span></div>';
+    return '<div class="sb-nivel" title="Puede ver, imprimir y exportar. Para registrar o entrar a la configuración, ' +
+      'pídale el acceso total al administrador">' + Icon('eye', '', 13) + '<span>Solo consulta</span></div>';
   },
 
   pintarNav() {
@@ -8012,7 +8024,10 @@ document.addEventListener('submit', async e => {
 });
 document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); const q = $('#gq'); if (q) { q.focus(); q.select(); } }
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'g') { e.preventDefault(); Router.ir('caja-nueva'); }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'g') {
+    e.preventDefault();
+    if (Permiso.escribir) Router.ir('caja-nueva');
+  }
 });
 document.addEventListener('click', e => {
   if (e.target.id === 'scrim') { $('#sidebar').classList.remove('open'); $('#scrim').classList.remove('on'); }
@@ -8158,6 +8173,9 @@ const VistaDashboard = {
          leerse, y entonces no sirve para nada. */
       (() => {
         const c = ConfigRepo.get() || {};
+        /* Quien sólo consulta no puede hacer copias: recordárselo sería mandarlo
+           a una pantalla que no tiene. */
+        if (Permiso.soloLectura()) return '';
         if (Prefs.get('copiaOculta') === Fecha.hoy()) return '';
         const dias = c.ultimaCopia ? Fecha.diasEntre(c.ultimaCopia) : null;
         if (dias !== null && dias < Finanzas.DIAS_SIN_COPIA) return '';
@@ -17086,20 +17104,27 @@ const Pruebas = {
               /* Y lo que sólo lee sigue estando: no se escondió media pantalla. */
               await VistaCajas.render(div);
               Pruebas.ok(div.querySelector('[data-act="exportarExcel"]'), 'Pero sigue pudiendo exportar');
-              await VistaRespaldos.render(div);
-              Pruebas.ok(div.querySelector('[data-act="crear"]'), 'Y descargar el respaldo completo');
-              Pruebas.ok(div.querySelector('[data-act="verificar"]'), 'Y revisar la integridad');
-              Pruebas.ok(!/Zona sensible/.test(div.textContent), 'La zona sensible no aparece');
-              Pruebas.ok(!/Restaurar respaldo/.test(div.textContent), 'Ni la de restaurar');
+              await VistaEstadisticas.render(div);
+              Pruebas.ok(div.textContent.length > 200, 'Y las estadísticas se ven enteras');
 
               const nav = Shell.htmlNav('dashboard', false);
               Pruebas.ok(!/caja-nueva/.test(nav) && !/importar/.test(nav),
                 'El menú no ofrece registrar ni importar');
-              Pruebas.ok(/Estadísticas/.test(nav) && /Copias de seguridad/.test(nav), 'Pero sí todo lo de mirar');
+              /* Desde el 02/10 tampoco nada de «Sistema»: ni contratos, ni copias
+                 de seguridad, ni configuración, ni pruebas, ni el título. */
+              Pruebas.ok(!/Copias de seguridad/.test(nav) && !/Contratos/.test(nav) &&
+                         !/Configuración/.test(nav) && !/Pruebas del sistema/.test(nav),
+                'Ni ninguna pantalla de sistema');
+              Pruebas.ok(!/sb-sec">Sistema/.test(nav), 'Y el título de la sección tampoco se dibuja solo');
+              Pruebas.ok(/Estadísticas/.test(nav) && /Personas/.test(nav) && /Expediente/.test(nav),
+                'Pero sí todo lo de mirar');
               Pruebas.ok(/Solo consulta/.test(Shell.htmlNivel()), 'Y se dice claramente en la barra');
               const rutas = registrarRutas.toString();
               Pruebas.ok(/RW\(c => VistaCajaForm\.render/.test(rutas) && /RW\(c => Importador\.render/.test(rutas),
                 'Las pantallas de registro pasan por el guardián');
+              Pruebas.ok(/RW\(c => VistaRespaldos\.render/.test(rutas) && /RW\(c => VistaContratos\.render/.test(rutas) &&
+                         /RW\(c => VistaConfiguracion\.render/.test(rutas) && /RW\(c => VistaPruebas\.render/.test(rutas),
+                'Y las cuatro de sistema, también');
               /* Y el guardián hace su trabajo de verdad, no sólo de nombre. */
               let abrio = false;
               soloSiEscribe(() => { abrio = true; })(div);
@@ -17110,10 +17135,23 @@ const Pruebas = {
               Pruebas.ok(abrio, 'Con acceso total se abre como siempre');
               Permiso.escribir = false;
 
+              /* Y ningún atajo que lleve a esas cuatro pantallas. */
+              Permiso.escribir = false;
+              const lleva = html => /data-ir="(contratos|respaldos|configuracion|pruebas|importar|caja-nueva)"/.test(html);
+              /* El selector se pinta por id, así que se le pone su sitio aquí. */
+              div.innerHTML = '<div id="sbctr"></div>';
+              Shell.pintarSelectorContrato();
+              const sel = div.querySelector('#sbctr');
+              Pruebas.ok(sel && !lleva(sel.innerHTML), 'El selector de contrato ya no ofrece «Administrar»');
+              Pruebas.ok(sel && /<select/.test(sel.innerHTML), 'Pero el selector sigue ahí para cambiar de contrato');
+              await VistaDashboard.render(div);
+              Pruebas.ok(!lleva(div.innerHTML), 'El panel no invita a hacer una copia de seguridad');
+
               Permiso.escribir = true;
               await VistaCajas.render(div);
               Pruebas.ok(div.querySelector('[data-ir="caja-nueva"]'), 'Con acceso total vuelve a estar todo');
               Pruebas.igual(Shell.htmlNivel(), '', 'Y sin distintivo de solo consulta');
+              Pruebas.ok(/Copias de seguridad/.test(Shell.htmlNav('dashboard', false)), 'Con su sección de sistema');
             } finally {
               div.remove();
               Permiso.escribir = antes;
@@ -23007,8 +23045,8 @@ const Semillas = {
 function avisoConsulta(c) {
   Shell.titulo('Solo consulta');
   c.innerHTML = Comp.vacio({ icono: 'shield', titulo: 'Su cuenta es de solo consulta',
-    texto: 'Puede ver, imprimir y descargar todo lo de caja menor, pero no registrar ni cambiar nada. ' +
-           'Si necesita registrar, pídale el acceso total al administrador.',
+    texto: 'Puede ver, imprimir y exportar lo de caja menor, pero no registrar ni cambiar nada, ' +
+           'ni entrar a la configuración del sistema. Si lo necesita, pídale el acceso total al administrador.',
     accion: 'inicio', textoAccion: 'Ir al dashboard', iconoAccion: 'dashboard' });
   setAcciones({ inicio: () => Router.ir('dashboard') });
 }
@@ -23040,10 +23078,10 @@ function registrarRutas() {
   R('estadisticas',         c => VistaEstadisticas.render(c));
   R('analisis',             c => VistaAnalisis.render(c));
   R('importar',             RW(c => Importador.render(c)));
-  R('respaldos',            c => VistaRespaldos.render(c));
-  R('contratos',            c => VistaContratos.render(c));
-  R('configuracion',        c => VistaConfiguracion.render(c));
-  R('pruebas',              c => VistaPruebas.render(c));
+  R('respaldos',            RW(c => VistaRespaldos.render(c)));
+  R('contratos',            RW(c => VistaContratos.render(c)));
+  R('configuracion',        RW(c => VistaConfiguracion.render(c)));
+  R('pruebas',              RW(c => VistaPruebas.render(c)));
   R('404', c => {
     Shell.titulo('Página no encontrada');
     c.innerHTML = Comp.vacio({ icono: 'search', titulo: 'Pantalla no encontrada',
@@ -23145,7 +23183,9 @@ async function arrancar() {
 
     /* aviso de primera vez */
     const nCajas = await db.count('cajas');
-    if (nCajas === 0 && !localStorage.getItem('dacm.bienvenida')) {
+    /* La bienvenida invita a configurar e importar: no es para quien sólo
+       consulta. */
+    if (nCajas === 0 && Permiso.escribir && !localStorage.getItem('dacm.bienvenida')) {
       localStorage.setItem('dacm.bienvenida', '1');
       setTimeout(() => bienvenida(), 500);
     }
