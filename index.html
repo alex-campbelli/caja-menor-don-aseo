@@ -108,6 +108,21 @@ html[data-theme="dark"] ::-webkit-scrollbar-thumb{background:#37454f}
 .sb-vuelta .sb-portal{color:#8fa3b0;text-decoration:none}
 .sb-vuelta .sb-portal:hover{color:#dfe8ee}
 .sb-vuelta .sb-ico{transform:translateX(-1px)}
+/* Le cambiaron los permisos: aviso fijo arriba, que no tapa el trabajo y no
+   se va solo hasta que la persona actualice */
+.aviso-permisos{position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:60;
+  display:flex;align-items:center;gap:10px;max-width:min(680px,92vw);
+  padding:9px 12px 9px 14px;border-radius:999px;background:var(--warn-50);
+  border:1px solid rgba(200,134,13,.45);box-shadow:var(--sh-pop);color:var(--warn-700);
+  font-size:12.5px;font-weight:600}
+html[data-theme="dark"] .aviso-permisos{color:var(--warn-500)}
+.aviso-permisos span{min-width:0}
+/* Distintivo de «solo consulta»: fijo, discreto y siempre a la vista */
+.sb-nivel{display:flex;align-items:center;gap:7px;margin:0 10px 2px;padding:5px 9px;border-radius:7px;
+  background:rgba(200,134,13,.14);color:#e0b760;font-size:10.5px;font-weight:700;letter-spacing:.04em;
+  text-transform:uppercase}
+html.sb-mini .sb-nivel{justify-content:center;padding:5px 0;margin:0 8px 2px}
+html.sb-mini .sb-nivel span{display:none}
 .sb-nav{flex:1;overflow-y:auto;padding:10px 8px 16px}
 .sb-nav::-webkit-scrollbar-thumb{background:#233039;border-color:var(--sidebar-bg)}
 .sb-sec{color:#5c6d79;font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
@@ -2769,6 +2784,24 @@ function desdePortal() {
   try { return Boolean(sessionStorage.getItem(CLAVE_PESTANA)); } catch (e) { return false; }
 }
 
+/**
+ * Qué puede hacer esta cuenta. El servidor es quien decide —las reglas de las
+ * 14 tablas y del depósito se apoyan en caja.puede_escribir()—, pero la página
+ * se lo pregunta al entrar para no dibujar botones que no le sirven a nadie.
+ *
+ * Empieza en «puede» y el arranque lo corrige. Si no se pudo preguntar, se
+ * asume SOLO CONSULTA: aquí lo prudente es al revés que en la puerta de
+ * entrada, porque equivocarse no deja a nadie fuera —puede ver todo— y lo
+ * único que pasa es que no se le ofrece registrar, que es justo lo que el
+ * servidor le iba a rechazar.
+ */
+const Permiso = {
+  escribir: true,
+  soloLectura() { return !this.escribir; },
+  /** Devuelve el html tal cual, o nada en modo consulta. */
+  si(html) { return this.escribir ? html : ''; }
+};
+
 const Nube = {
   /* v2: la conexión y la sesión de antes eran del Supabase anterior; con claves
      nuevas ningún navegador sigue conectado allá y todos entran de nuevo. */
@@ -2893,6 +2926,30 @@ const Nube = {
     if (!s) return null;
     if (Date.now() > s.expira - 60000) s = await this.refrescar();
     return s ? s.access_token : null;
+  },
+
+  /**
+   * ¿Esta cuenta registra, o sólo mira? Lo decide el servidor con
+   * caja.puede_escribir(). Devuelve true, false o null cuando no se pudo
+   * saber, igual que tieneAcceso().
+   */
+  async puedeEscribir() {
+    const c = this.config();
+    let tk = null;
+    try { tk = await this.token(); } catch (e) { return null; }
+    if (!tk) return null;
+    let r;
+    try {
+      r = await fetch(c.url + '/rest/v1/rpc/puede_escribir', {
+        method: 'POST',
+        headers: Object.assign({ apikey: c.anonKey, Authorization: 'Bearer ' + tk,
+                                 'Content-Type': 'application/json' }, CAB_ESQUEMA),
+        body: '{}'
+      });
+    } catch (e) { return null; }
+    if (!r.ok) return null;
+    const j = await r.json().catch(() => null);
+    return typeof j === 'boolean' ? j : null;
   },
 
   async salir() {
@@ -3160,8 +3217,20 @@ class SupabaseAdapter extends StorageAdapter {
   }
 
   /* -------- escritura -------- */
+  /**
+   * El único portillo por el que sale una escritura. Está aquí y no en cada
+   * pantalla a propósito: aunque mañana alguien olvide esconder un botón, de
+   * aquí no pasa. El servidor lo rechazaría igual; esto sirve para avisar con
+   * palabras claras en vez de con un error de la base.
+   */
+  _exigirEscritura() {
+    if (Permiso.soloLectura()) throw new ErrorDominio(
+      'Su cuenta es de solo consulta: puede ver, imprimir y descargar, pero no registrar ni cambiar nada.',
+      'SOLO_CONSULTA');
+  }
   async put(col, doc) {
     if (col === 'archivos') return this._subirArchivo(doc);
+    this._exigirEscritura();
     await this._pedir(col, {
       method: 'POST',
       headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
@@ -3172,6 +3241,7 @@ class SupabaseAdapter extends StorageAdapter {
   async putMany(col, docs) {
     if (!docs || !docs.length) return 0;
     if (col === 'archivos') { for (const d of docs) await this._subirArchivo(d); return docs.length; }
+    this._exigirEscritura();
     const TAM = 400;
     for (let i = 0; i < docs.length; i += TAM) {
       await this._pedir(col, {
@@ -3184,15 +3254,25 @@ class SupabaseAdapter extends StorageAdapter {
   }
   async remove(col, id) {
     if (col === 'archivos') return this._borrarArchivo(id);
-    await this._pedir(col + '?id=eq.' + encodeURIComponent(id), { method: 'DELETE' });
+    this._exigirEscritura();
+    /* Se pide de vuelta lo borrado. Cuando una regla del servidor impide un
+       borrado, PostgreSQL NO da error: simplemente no borra nada y contesta
+       que todo fue bien. Sin esto, la pantalla cantaría un éxito que no
+       ocurrió y la fila seguiría ahí. */
+    const borradas = await this._pedir(col + '?id=eq.' + encodeURIComponent(id),
+      { method: 'DELETE', headers: { 'Prefer': 'return=representation' } });
+    if (Array.isArray(borradas) && borradas.length === 0) throw new ErrorDominio(
+      'El servidor no permitió borrar ese registro. Si su cuenta es de solo consulta, es lo esperado.', 'SIN_PERMISO');
     return true;
   }
   async removeWhere(col, indice, valor) {
+    this._exigirEscritura();
     await this._pedir(col + '?' + Nombres.snake(indice) + '=eq.' + encodeURIComponent(valor), { method: 'DELETE' });
     return 0;
   }
   async clear(col) {
     if (col === 'archivos') return;
+    this._exigirEscritura();
     // `not.is.null` sobre la clave primaria borra todas las filas
     await this._pedir(col + '?id=not.is.null', { method: 'DELETE' });
   }
@@ -3293,6 +3373,7 @@ class SupabaseAdapter extends StorageAdapter {
 
   /* -------- documentos en Supabase Storage -------- */
   async _subirArchivo(doc) {
+    this._exigirEscritura();
     const blob = doc.blob;
     if (!blob) return doc;
     const token = await Nube.token();
@@ -3321,6 +3402,7 @@ class SupabaseAdapter extends StorageAdapter {
     return { docId, blob, mime: blob.type, tamano: blob.size };
   }
   async _borrarArchivo(docId) {
+    this._exigirEscritura();
     const token = await Nube.token();
     await fetch(this.url + '/storage/v1/object/' + this.bucket + '/' + encodeURIComponent(docId), {
       method: 'DELETE',
@@ -3721,6 +3803,15 @@ const ContratoRepo = {
   /** contrato sobre el que se trabaja ahora; nunca devuelve null si hay alguno */
   activo() {
     const cfg = Cache.config || {};
+    /* En solo consulta, el contrato elegido vive en ESTE navegador: cambiarlo
+       escribe en la configuración, que es de todos, y una cuenta que sólo
+       mira ni puede escribir ni debería cambiarle el contrato a los demás.
+       Se comprueba que exista: este trozo se copia también en el visor del
+       respaldo, donde no hay ni permisos ni preferencias. */
+    if (typeof Permiso !== 'undefined' && typeof Prefs !== 'undefined' && Permiso.soloLectura()) {
+      const propio = this.get(Prefs.get('contratoPropio'));
+      if (propio) return propio;
+    }
     return this.get(cfg.contratoActivoId) || this.todos()[0] || null;
   },
   activoId() { const c = this.activo(); return c ? c.id : null; },
@@ -3734,7 +3825,8 @@ const ContratoRepo = {
 
   async cambiarActivo(id) {
     if (!this.get(id)) throw new ErrorDominio('Contrato no encontrado.', 'NO_EXISTE');
-    await ConfigRepo.guardar({ contratoActivoId: id });
+    if (Permiso.soloLectura()) Prefs.set('contratoPropio', id);
+    else await ConfigRepo.guardar({ contratoActivoId: id });
     Analitica.invalidar();
     Bus.emit('contrato:cambio', this.activo());
     return this.activo();
@@ -6401,6 +6493,9 @@ const Comp = {
     if (caja.estado === EstadoCaja.ANULADA) {
       return '<span class="pill p-red" title="Las cajas anuladas se gestionan desde su detalle">Anulada</span>';
     }
+    /* En solo consulta el estado se lee, no se cambia: un desplegable que no
+       va a dejar guardar nada sería una trampa. */
+    if (Permiso.soloLectura()) return Comp.pillEstadoCaja(caja.estado);
     const meta = ESTADO_CAJA_META[caja.estado] || { pill: 'p-gray' };
     return '<select class="sel-estado ' + meta.pill + '" data-act="' + attr(accion) + '" data-id="' + attr(caja.id) + '"' +
       ' title="Cambiar el estado de ' + attr(caja.numero) + ' sin salir del listado">' +
@@ -7233,6 +7328,7 @@ const MoneyInput = {
 /* --- Zona de carga múltiple de archivos (§26) ----------------------------- */
 const DropZone = {
   montar(el, alRecibir) {
+    if (!el) return;
     const input = document.createElement('input');
     input.type = 'file'; input.multiple = true; input.className = 'hidden';
     el.appendChild(input);
@@ -7496,6 +7592,7 @@ const Shell = {
            es de los errores caros. Salen sus iniciales, y el nombre al pasar. */
         '<div class="sb-ctr-mini" id="sbctrmini" data-gact="alternarMenu"></div>' +
         '<div class="sb-ctr" id="sbctr"></div>' +
+        this.htmlNivel() +
         '<nav class="sb-nav" id="sbnav"></nav>' +
         this.pieSesion() +
       '</aside>' +
@@ -7514,8 +7611,8 @@ const Shell = {
           Conexion.insignia() +
           '<button class="btn btn-icon" data-gact="tema" title="Cambiar tema">' +
             Icon(Prefs.get('tema') === 'dark' ? 'sun' : 'moon', '', 15) + '</button>' +
-          '<button class="btn btn-primary' + (this.conBotonPropio() ? ' hidden' : '') +
-            '" id="tbNuevaCaja" data-ir="caja-nueva">' + Icon('plus', '', 14) + 'Nueva caja</button>' +
+          Permiso.si('<button class="btn btn-primary' + (this.conBotonPropio() ? ' hidden' : '') +
+            '" id="tbNuevaCaja" data-ir="caja-nueva">' + Icon('plus', '', 14) + 'Nueva caja</button>') +
         '</header>' +
         '<main class="content" id="vista"></main>' +
       '</div>';
@@ -7656,7 +7753,10 @@ const Shell = {
     const alias = { caja: 'cajas', 'caja-editar': 'cajas', persona: 'personas', consignacion: 'consignaciones',
                     municipio: 'municipios', categoria: 'categorias' };
     const act = alias[activa] || activa;
-    return this.NAV.map(n => {
+    /* En solo consulta no se ofrecen las pantallas que sólo sirven para
+       registrar: no se «deshabilitan», no están. */
+    const SOLO_ESCRIBIR = ['caja-nueva', 'importar'];
+    return this.NAV.filter(n => Permiso.escribir || !SOLO_ESCRIBIR.includes(n.id)).map(n => {
       if (n.sec) return '<div class="sb-sec">' + esc(n.sec) + '</div>';
       const cuenta = n.badge && this.conteos[n.badge] ? this.conteos[n.badge].toLocaleString('es-CO') : '';
       const b = cuenta ? '<span class="sb-badge">' + cuenta + '</span>' : '';
@@ -7664,6 +7764,17 @@ const Shell = {
       return '<a class="sb-item' + (act === n.id ? ' active' : '') + '" data-ir="' + attr(n.ruta) + '"' + tip + '>' +
         Icon(n.icono, 'sb-ico', 17) + '<span>' + esc(n.txt) + '</span>' + b + '</a>';
     }).join('');
+  },
+
+  /**
+   * El distintivo de «Solo consulta». Va fijo bajo el contrato, no en un aviso
+   * que se cierra: quien entra así tiene que saber por qué no ve los botones
+   * de siempre, hoy y dentro de un mes.
+   */
+  htmlNivel() {
+    if (Permiso.escribir) return '';
+    return '<div class="sb-nivel" title="Puede ver, imprimir y descargar todo. Para registrar, pídale el acceso ' +
+      'total al administrador">' + Icon('eye', '', 13) + '<span>Solo consulta</span></div>';
   },
 
   pintarNav() {
@@ -8539,7 +8650,7 @@ const VistaCajas = {
         VistaCajas.botonReembolsar(pagina, repuesto, todas) + '</button>' +
       '<button class="btn" data-act="exportarExcel">' + Icon('download', '', 14) + 'Excel</button>' +
       '<button class="btn" data-act="exportarCsv">' + Icon('download', '', 14) + 'CSV</button>' +
-      '<button class="btn btn-primary" data-ir="caja-nueva">' + Icon('plus', '', 14) + 'Nueva caja</button>' +
+      Permiso.si('<button class="btn btn-primary" data-ir="caja-nueva">' + Icon('plus', '', 14) + 'Nueva caja</button>') +
       '</div></div>' +
 
       '<div class="card mb16"><div class="card-b" style="padding:12px 14px">' +
@@ -8693,7 +8804,7 @@ const VistaCajas = {
       }).join('')
         : '<tr><td colspan="' + NCOLS + '">' + Comp.vacio({ icono: 'caja', titulo: 'Sin resultados',
             texto: todas.length === 0 ? 'Aún no hay cajas menores registradas o los filtros no coinciden.' : 'Ajuste los filtros.',
-            accion: 'nueva', textoAccion: 'Crear la primera caja', iconoAccion: 'plus' }) + '</td></tr>') +
+            accion: Permiso.escribir ? 'nueva' : null, textoAccion: 'Crear la primera caja', iconoAccion: 'plus' }) + '</td></tr>') +
       '</tbody>' +
       (pagina.length ? '<tfoot><tr><td colspan="9">Subtotal de la página</td>' +
         '<td class="num">' + Money.format(U.sumBy(pagina.filter(c => c.estado !== EstadoCaja.ANULADA), c => c.total)) + '</td>' +
@@ -8879,7 +8990,8 @@ const VistaCaja = {
     const comprobantes = docs.filter(esComprobante).concat(docsCons.filter(esComprobante));
     /* Los de la consignación se ven aquí, pero no se borran desde aquí: ese
        comprobante puede estar pagando otras cajas a la vez. */
-    const compBorrable = d => d.cajaId === caja.id;
+    /* En solo consulta no se ofrece quitar nada: ni el comprobante propio. */
+    const compBorrable = d => Permiso.escribir && d.cajaId === caja.id;
     const hayCompBorrables = comprobantes.some(compBorrable);
     /* Todo lo que justifica en qué se gastó va junto: la factura del taller y
        los recibos que envía el líder prueban lo mismo. */
@@ -8917,21 +9029,25 @@ const VistaCaja = {
       '<div class="ph-sub">' + Fecha.larga(caja.fecha) + ' · creada ' + Fecha.stamp(caja.creadoEn) + '</div>' +
       /* La nota corta se escribe aquí, en la caja, no metida en el formulario
          de edición: es un apunte del día a día, no parte del documento. */
-      '<div class="caja-coment">' + Icon('doc', 'txt-3', 13) +
-        (String(caja.comentario || '').trim()
-          ? '<span class="cc-txt">' + esc(caja.comentario) + '</span>' +
-            '<button class="link fs11" data-act="editarComentario">cambiar</button>' +
-            '<button class="link fs11" data-act="quitarComentario">quitar</button>'
-          : '<button class="link fs12" data-act="editarComentario">Agregar un comentario corto</button>') +
-      '</div></div>' +
+      /* En solo consulta se lee la nota si la hay, pero no se ofrece escribirla
+         ni se deja un hueco vacío cuando no hay ninguna. */
+      (String(caja.comentario || '').trim() || Permiso.escribir
+        ? '<div class="caja-coment">' + Icon('doc', 'txt-3', 13) +
+          (String(caja.comentario || '').trim()
+            ? '<span class="cc-txt">' + esc(caja.comentario) + '</span>' +
+              Permiso.si('<button class="link fs11" data-act="editarComentario">cambiar</button>' +
+                         '<button class="link fs11" data-act="quitarComentario">quitar</button>')
+            : '<button class="link fs12" data-act="editarComentario">Agregar un comentario corto</button>') +
+          '</div>'
+        : '') + '</div>' +
       '<div class="ph-actions">' +
         '<button class="btn btn-primary" data-act="copiarImagen" title="Copiar el formato como imagen para enviarlo por WhatsApp">' +
           Icon('copy', '', 14) + 'Copiar imagen</button>' +
         '<button class="btn" data-act="previsualizar">' + Icon('eye', '', 14) + 'Vista previa</button>' +
         '<button class="btn" data-act="imprimir">' + Icon('print', '', 14) + 'Imprimir / PDF</button>' +
-        (caja.estado !== EstadoCaja.ANULADA ?
+        Permiso.si((caja.estado !== EstadoCaja.ANULADA ?
           '<button class="btn" data-ir="caja-editar/' + attr(caja.id) + '">' + Icon('edit', '', 14) + 'Editar</button>' : '') +
-        '<button class="btn btn-icon" data-act="masAcciones" title="Más acciones">' + Icon('chevD', '', 15) + '</button>' +
+          '<button class="btn btn-icon" data-act="masAcciones" title="Más acciones">' + Icon('chevD', '', 15) + '</button>') +
       '</div></div>' +
 
       (caja.estado === EstadoCaja.ANULADA ? '<div class="alert a-err mb16">' + Icon('ban') +
@@ -9071,7 +9187,7 @@ const VistaCaja = {
           (comprobantes.length ? '<span class="pill np p-green">' + comprobantes.length + '</span>' : '') +
           '<span style="flex:1"></span>' +
           (hayCompBorrables ? SeleccionDocs.todos() + SeleccionDocs.boton() : '') +
-          '<button class="btn btn-sm" data-act="adjuntarComprobante">' + Icon('upload', '', 12) + 'Adjuntar</button>' +
+          Permiso.si('<button class="btn btn-sm" data-act="adjuntarComprobante">' + Icon('upload', '', 12) + 'Adjuntar</button>') +
           '<input type="file" id="inComprobante" multiple hidden>' +
         '</div>' +
         (comprobantes.length
@@ -9240,7 +9356,7 @@ const VistaCaja = {
        después se decide darle el resto, se registra y la caja se reabre sola.
        Por eso aquí no basta el saldo, que en una cerrada es cero. */
     const faltaPorGirar = Math.max(0, total - entregado);
-    const puedeRegistrar = !anulada && (saldo > 0 || (caja.cierreParcial && faltaPorGirar > 0));
+    const puedeRegistrar = Permiso.escribir && !anulada && (saldo > 0 || (caja.cierreParcial && faltaPorGirar > 0));
     return '<div class="card mb16" id="cardEntregas"><div class="card-h"><h3>Entregas parciales</h3>' +
       '<span class="ch-sub">' + (sinRegistro ? 'Cuando no se le consigna el total de una vez'
         : Money.format(entregado) + ' de ' + Money.format(total) + ' pedidos') + '</span>' +
@@ -9263,10 +9379,10 @@ const VistaCaja = {
             '<td>' + (e.motivo ? esc(e.motivo) : '<span class="txt-3">—</span>') +
               (e.referencia ? ' <span class="txt-3 fs11">· ' + esc(e.referencia) + '</span>' : '') + '</td>' +
             '<td class="nowrap">' +
-              '<button class="btn btn-sm btn-ghost btn-icon" data-act="entregaEditar" data-id="' + attr(e.id) +
+              Permiso.si('<button class="btn btn-sm btn-ghost btn-icon" data-act="entregaEditar" data-id="' + attr(e.id) +
                 '" data-tip="Editar">' + Icon('edit', '', 12) + '</button>' +
-              '<button class="btn btn-sm btn-ghost btn-icon" data-act="entregaEliminar" data-id="' + attr(e.id) +
-                '" data-tip="Quitar">' + Icon('trash', '', 12) + '</button>' +
+                '<button class="btn btn-sm btn-ghost btn-icon" data-act="entregaEliminar" data-id="' + attr(e.id) +
+                '" data-tip="Quitar">' + Icon('trash', '', 12) + '</button>') +
             '</td></tr>').join('') +
           '</tbody><tfoot><tr><td>Total entregado</td><td class="num">' + Money.format(entregado) +
           '</td><td colspan="2"></td></tr></tfoot></table></div>' +
@@ -9290,12 +9406,17 @@ const VistaCaja = {
             ? '<label class="chk-linea"><input type="checkbox" data-act="entregaModo">' +
               '<span>A esta caja se le consignó <b>por partes</b></span></label>'
             : '') +
-          '<p class="fs12 txt-2" style="margin:8px 0 0">Márquelo cuando no se le gire el total de una vez. ' +
-          'Al marcarlo se habilita <b>Registrar entrega</b>: se anota cuánto se le consignó, cuándo y por qué sólo esa ' +
-          'parte, y la caja pasa a <b>C. Parcial</b>. Si al final el líder se conforma con lo recibido, cambie el estado ' +
-          'a <b>Consignada</b> y la caja se cierra con lo entregado.</p>' +
-          '<p class="fs12 txt-3" style="margin:6px 0 0">Lo normal —girarle los ' + Money.format(total) +
-          ' de una vez— no necesita nada de esto.</p></div>') +
+          /* La explicación es para quien va a registrar. A quien sólo consulta
+             se le dice el hecho: a esta caja no se le anotó ninguna entrega. */
+          (Permiso.escribir
+            ? '<p class="fs12 txt-2" style="margin:8px 0 0">Márquelo cuando no se le gire el total de una vez. ' +
+              'Al marcarlo se habilita <b>Registrar entrega</b>: se anota cuánto se le consignó, cuándo y por qué sólo esa ' +
+              'parte, y la caja pasa a <b>C. Parcial</b>. Si al final el líder se conforma con lo recibido, cambie el estado ' +
+              'a <b>Consignada</b> y la caja se cierra con lo entregado.</p>' +
+              '<p class="fs12 txt-3" style="margin:6px 0 0">Lo normal —girarle los ' + Money.format(total) +
+              ' de una vez— no necesita nada de esto.</p>'
+            : '<p class="fs12 txt-2" style="margin:4px 0 0">A esta caja no se le anotaron entregas por partes: ' +
+              'se le gira el total de una vez.</p>') + '</div>') +
       '</div></div>';
   },
 
@@ -9371,9 +9492,9 @@ const VistaCaja = {
       '<span class="ch-sub">' + esc(o.destino.cuando) +
         (o.docs.length ? ' · ' + o.docs.length + ' archivo(s)' : '') + '</span>' +
       '<div class="ch-act">' +
-        '<button class="btn btn-sm" data-act="' + attr(o.accion) + '">' +
+        Permiso.si('<button class="btn btn-sm" data-act="' + attr(o.accion) + '">' +
           Icon('upload', '', 12) + 'Adjuntar</button>' +
-        '<input type="file" id="' + attr(o.input) + '" multiple hidden>' +
+          '<input type="file" id="' + attr(o.input) + '" multiple hidden>') +
       '</div></div><div class="card-b">' +
       (o.docs.length
         /* «Todos» y «Eliminar» van en su propia barra, sobre la lista y a la
@@ -9642,7 +9763,7 @@ const Expediente = {
       opciones.map(o => '<option value="' + attr(o.tipo) + '"' +
         (o.tipo === (cfg.tipoPorDefecto || opciones[0].tipo) ? ' selected' : '') + '>' +
         esc(o.titulo) + '</option>').join('') + '</select>' +
-      '<button class="btn btn-sm btn-primary" data-act="expSubir">' + Icon('upload', '', 13) + 'Adjuntar</button>' +
+      Permiso.si('<button class="btn btn-sm btn-primary" data-act="expSubir">' + Icon('upload', '', 13) + 'Adjuntar</button>') +
       '</div></div>' +
       '<div class="card-b">' +
       '<div class="dz mb16" id="expDz">' + Icon('upload') +
@@ -9680,8 +9801,8 @@ const Expediente = {
       '</div>' +
       '<div class="doc-a">' +
       '<button data-act="expDescargar" data-id="' + attr(d.id) + '" title="Descargar">' + Icon('download', '', 12) + '</button>' +
-      '<button data-act="expEditar" data-id="' + attr(d.id) + '" title="Renombrar">' + Icon('edit', '', 12) + '</button>' +
-      '<button data-act="expEliminar" data-id="' + attr(d.id) + '" title="Eliminar">' + Icon('trash', '', 12) + '</button>' +
+      Permiso.si('<button data-act="expEditar" data-id="' + attr(d.id) + '" title="Renombrar">' + Icon('edit', '', 12) + '</button>' +
+        '<button data-act="expEliminar" data-id="' + attr(d.id) + '" title="Eliminar">' + Icon('trash', '', 12) + '</button>') +
       '</div>' +
       '<div class="doc-i"><div class="dn" title="' + attr(d.nombre) + '">' + esc(d.nombre) + '</div>' +
       '<div class="dm"><span class="pill np ' + meta.color + '">' + esc(meta.label) + '</span></div>' +
@@ -10668,7 +10789,7 @@ const VistaConsignaciones = {
       '<div class="ph-sub">' + todas.length + ' consignación(es) · ' + Money.format(suma) + ' consignados</div></div>' +
       '<div class="ph-actions">' +
       '<button class="btn" data-act="exportar">' + Icon('download', '', 14) + 'Exportar</button>' +
-      '<button class="btn btn-primary" data-ir="consignacion-nueva">' + Icon('plus', '', 14) + 'Nueva consignación</button>' +
+      Permiso.si('<button class="btn btn-primary" data-ir="consignacion-nueva">' + Icon('plus', '', 14) + 'Nueva consignación</button>') +
       '</div></div>' +
 
       '<div class="alert a-info mb16">' + Icon('info') +
@@ -10713,7 +10834,7 @@ const VistaConsignaciones = {
       }).join('')
         : '<tr><td colspan="9">' + Comp.vacio({ icono: 'banco', titulo: 'Sin consignaciones',
             texto: 'Registre la consignación con la que se repone el dinero adelantado.',
-            accion: 'nuevaCons', textoAccion: 'Nueva consignación', iconoAccion: 'plus' }) + '</td></tr>') +
+            accion: Permiso.escribir ? 'nuevaCons' : null, textoAccion: 'Nueva consignación', iconoAccion: 'plus' }) + '</td></tr>') +
       '</tbody></table></div>' +
       Comp.pager({ total: todas.length, tam, pagina: f.pagina, actPag: 'cPagina', actTam: 'cTam' }) +
       '</div></div>';
@@ -10991,8 +11112,8 @@ const VistaConsignacion = {
       Comp.pillOrigen(c.origen) + '</div>' +
       '<div class="ph-sub">' + Fecha.larga(c.fecha) + ' · ' + d.filas.length + ' caja(s) repuesta(s)</div></div>' +
       '<div class="ph-actions">' +
-      '<button class="btn" data-ir="consignacion-editar/' + attr(c.id) + '">' + Icon('edit', '', 14) + 'Editar</button>' +
-      '<button class="btn btn-danger" data-act="eliminar">' + Icon('trash', '', 14) + 'Eliminar</button>' +
+      Permiso.si('<button class="btn" data-ir="consignacion-editar/' + attr(c.id) + '">' + Icon('edit', '', 14) + 'Editar</button>' +
+        '<button class="btn btn-danger" data-act="eliminar">' + Icon('trash', '', 14) + 'Eliminar</button>') +
       '</div></div>' +
 
       '<div class="grid g4 mb16">' +
@@ -11108,7 +11229,7 @@ const VistaPersonas = {
       PersonaRepo.financiadores().length + ' pueden adelantar dinero</div></div>' +
       '<div class="ph-actions">' +
       '<button class="btn" data-act="exportar">' + Icon('download', '', 14) + 'Exportar</button>' +
-      '<button class="btn btn-primary" data-act="nueva">' + Icon('plus', '', 14) + 'Nueva persona</button></div></div>' +
+      Permiso.si('<button class="btn btn-primary" data-act="nueva">' + Icon('plus', '', 14) + 'Nueva persona</button>') + '</div></div>' +
 
       '<div class="card mb16"><div class="card-b" style="padding:12px 14px"><div class="filters" style="margin:0">' +
       '<div class="field" style="flex:1 1 240px"><label>Búsqueda</label>' +
@@ -11143,11 +11264,11 @@ const VistaPersonas = {
         '<td>' + (p.esFinanciador ? '<span class="pill np p-violet">Adelanta</span> ' : '') +
                  (p.esSolicitante ? '<span class="pill np p-blue">Solicita</span>' : '') + '</td>' +
         '<td>' + Comp.pillEstado(p.estado) + '</td>' +
-        '<td class="nowrap"><button class="btn btn-sm btn-ghost btn-icon" data-act="editar" data-id="' + attr(p.id) +
-          '" title="Editar">' + Icon('edit', '', 13) + '</button></td></tr>').join('')
+        '<td class="nowrap">' + Permiso.si('<button class="btn btn-sm btn-ghost btn-icon" data-act="editar" data-id="' + attr(p.id) +
+          '" title="Editar">' + Icon('edit', '', 13) + '</button>') + '</td></tr>').join('')
         : '<tr><td colspan="11">' + Comp.vacio({ icono: 'personas', titulo: 'Sin personas',
             texto: 'Registre a los solicitantes y a quienes adelantan el dinero.',
-            accion: 'nueva', textoAccion: 'Crear persona', iconoAccion: 'plus' }) + '</td></tr>') +
+            accion: Permiso.escribir ? 'nueva' : null, textoAccion: 'Crear persona', iconoAccion: 'plus' }) + '</td></tr>') +
       '</tbody></table></div></div></div>';
 
     Combo.buscador('buscaPer', candidatos.flatMap(p => [
@@ -11330,8 +11451,8 @@ const VistaPersona = {
         .filter(Boolean).join(' · ') || 'Sin datos adicionales') + '</div></div>' +
       '<div class="ph-actions">' +
       '<button class="btn" data-act="exportar">' + Icon('download', '', 14) + 'Exportar historial</button>' +
-      '<button class="btn" data-act="editar">' + Icon('edit', '', 14) + 'Editar ficha</button>' +
-      '<button class="btn btn-primary" data-act="nuevaCaja">' + Icon('plus', '', 14) + 'Nueva caja</button></div></div>' +
+      Permiso.si('<button class="btn" data-act="editar">' + Icon('edit', '', 14) + 'Editar ficha</button>' +
+        '<button class="btn btn-primary" data-act="nuevaCaja">' + Icon('plus', '', 14) + 'Nueva caja</button>') + '</div></div>' +
 
       (!p.esSolicitante && r.numeroCajas > 0
         ? '<div class="alert a-info mb16">' + Icon('info') +
@@ -11511,7 +11632,7 @@ const VistaCategorias = {
       '<div class="page-head"><div><h1>Categorías</h1>' +
       '<div class="ph-sub">' + cats.length + ' categoría(s) · ' + CategoriaRepo.estadisticas().length +
       ' marcadas como medibles estadísticamente</div></div>' +
-      '<div class="ph-actions"><button class="btn btn-primary" data-act="nueva">' + Icon('plus', '', 14) + 'Nueva categoría</button></div></div>' +
+      '<div class="ph-actions">' + Permiso.si('<button class="btn btn-primary" data-act="nueva">' + Icon('plus', '', 14) + 'Nueva categoría</button>') + '</div></div>' +
 
       '<div class="alert a-info mb16">' + Icon('info') +
       '<div>El catálogo es una <b>ayuda</b>, no una restricción: al crear una caja usted puede escribir cualquier concepto ' +
@@ -11532,7 +11653,7 @@ const VistaCategorias = {
         '<td>' + Comp.pillEstado(c.estado) + '</td>' +
         '<td class="nowrap">' +
           '<button class="btn btn-sm btn-ghost btn-icon" data-act="ver" data-id="' + attr(c.id) + '" title="Ver histórico">' + Icon('chart', '', 13) + '</button>' +
-          '<button class="btn btn-sm btn-ghost btn-icon" data-act="editar" data-id="' + attr(c.id) + '" title="Editar">' + Icon('edit', '', 13) + '</button>' +
+          Permiso.si('<button class="btn btn-sm btn-ghost btn-icon" data-act="editar" data-id="' + attr(c.id) + '" title="Editar">' + Icon('edit', '', 13) + '</button>') +
         '</td></tr>').join('') +
       '</tbody></table></div></div></div>' +
 
@@ -11633,7 +11754,7 @@ const VistaMunicipios = {
     cont.innerHTML =
       '<div class="page-head"><div><h1>Municipios</h1>' +
       '<div class="ph-sub">' + muns.length + ' ubicación(es) registradas</div></div>' +
-      '<div class="ph-actions"><button class="btn btn-primary" data-act="nuevo">' + Icon('plus', '', 14) + 'Nuevo municipio</button></div></div>' +
+      '<div class="ph-actions">' + Permiso.si('<button class="btn btn-primary" data-act="nuevo">' + Icon('plus', '', 14) + 'Nuevo municipio</button>') + '</div></div>' +
       '<div class="alert a-info mb16">' + Icon('info') +
       '<div>Cada caja menor conserva el municipio de <b>su</b> operación. Si una persona cambia de municipio, ' +
       'las cajas históricas no se modifican.</div></div>' +
@@ -11649,7 +11770,7 @@ const VistaMunicipios = {
         '<td>' + Comp.pillEstado(m.estado) + '</td>' +
         '<td class="nowrap">' +
         '<button class="btn btn-sm btn-ghost btn-icon" data-ir="municipio/' + attr(m.id) + '" title="Ver histórico">' + Icon('chart', '', 13) + '</button>' +
-        '<button class="btn btn-sm btn-ghost btn-icon" data-act="editar" data-id="' + attr(m.id) + '" title="Editar">' + Icon('edit', '', 13) + '</button>' +
+        Permiso.si('<button class="btn btn-sm btn-ghost btn-icon" data-act="editar" data-id="' + attr(m.id) + '" title="Editar">' + Icon('edit', '', 13) + '</button>') +
         '</td></tr>').join('') +
       '</tbody></table></div></div></div>';
 
@@ -11800,8 +11921,8 @@ const VistaContratos = {
     cont.innerHTML =
       '<div class="page-head"><div><h1>Contratos</h1>' +
       '<div class="ph-sub">' + lista.length + ' contrato(s) · el activo determina todo lo que ve en el resto del sistema</div></div>' +
-      '<div class="ph-actions"><button class="btn btn-primary" data-act="nuevo">' +
-      Icon('plus', '', 14) + 'Nuevo contrato</button></div></div>' +
+      '<div class="ph-actions">' + Permiso.si('<button class="btn btn-primary" data-act="nuevo">' +
+      Icon('plus', '', 14) + 'Nuevo contrato</button>') + '</div></div>' +
 
       '<div class="alert a-info mb16">' + Icon('info') +
       '<div><b>Los contratos son independientes entre sí.</b> Cada uno tiene su propia numeración de cajas ' +
@@ -11847,7 +11968,7 @@ const VistaContratos = {
           (c.observaciones ? '<div class="fs11 txt-3 mt8">' + esc(c.observaciones) + '</div>' : '') +
           '</div>' +
           '<div class="card-f flex g6">' +
-          '<button class="btn btn-sm" data-act="editar" data-id="' + attr(c.id) + '">' + Icon('edit', '', 12) + 'Editar</button>' +
+          Permiso.si('<button class="btn btn-sm" data-act="editar" data-id="' + attr(c.id) + '">' + Icon('edit', '', 12) + 'Editar</button>') +
           (!esActivo ? '<button class="btn btn-sm" data-act="activar" data-id="' + attr(c.id) + '">' +
             Icon('fwd', '', 12) + 'Trabajar aquí</button>' : '') +
           '</div></div>';
@@ -12496,7 +12617,7 @@ const VistaExpediente = {
           '<td class="nowrap">' +
           '<button class="btn btn-sm btn-ghost btn-icon" data-act="expVer" data-id="' + attr(d.id) + '">' + Icon('eye', '', 13) + '</button>' +
           '<button class="btn btn-sm btn-ghost btn-icon" data-act="expDescargar" data-id="' + attr(d.id) + '">' + Icon('download', '', 13) + '</button>' +
-          '<button class="btn btn-sm btn-ghost btn-icon" data-act="expEliminar" data-id="' + attr(d.id) + '">' + Icon('trash', '', 13) + '</button>' +
+          Permiso.si('<button class="btn btn-sm btn-ghost btn-icon" data-act="expEliminar" data-id="' + attr(d.id) + '">' + Icon('trash', '', 13) + '</button>') +
           '</td></tr>';
       }).join('')
         : '<tr><td colspan="8">' + Comp.vacio({ icono: 'folder', titulo: 'Sin documentos',
@@ -15228,13 +15349,15 @@ const VistaRespaldos = {
       '<button class="btn" data-act="exportarJson">' + Icon('db', '', 14) + 'Sólo datos (JSON)</button>' +
       '</div></div></div>' +
 
-      '<div class="card"><div class="card-h"><h3>' + Icon('upload', '', 15) + ' Restaurar respaldo</h3></div><div class="card-b">' +
+      /* Descargar el respaldo sí es de consulta: es leer lo que ya ve en
+         pantalla. Restaurarlo, no: eso reemplaza el trabajo de todos. */
+      Permiso.si('<div class="card"><div class="card-h"><h3>' + Icon('upload', '', 15) + ' Restaurar respaldo</h3></div><div class="card-b">' +
       '<div class="alert a-err mb12" style="padding:9px 11px">' + Icon('warn', '', 14) +
       '<div><b>Operación delicada.</b> Cree un respaldo del estado actual antes de restaurar.</div></div>' +
       '<div class="dz" id="rbDz">' + Icon('upload') +
       '<h4>Arrastre aquí el archivo .dacm</h4><p>o haga clic para seleccionarlo</p></div>' +
       '<div id="rbInfo" class="mt12"></div>' +
-      '</div></div></div>' +
+      '</div></div>') + '</div>' +
 
       '<div class="grid g2 mb16">' +
       '<div class="card"><div class="card-h"><h3>Integridad de los datos</h3>' +
@@ -15259,12 +15382,12 @@ const VistaRespaldos = {
       '<button class="btn" data-act="exportarJson">' + Icon('download', '', 14) + 'Datos en JSON</button>' +
       '</div></div></div></div>' +
 
-      '<div class="card"><div class="card-h"><h3>Zona sensible</h3></div><div class="card-b">' +
+      Permiso.si('<div class="card"><div class="card-h"><h3>Zona sensible</h3></div><div class="card-b">' +
       '<div class="flex g8 wrap aic">' +
       '<button class="btn" data-act="repararTotales">' + Icon('refresh', '', 14) + 'Recalcular todos los totales</button>' +
       '<button class="btn btn-danger" data-act="borrarTodo">' + Icon('trash', '', 14) + 'Borrar toda la información</button>' +
       '<span class="fs11 txt-3">El borrado exige escribir una confirmación y no se puede deshacer.</span>' +
-      '</div></div></div>' +
+      '</div></div></div>') +
 
       (importaciones.length ? '<div class="card mt16"><div class="card-h"><h3>Importaciones registradas</h3></div>' +
         '<div class="card-b flush"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Fecha</th><th>Archivo</th>' +
@@ -15275,7 +15398,9 @@ const VistaRespaldos = {
         '</tbody></table></div></div></div>' : '');
 
     let archivoRestaurar = null;
-    DropZone.montar($('#rbDz'), async files => {
+    /* En solo consulta la tarjeta de restaurar no se dibuja, así que no hay
+       dónde soltar un archivo: sin esto, abrir esta pantalla reventaba. */
+    if ($('#rbDz')) DropZone.montar($('#rbDz'), async files => {
       const f = files[0];
       if (!f) return;
       try {
@@ -15355,7 +15480,7 @@ const VistaRespaldos = {
             problemas.slice(0, 100).map(p => '<tr><td class="nowrap">' + esc(p.tipo) + '</td><td>' + esc(p.detalle) +
               (p.cajaId ? ' <span class="link" data-ir="caja/' + attr(p.cajaId) + '">abrir</span>' : '') + '</td></tr>').join('') +
             '</tbody></table></div>' +
-            '<button class="btn mt12" data-act="repararTotales">' + Icon('refresh', '', 14) + 'Recalcular totales</button>'
+            Permiso.si('<button class="btn mt12" data-act="repararTotales">' + Icon('refresh', '', 14) + 'Recalcular totales</button>')
           : '<div class="alert a-ok">' + Icon('check') +
             '<div><b>Sin problemas.</b> Todas las relaciones, números y totales son consistentes.</div></div>';
       },
@@ -15819,8 +15944,8 @@ const VistaConfiguracion = {
     cont.innerHTML =
       '<div class="page-head"><div><h1>Configuración</h1>' +
       '<div class="ph-sub">Estos valores alimentan el formato impreso, los reportes y toda la aplicación</div></div>' +
-      '<div class="ph-actions"><button class="btn btn-primary btn-lg" data-act="guardar">' +
-      Icon('save', '', 15) + 'Guardar configuración</button></div></div>' +
+      '<div class="ph-actions">' + Permiso.si('<button class="btn btn-primary btn-lg" data-act="guardar">' +
+      Icon('save', '', 15) + 'Guardar configuración</button>') + '</div></div>' +
 
       '<div class="grid g32">' +
       '<div>' +
@@ -16766,6 +16891,63 @@ const Pruebas = {
             }
           } },
 
+        { nombre: 'CRÍTICO · si le cambian el nivel con la página abierta, se le avisa sin recargarle nada', fn: async () => {
+            /* Pasar de «acceso total» a «solo consulta» con la página abierta
+               dejaba los botones puestos: la persona escribía y el servidor se
+               lo rechazaba sin que entendiera por qué. */
+            const previa = localStorage.getItem(Nube.CLAVE_SESION);
+            const accesoReal = Nube.tieneAcceso, escribeReal = Nube.puedeEscribir;
+            const permisoAntes = Permiso.escribir;
+            let escribe = true, preguntas = 0;
+            Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+            try {
+              Nube.guardarSesion({ access_token: 'x', expira: Date.now() + 3600000, correo: 'juan@donaseo.co' });
+              Nube.tieneAcceso = async () => true;
+              Nube.puedeEscribir = async () => { preguntas++; return escribe; };
+              Centinela.detener();
+              Centinela._encendido = true;
+              Centinela._avisadoCambio = false;
+              Permiso.escribir = true;
+
+              await Centinela.revisar();
+              Pruebas.igual(preguntas, 1, 'En cada revisión también se pregunta el nivel');
+              Pruebas.ok(!document.getElementById('avisoPermisos'), 'Sin cambios, no se ve nada');
+
+              escribe = null;
+              await Centinela.revisar();
+              Pruebas.ok(!document.getElementById('avisoPermisos'), 'Si no se pudo saber, tampoco');
+
+              escribe = false;                       // le quitaron el permiso de escribir
+              await Centinela.revisar();
+              const aviso = document.getElementById('avisoPermisos');
+              Pruebas.ok(Boolean(aviso), 'Cuando el nivel cambia, se avisa');
+              Pruebas.ok(/permisos.*cambiaron/i.test(aviso.textContent), 'Diciendo qué pasó', aviso.textContent);
+              Pruebas.ok(Boolean(aviso.querySelector('#avisoPermisosYa')), 'Con el botón para actualizar cuando le convenga');
+              Pruebas.ok(Boolean(Nube.sesion()), 'Sin cerrarle la sesión');
+              Pruebas.ok(Permiso.escribir, 'Ni cambiarle la pantalla por debajo: eso lo decide ella al actualizar');
+
+              await Centinela.revisar();
+              Pruebas.igual(document.querySelectorAll('#avisoPermisos').length, 1, 'Y se avisa UNA vez, no en cada vuelta');
+
+              /* Al revés también: de solo consulta a acceso total. */
+              const el = document.getElementById('avisoPermisos'); if (el) el.remove();
+              Centinela._avisadoCambio = false;
+              Permiso.escribir = false;
+              escribe = true;
+              await Centinela.revisar();
+              Pruebas.ok(Boolean(document.getElementById('avisoPermisos')),
+                'También cuando le DAN permiso: si no, se queda sin botones hasta recargar');
+            } finally {
+              delete document.hidden;
+              const el = document.getElementById('avisoPermisos'); if (el) el.remove();
+              Centinela.detener();
+              Centinela._avisadoCambio = false;
+              Nube.tieneAcceso = accesoReal; Nube.puedeEscribir = escribeReal;
+              Permiso.escribir = permisoAntes;
+              if (previa) localStorage.setItem(Nube.CLAVE_SESION, previa); else localStorage.removeItem(Nube.CLAVE_SESION);
+            }
+          } },
+
         { nombre: 'El centinela mira una vez por minuto, sólo con la pestaña a la vista y de una en una', fn: async () => {
             /* Es una consulta diminuta, pero por cada pestaña abierta de cada
                persona: no puede convertirse en una lluvia sobre el servidor. */
@@ -16821,6 +17003,150 @@ const Pruebas = {
               Centinela.detener();
               Nube.tieneAcceso = accesoReal;
               if (previa) localStorage.setItem(Nube.CLAVE_SESION, previa); else localStorage.removeItem(Nube.CLAVE_SESION);
+            }
+          } },
+
+        { nombre: 'CRÍTICO · una cuenta de solo consulta no puede escribir, ni por descuido', fn: async () => {
+            /* El servidor es quien manda —sus reglas rechazan la escritura— pero
+               la página no debe ni intentarlo: todo lo que escribe sale por el
+               adaptador, y ahí está el muro. Aunque mañana alguien olvide
+               esconder un botón, de aquí no pasa. */
+            const antes = Permiso.escribir;
+            const fetchReal = window.fetch;
+            const responder = (cuerpo, ok) => () => Promise.resolve({
+              ok: ok !== false, status: ok === false ? 500 : 200,
+              json: () => Promise.resolve(cuerpo)
+            });
+            const previa = localStorage.getItem(Nube.CLAVE_SESION);
+            try {
+              Nube.guardarSesion({ access_token: 'x', expira: Date.now() + 3600000, correo: 'conta@donaseo.co' });
+              window.fetch = responder(true);
+              Pruebas.igual(await Nube.puedeEscribir(), true, 'El servidor dice quién escribe');
+              window.fetch = responder(false);
+              Pruebas.igual(await Nube.puedeEscribir(), false, 'Y quién no');
+              window.fetch = () => Promise.reject(new TypeError('Failed to fetch'));
+              Pruebas.igual(await Nube.puedeEscribir(), null, 'Si no se pudo preguntar, no se sabe');
+              Pruebas.ok(/puedeEscribir\(\)\) === true/.test(arrancar.toString()),
+                'Y en la duda el arranque deja la cuenta en solo consulta');
+
+              const ad = Object.create(SupabaseAdapter.prototype);
+              let pedidos = 0;
+              ad._pedir = async () => { pedidos++; return null; };
+
+              Permiso.escribir = false;
+              Pruebas.ok(Permiso.soloLectura(), 'La cuenta queda en solo consulta');
+              Pruebas.igual(Permiso.si('<button>x</button>'), '', 'Y lo que escribe no se dibuja');
+              for (const intento of [
+                () => ad.put('cajas', { id: 'c1' }),
+                () => ad.putMany('cajas', [{ id: 'c1' }]),
+                () => ad.remove('cajas', 'c1'),
+                () => ad.removeWhere('detalles', 'cajaId', 'c1'),
+                () => ad.clear('cajas'),
+                () => ad._subirArchivo({ docId: 'd1' }),
+                () => ad._borrarArchivo('d1')
+              ]) await Pruebas.lanza(intento, 'El muro detiene todo lo que escribe');
+              Pruebas.igual(pedidos, 0, 'Ni se le pide nada al servidor: se corta antes');
+
+              Permiso.escribir = true;
+              await ad.put('cajas', { id: 'c1' });
+              Pruebas.igual(pedidos, 1, 'Con acceso total, el muro no estorba');
+
+              /* Un borrado que el servidor no permite NO da error: devuelve que
+                 todo fue bien sin borrar nada. Eso tiene que cantarse. */
+              ad._pedir = async () => [];
+              await Pruebas.lanza(() => ad.remove('cajas', 'c1'),
+                'Un borrado que el servidor no hizo no se da por bueno');
+              Pruebas.ok(/return=representation/.test(SupabaseAdapter.prototype.remove.toString()),
+                'Para saberlo, se le piden al servidor las filas que borró');
+            } finally {
+              window.fetch = fetchReal;
+              Permiso.escribir = antes;
+              if (previa) localStorage.setItem(Nube.CLAVE_SESION, previa); else localStorage.removeItem(Nube.CLAVE_SESION);
+            }
+          } },
+
+        { nombre: 'CRÍTICO · en solo consulta no se dibuja ni un botón que escriba', fn: async ctx => {
+            const antes = Permiso.escribir;
+            const div = document.createElement('div');
+            div.style.cssText = 'position:fixed;left:-99999px;top:0';
+            document.body.appendChild(div);
+            const escriben = cont => [...cont.querySelectorAll('[data-act],[data-ir]')]
+              .map(e => e.getAttribute('data-act') || ('ir:' + e.getAttribute('data-ir')))
+              .filter(a => /^(nueva|nuevo|editar|eliminar|guardar|borrarTodo|repararTotales|restaurar|adjuntar|expSubir|expEditar|expEliminar|entregaNueva|entregaEditar|entregaEliminar|masAcciones|archivarFormato|nuevaCaja|activar|editarComentario|quitarComentario|docEliminarSel|quitarAdjunto|estadoRapido|recalcular|nuevaCons|nuevaPersonaRapida|adjuntarLegalizacion|adjuntarComprobante|aplicar)/.test(a)
+                           || /^ir:(caja-nueva|caja-editar|consignacion-nueva|consignacion-editar|importar)/.test(a));
+            try {
+              Permiso.escribir = false;
+              for (const [nombre, vista] of [['cajas', VistaCajas], ['personas', VistaPersonas],
+                                            ['categorías', VistaCategorias], ['municipios', VistaMunicipios],
+                                            ['contratos', VistaContratos], ['copias de seguridad', VistaRespaldos],
+                                            ['configuración', VistaConfiguracion], ['consignaciones', VistaConsignaciones]]) {
+                await vista.render(div);
+                Pruebas.igual(escriben(div).join(', '), '', 'En «' + nombre + '» no queda ningún botón que escriba');
+              }
+              /* Y lo que sólo lee sigue estando: no se escondió media pantalla. */
+              await VistaCajas.render(div);
+              Pruebas.ok(div.querySelector('[data-act="exportarExcel"]'), 'Pero sigue pudiendo exportar');
+              await VistaRespaldos.render(div);
+              Pruebas.ok(div.querySelector('[data-act="crear"]'), 'Y descargar el respaldo completo');
+              Pruebas.ok(div.querySelector('[data-act="verificar"]'), 'Y revisar la integridad');
+              Pruebas.ok(!/Zona sensible/.test(div.textContent), 'La zona sensible no aparece');
+              Pruebas.ok(!/Restaurar respaldo/.test(div.textContent), 'Ni la de restaurar');
+
+              const nav = Shell.htmlNav('dashboard', false);
+              Pruebas.ok(!/caja-nueva/.test(nav) && !/importar/.test(nav),
+                'El menú no ofrece registrar ni importar');
+              Pruebas.ok(/Estadísticas/.test(nav) && /Copias de seguridad/.test(nav), 'Pero sí todo lo de mirar');
+              Pruebas.ok(/Solo consulta/.test(Shell.htmlNivel()), 'Y se dice claramente en la barra');
+              const rutas = registrarRutas.toString();
+              Pruebas.ok(/RW\(c => VistaCajaForm\.render/.test(rutas) && /RW\(c => Importador\.render/.test(rutas),
+                'Las pantallas de registro pasan por el guardián');
+              /* Y el guardián hace su trabajo de verdad, no sólo de nombre. */
+              let abrio = false;
+              soloSiEscribe(() => { abrio = true; })(div);
+              Pruebas.ok(!abrio, 'En solo consulta, la pantalla de registro no se abre');
+              Pruebas.ok(/solo consulta/i.test(div.textContent), 'Y se explica por qué');
+              Permiso.escribir = true;
+              soloSiEscribe(() => { abrio = true; })(div);
+              Pruebas.ok(abrio, 'Con acceso total se abre como siempre');
+              Permiso.escribir = false;
+
+              Permiso.escribir = true;
+              await VistaCajas.render(div);
+              Pruebas.ok(div.querySelector('[data-ir="caja-nueva"]'), 'Con acceso total vuelve a estar todo');
+              Pruebas.igual(Shell.htmlNivel(), '', 'Y sin distintivo de solo consulta');
+            } finally {
+              div.remove();
+              Permiso.escribir = antes;
+            }
+          } },
+
+        { nombre: 'CRÍTICO · en solo consulta se puede cambiar de contrato sin escribir en la base', fn: async ctx => {
+            /* El contrato activo vive en la configuración, que es de todos: una
+               cuenta que sólo mira no puede escribirla, y tampoco debería
+               cambiarle el contrato a los demás. */
+            const antes = Permiso.escribir;
+            const original = ContratoRepo.activoId();
+            const propioPrevio = Prefs.get('contratoPropio');
+            const otro = await ContratoRepo.guardar({ nombre: 'CONTRATO DE CONSULTA', prefijoCaja: 'QC', prefijoConsignacion: 'QCC' });
+            try {
+              const enLaBase = (Cache.config || {}).contratoActivoId;
+              Permiso.escribir = false;
+              await ContratoRepo.cambiarActivo(otro.id);
+              Pruebas.igual(ContratoRepo.activoId(), otro.id, 'Ve el contrato que eligió');
+              Pruebas.igual((Cache.config || {}).contratoActivoId, enLaBase,
+                'Sin tocar el que está guardado para todos los demás');
+              Pruebas.igual(Prefs.get('contratoPropio'), otro.id, 'Su elección vive en su navegador');
+
+              Permiso.escribir = true;
+              Pruebas.igual(ContratoRepo.activoId(), enLaBase,
+                'Con acceso total manda el de la base, como siempre');
+              Pruebas.ok(/Permiso\.soloLectura\(\)/.test(Semillas.aplicar.toString()),
+                'Y el arranque no intenta reparar nada cuando no puede escribir');
+            } finally {
+              Permiso.escribir = antes;
+              if (propioPrevio) Prefs.set('contratoPropio', propioPrevio); else Prefs.set('contratoPropio', null);
+              await ContratoRepo.cambiarActivo(original);
+              await ContratoRepo.eliminar(otro.id);
             }
           } },
 
@@ -22275,10 +22601,37 @@ const Centinela = {
     if (!this._encendido || this._enCurso || document.hidden || !Nube.sesion()) return;
     this._enCurso = true;
     try {
-      if (await Nube.tieneAcceso() === false) await this.cerrarPuerta();
+      const acceso = await Nube.tieneAcceso();
+      if (acceso === false) { await this.cerrarPuerta(); return; }
+      if (acceso !== true) return;        // no se pudo saber: no se decide nada
+      /* Y si sigue entrando, ¿con el mismo nivel? Pasar de «acceso total» a
+         «solo consulta» con la página abierta dejaba los botones puestos: la
+         persona escribía y el servidor se lo rechazaba sin que entendiera por
+         qué. Al revés, se quedaba sin botones hasta recargar. */
+      const escribe = await Nube.puedeEscribir();
+      if (typeof escribe === 'boolean' && escribe !== Permiso.escribir) this.avisarCambio();
     } finally {
       this._enCurso = false;
     }
+  },
+
+  /**
+   * Le cambiaron el nivel. No se recarga sola ni se cierra nada: podría estar
+   * a medio escribir una caja. Se avisa una vez, arriba, y se le ofrece
+   * actualizar cuando le convenga.
+   */
+  avisarCambio() {
+    if (this._avisadoCambio || document.getElementById('avisoPermisos')) return;
+    this._avisadoCambio = true;
+    const el = document.createElement('div');
+    el.id = 'avisoPermisos';
+    el.className = 'aviso-permisos';
+    el.innerHTML = Icon('warn', '', 15) +
+      '<span>Sus permisos en caja menor cambiaron. Guarde lo que esté haciendo y actualice la página.</span>' +
+      '<button class="btn btn-sm btn-primary" id="avisoPermisosYa">' + Icon('refresh', '', 13) + 'Actualizar ahora</button>';
+    document.body.appendChild(el);
+    const b = el.querySelector('#avisoPermisosYa');
+    if (b) b.onclick = () => location.reload();
   },
 
   /** Le quitaron el acceso: se borra lo cargado, se cierra la sesión y se avisa. */
@@ -22332,6 +22685,14 @@ const Semillas = {
   ],
 
   async aplicar(forzar) {
+    /* Una cuenta de solo consulta no repara nada: todo lo de aquí abajo
+       escribe, y el servidor se lo rechazaría. Se queda con la configuración
+       que ya existe y sigue. Si la base necesitara una reparación, la hará el
+       primero que entre con acceso total. */
+    if (Permiso.soloLectura()) {
+      Cache.config = (await db.get('configuracion', 'cfg_default')) || Modelo.configuracion({});
+      return;
+    }
     /* configuración */
     let cfg = await db.get('configuracion', 'cfg_default');
     if (!cfg || forzar) {
@@ -22640,17 +23001,34 @@ const Semillas = {
 /* --------------------------------------------------------------------------
    Registro de rutas
    -------------------------------------------------------------------------- */
+/* Las pantallas que sólo sirven para registrar no se dibujan a medias: si se
+   llega por la dirección, se explica por qué no están. Van aquí fuera, con
+   nombre, para poder probarlas. */
+function avisoConsulta(c) {
+  Shell.titulo('Solo consulta');
+  c.innerHTML = Comp.vacio({ icono: 'shield', titulo: 'Su cuenta es de solo consulta',
+    texto: 'Puede ver, imprimir y descargar todo lo de caja menor, pero no registrar ni cambiar nada. ' +
+           'Si necesita registrar, pídale el acceso total al administrador.',
+    accion: 'inicio', textoAccion: 'Ir al dashboard', iconoAccion: 'dashboard' });
+  setAcciones({ inicio: () => Router.ir('dashboard') });
+}
+/** Envuelve una pantalla de registro: en solo consulta, avisa en vez de abrirla. */
+function soloSiEscribe(fn) {
+  return (c, p) => (Permiso.soloLectura() ? avisoConsulta(c) : fn(c, p));
+}
+
 function registrarRutas() {
   const R = Router.registrar.bind(Router);
+  const RW = soloSiEscribe;
   R('dashboard',            c => VistaDashboard.render(c));
   R('cajas',                c => VistaCajas.render(c));
   R('caja',                 (c, p) => VistaCaja.render(c, p));
-  R('caja-nueva',           c => VistaCajaForm.render(c, []));
-  R('caja-editar',          (c, p) => VistaCajaForm.render(c, p));
+  R('caja-nueva',           RW(c => VistaCajaForm.render(c, [])));
+  R('caja-editar',          RW((c, p) => VistaCajaForm.render(c, p)));
   R('consignaciones',       c => VistaConsignaciones.render(c));
   R('consignacion',         (c, p) => VistaConsignacion.render(c, p));
-  R('consignacion-nueva',   c => VistaConsignacionForm.render(c, []));
-  R('consignacion-editar',  (c, p) => VistaConsignacionForm.render(c, p));
+  R('consignacion-nueva',   RW(c => VistaConsignacionForm.render(c, [])));
+  R('consignacion-editar',  RW((c, p) => VistaConsignacionForm.render(c, p)));
   R('personas',             c => VistaPersonas.render(c));
   R('persona',              (c, p) => VistaPersona.render(c, p));
   R('categorias',           c => VistaCategorias.render(c));
@@ -22661,7 +23039,7 @@ function registrarRutas() {
   R('expediente',           c => VistaExpediente.render(c));
   R('estadisticas',         c => VistaEstadisticas.render(c));
   R('analisis',             c => VistaAnalisis.render(c));
-  R('importar',             c => Importador.render(c));
+  R('importar',             RW(c => Importador.render(c)));
   R('respaldos',            c => VistaRespaldos.render(c));
   R('contratos',            c => VistaContratos.render(c));
   R('configuracion',        c => VistaConfiguracion.render(c));
@@ -22725,6 +23103,10 @@ async function arrancar() {
       Sesion.sinAcceso((Nube.sesion() || {}).correo);
       return;
     }
+    /* Y con qué nivel entra. Ante la duda, solo consulta: no deja a nadie
+       fuera —ve todo igual— y evita ofrecerle lo que el servidor le va a
+       rechazar. */
+    Permiso.escribir = (await Nube.puedeEscribir()) === true;
 
     msg('Abriendo la base de datos…');
     db = new SupabaseAdapter();
