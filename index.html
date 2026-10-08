@@ -329,6 +329,8 @@ tr.fila-rep svg{vertical-align:-2px;opacity:.65}
 /* `.inp` crece hasta llenar la fila y aplastaba el nombre del municipio
    hasta dejarlo en una letra: aqui el ancho es fijo. */
 .rep-monto{flex:0 0 122px;width:122px;height:28px;font-size:12px;text-align:right}
+/* con un solo municipio, el gasto entero: se lee donde iría la cifra */
+.rep-entero{flex:0 0 122px;width:122px;text-align:right;font-weight:700;font-size:12.5px;padding-right:10px}
 .rep-pie{margin-top:10px;font-size:12.5px}
 .rep-ok{color:var(--ok-600);font-weight:650}
 .rep-mal{color:var(--dang-500);font-weight:650}
@@ -4340,6 +4342,17 @@ const Finanzas = {
    * Si el valor tuviera centavos (nunca en una factura, pero puede escribirse)
    * se reparte al centavo, que sigue siendo exacto.
    */
+  /**
+   * ¿Esta fila es UNA PARTE de un gasto repartido entre varios municipios? Una
+   * línea asignada entera a una sola sede también lleva su marca de reparto
+   * (así se recuerda su municipio al volver a editarla), pero no es «una
+   * parte» de nada: decirlo confundiría al leer el impreso.
+   */
+  esParte(d, detalles) {
+    if (!d || !d.repartoId) return false;
+    return (detalles || []).filter(x => x.repartoId === d.repartoId).length > 1;
+  },
+
   partesIguales(valor, n) {
     if (n < 1) return [];
     const pesos = valor % 100 === 0;
@@ -4350,7 +4363,10 @@ const Finanzas = {
 
   repartirEntreMunicipios(valor, municipios) {
     const lista = (municipios || []).filter(m => m && m.municipioId);
-    if (lista.length < 2) return [];
+    /* Con UN municipio no se reparte nada: el gasto entero es de esa sede. Es
+       el caso de dos envíos pagados con una sola consignación, cada uno a una
+       sede distinta: cada línea dice la suya. */
+    if (!lista.length) return [];
     const ids = new Set(lista.map(m => m.municipioId));
     if (ids.size !== lista.length)
       throw new ErrorDominio('Un municipio no puede aparecer dos veces en el mismo reparto.', 'REPARTO');
@@ -8391,7 +8407,7 @@ const VistaCajas = {
               /* La columna del municipio sólo sale cuando hay algo repartido:
                  en una caja normal repetiría la ubicación en todas las filas. */
               (hayReparto ? '<td class="nowrap">' + esc(MunicipioRepo.nombre(d.municipioId) ||
-                c.municipioNombre || '—') + (d.repartoId ? ' <span class="txt-3 fs11">parte</span>' : '') +
+                c.municipioNombre || '—') + (Finanzas.esParte(d, dets) ? ' <span class="txt-3 fs11">parte</span>' : '') +
                 '</td>' : '') +
               '<td class="num">' + Money.format(d.valor) + '</td></tr>';
           }).join('') +
@@ -9130,7 +9146,7 @@ const VistaCaja = {
           '<td>' + esc(d.descripcion || '—') + '</td>' +
           (hayReparto ? '<td class="nowrap">' +
             esc(MunicipioRepo.nombre(d.municipioId) || caja.municipioNombre || '—') +
-            (d.repartoId ? ' <span class="pill np p-blue">PARTE</span>' : '') + '</td>' : '') +
+            (Finanzas.esParte(d, detalles) ? ' <span class="pill np p-blue">PARTE</span>' : '') + '</td>' : '') +
           (hayMedidas ? '<td class="num txt-3">' + (d.cantidad != null ? d.cantidad : '') + '</td>' +
             '<td class="num txt-3">' + (d.valorUnitario ? Money.format(d.valorUnitario) : '') + '</td>' : '') +
           '<td class="num"><b>' + Money.format(d.valor) + '</b></td></tr>').join('') +
@@ -10338,30 +10354,34 @@ const VistaCajaForm = {
     const valor = d.valor || 0;
     if (valor <= 0) { Toast.warn('Escriba primero cuanto costo este gasto.'); return; }
     const municipios = MunicipioRepo.todos().slice().sort(U.by('nombre'));
-    if (municipios.length < 2) { Toast.warn('Hace falta tener al menos dos municipios registrados.'); return; }
+    if (!municipios.length) { Toast.warn('Todavía no hay municipios registrados.'); return; }
 
     /* Se trabaja sobre una copia: si se cierra sin aplicar, la linea queda
        exactamente como estaba. */
     let sel = (d.municipios || []).map(m => ({ municipioId: m.municipioId, monto: m.monto }));
     let aMano = sel.length > 1 && !VistaCajaForm.repartoEsIgual(sel, valor);
+    /* Las cifras que la persona escribió ella misma. Cuando sólo queda UNA por
+       escribir, esa se completa sola con lo que falta: con dos sedes basta
+       escribir una cifra. */
+    let tocados = new Set();
 
     const igualar = () => {
-      if (aMano || sel.length < 2) return;
+      if (aMano || !sel.length) return;
       const partes = Finanzas.partesIguales(valor, sel.length);
       sel.forEach((m, k) => { m.monto = partes[k]; });
     };
 
     Modal.abrir({
-      titulo: 'Repartir entre municipios',
+      titulo: 'Municipio de este gasto',
       subtitulo: (d.categoriaNombre || 'Gasto') + (d.elemento ? ' \u00b7 ' + d.elemento : ''),
       cuerpo:
-        '<p class="fs12 txt-2 mb12">Este gasto de <b>' + Money.format(valor) + '</b> se cobro por varios ' +
-        'municipios a la vez. Marque cuales y el sistema lo reparte por partes iguales. ' +
-        'Si conoce la cifra exacta de alguno, puede corregirla.</p>' +
+        '<p class="fs12 txt-2 mb12">Marque a qué municipio corresponde este gasto de <b>' + Money.format(valor) +
+        '</b>. Si se cobró por varios a la vez, márquelos todos: el sistema lo reparte por partes iguales, ' +
+        'y si conoce la cifra exacta de alguno, escríbala y el último se completa solo.</p>' +
         '<div class="rep-lista" id="repLista"></div>' +
         '<div class="rep-pie" id="repPie"></div>',
       pie: '<button class="btn" data-cerrar>Cancelar</button>' +
-           '<button class="btn btn-primary" id="repOk">Aplicar reparto</button>',
+           '<button class="btn btn-primary" id="repOk">Aplicar</button>',
       alMontar: el => {
         const lista = el.querySelector('#repLista');
         const pie = el.querySelector('#repPie');
@@ -10369,10 +10389,20 @@ const VistaCajaForm = {
 
         const pintarPie = () => {
           const suma = U.sumBy(sel, x => x.monto || 0);
-          const cuadra = sel.length > 1 && suma === valor;
-          pie.innerHTML = sel.length < 2
-            ? '<span class="txt-3">Marque al menos dos municipios.</span>'
-            : 'Suma del reparto: <b class="' + (cuadra ? 'rep-ok' : 'rep-mal') + '">' + Money.format(suma) +
+          const cuadra = sel.length > 0 && suma === valor;
+          if (!sel.length) {
+            pie.innerHTML = '<span class="txt-3">Marque uno o varios municipios.</span>';
+            btnOk.disabled = true;
+            return;
+          }
+          if (sel.length === 1) {
+            pie.innerHTML = 'Todo el gasto queda en <b>' + esc(MunicipioRepo.nombre(sel[0].municipioId) || '') +
+              '</b> <span class="rep-ok">\u2713</span>';
+            btnOk.disabled = false;
+            return;
+          }
+          pie.innerHTML =
+            'Suma del reparto: <b class="' + (cuadra ? 'rep-ok' : 'rep-mal') + '">' + Money.format(suma) +
               '</b> de ' + Money.format(valor) +
               (cuadra ? ' <span class="rep-ok">\u2713</span>'
                       : ' <span class="rep-mal">' +
@@ -10384,19 +10414,22 @@ const VistaCajaForm = {
                        'Volver a repartir por igual</button>' : '');
           btnOk.disabled = !cuadra;
           const btnIgual = pie.querySelector('#repIgual');
-          if (btnIgual) btnIgual.onclick = () => { aMano = false; pintar(); };
+          if (btnIgual) btnIgual.onclick = () => { aMano = false; tocados = new Set(); pintar(); };
         };
 
         const pintar = () => {
           igualar();
           lista.innerHTML = municipios.map(m => {
             const p = sel.find(x => x.municipioId === m.id);
+            /* Con un solo municipio no hay cifra que escribir: es el gasto
+               entero. Se enseña, no se ofrece cambiarla. */
             return '<label class="rep-fila' + (p ? ' on' : '') + '">' +
               '<input type="checkbox" data-mun="' + attr(m.id) + '"' + (p ? ' checked' : '') + '>' +
               '<span class="rep-nom">' + esc(m.nombre) + '</span>' +
-              (p ? '<input class="inp inp-money rep-monto" data-mon="' + attr(m.id) + '" value="' +
-                   attr(Money.formatInput(p.monto || 0)) + '">'
-                 : '<span class="txt-3 fs11">\u2014</span>') +
+              (p && sel.length === 1 ? '<span class="rep-entero mono">' + Money.format(valor) + '</span>'
+                : p ? '<input class="inp inp-money rep-monto" data-mon="' + attr(m.id) + '" value="' +
+                      attr(Money.formatInput(p.monto || 0)) + '">'
+                    : '<span class="txt-3 fs11">\u2014</span>') +
               '</label>';
           }).join('');
           pintarPie();
@@ -10409,6 +10442,7 @@ const VistaCajaForm = {
               /* Al cambiar quienes son, se vuelve a repartir por igual: los
                  importes anteriores ya no querrian decir nada. */
               aMano = false;
+              tocados = new Set();
               pintar();
             };
           });
@@ -10421,6 +10455,20 @@ const VistaCajaForm = {
                  toca el reparto ni se marca como corregido a mano. */
               if (v === p.monto) return;
               aMano = true; p.monto = v;
+              tocados.add(p.municipioId);
+              /* Si sólo queda una cifra sin escribir, se completa con lo que
+                 falta. Se pone directo en su casilla, sin avisarle a la casilla
+                 —si no, contaría como escrita a mano—. Si lo escrito ya pasa del
+                 total, no se inventa un negativo: se deja y el pie avisa. */
+              const pendientes = sel.filter(x => !tocados.has(x.municipioId));
+              if (pendientes.length === 1) {
+                const resto = valor - U.sumBy(sel.filter(x => x !== pendientes[0]), x => x.monto || 0);
+                if (resto >= 0) {
+                  pendientes[0].monto = resto;
+                  const casilla = lista.querySelector('[data-mon="' + pendientes[0].municipioId + '"]');
+                  if (casilla) { casilla.value = Money.formatInput(resto); casilla.dataset.cents = String(resto); }
+                }
+              }
               /* Solo se repinta el pie: repintar la lista entera le quitaria
                  el foco a quien esta escribiendo la cifra. */
               pintarPie();
@@ -10434,7 +10482,9 @@ const VistaCajaForm = {
           d.municipios = sel.slice();
           Modal.cerrar(el);
           this.pintarDetalles(); this.pintarTotales();
-          Toast.ok('Gasto repartido entre ' + sel.length + ' municipios.');
+          Toast.ok(sel.length === 1
+            ? 'Gasto asignado a ' + (MunicipioRepo.nombre(sel[0].municipioId) || 'ese municipio') + '.'
+            : 'Gasto repartido entre ' + sel.length + ' municipios.');
         };
       }
     });
@@ -10551,8 +10601,8 @@ const VistaCajaForm = {
         '</select></td>' +
       '<td><input class="inp inp-money" data-val="' + i + '" value="' + attr(Money.formatInput(d.valor || 0)) + '" placeholder="0"></td>' +
       '<td class="nowrap">' +
-        '<button class="btn btn-sm btn-ghost btn-icon' + (d.municipios && d.municipios.length > 1 ? ' rep-on' : '') +
-          '" data-act="repartir" data-i="' + i + '" data-tip="Repartir este gasto entre varios municipios">' +
+        '<button class="btn btn-sm btn-ghost btn-icon' + (d.municipios && d.municipios.length ? ' rep-on' : '') +
+          '" data-act="repartir" data-i="' + i + '" data-tip="Municipio de este gasto: uno, o varios repartidos">' +
           Icon('pin', '', 13) + '</button>' +
         '<button class="btn btn-sm btn-ghost btn-icon" data-act="delDetalle" data-i="' + i + '" data-tip="Quitar">' +
           Icon('trash', '', 13) + '</button></td>' +
@@ -10565,7 +10615,10 @@ const VistaCajaForm = {
           d.municipios.map(m => esc(MunicipioRepo.nombre(m.municipioId) || '?') +
             ' <span class="mono">' + Money.format(m.monto) + '</span>').join(' &middot; ') +
           '</td></tr>'
-        : '')).join('');
+        : d.municipios && d.municipios.length === 1
+          ? '<tr class="fila-rep"><td></td><td colspan="6">' + Icon('pin', '', 11) +
+            ' <b>Todo para ' + esc(MunicipioRepo.nombre(d.municipios[0].municipioId) || '?') + '</b></td></tr>'
+          : '')).join('');
 
     // montar combos y money inputs de cada fila
     this.estado.detalles.forEach((d, i) => {
@@ -13430,7 +13483,7 @@ const Documento = {
           '<td>' + esc(d.elemento || '') + '</td>' +
           '<td>' + esc(d.descripcion || '') + '</td>' +
           (hayReparto ? '<td>' + esc(MunicipioRepo.nombre(d.municipioId) || caja.municipioNombre || '') +
-            (d.repartoId ? ' <i>(parte)</i>' : '') + '</td>' : '') +
+            (Finanzas.esParte(d, detalles) ? ' <i>(parte)</i>' : '') + '</td>' : '') +
           '<td class="n">' + (d.valorUnitario ? Money.format(d.valorUnitario) : '') + '</td>' +
           '<td class="n">' + Money.format(d.valor) + '</td>' +
         '</tr>').join('') +
@@ -20787,6 +20840,116 @@ const Pruebas = {
             Pruebas.igual(p.total, 30000000, 'Andes ve $300.000, no $1.020.000');
             Pruebas.ok(p.total < ctx.cajaReparto.total,
               'Y desde luego menos que la caja completa');
+          } },
+
+        { nombre: 'CRÍTICO · dos envíos a sedes distintas, pagados con una sola consignación', fn: async ctx => {
+            /* El caso que lo pidió (08/10/2026): en la misma caja, un envío de
+               $195.000 a San Jerónimo y otro de $18.000 a La Pintada. La ventana
+               exigía marcar al menos DOS municipios, así que no había forma de
+               decir «esta línea entera es de esta sede». */
+            const env = await CategoriaRepo.obtenerOCrear('Envío');
+            const sj = await MunicipioRepo.obtenerOCrear('San Jerónimo');
+            const lp = await MunicipioRepo.obtenerOCrear('La Pintada');
+            const sede = await MunicipioRepo.obtenerOCrear('Medellín');
+            const caja = await CajaService.crear({
+              fecha: '2026-10-08', solicitanteId: ctx.fernando.id, municipioId: sede.id,
+              estado: EstadoCaja.PENDIENTE,
+              detalles: [
+                { categoriaId: env.id, elemento: 'Transporte de hidroretenedor', valor: 19500000,
+                  municipios: [{ municipioId: sj.id }] },
+                { categoriaId: env.id, elemento: 'Envío de insumos', valor: 1800000,
+                  municipios: [{ municipioId: lp.id }] }
+              ]
+            });
+            Pruebas.igual(caja.total, 21300000, 'La caja suma los dos envíos');
+            const dets = await CajaRepo.detalles(caja.id);
+            Pruebas.igual(dets.length, 2, 'Dos líneas, una por envío: nada se partió');
+            const de = id => dets.find(d => d.municipioId === id);
+            Pruebas.igual((de(sj.id) || {}).valor, 19500000, 'El primero queda entero en San Jerónimo');
+            Pruebas.igual((de(lp.id) || {}).valor, 1800000, 'Y el segundo entero en La Pintada');
+            Pruebas.ok(!dets.some(d => d.municipioId === sede.id),
+              'Ninguno se queda en la ubicación de la caja, que no es la de los envíos');
+            Pruebas.ok(dets.every(d => !Finanzas.esParte(d, dets)), 'Y ninguno es «una parte» de nada');
+
+            /* Las cuentas por municipio: cada sede su envío, y nada se pierde. */
+            const aporte = Finanzas.porMunicipio([caja], new Map([[caja.id, dets]]), new Map());
+            const cuanto = n => (aporte.find(m => m.etiqueta === n) || { total: 0 }).total;
+            Pruebas.igual(cuanto('San Jerónimo'), 19500000, 'Las estadísticas le cuentan su envío a San Jerónimo');
+            Pruebas.igual(cuanto('La Pintada'), 1800000, 'Y el suyo a La Pintada');
+            Pruebas.igual(U.sumBy(aporte, m => m.total), caja.total, 'Sumando exactamente la caja');
+
+            /* El impreso dice la sede de cada envío y no lo llama «parte». */
+            const html = await Documento.construir(await CajaRepo.get(caja.id));
+            Pruebas.ok(/MUNICIPIO/.test(html), 'El impreso trae la columna del municipio');
+            Pruebas.ok(html.includes('San Jerónimo') && html.includes('La Pintada'), 'Con la sede de cada envío');
+            Pruebas.ok(!/\(parte\)/.test(html), 'Sin llamar «parte» a lo que no se repartió');
+
+            /* Al volver a editarla, cada línea recuerda su sede. */
+            const agr = VistaCajaForm.agruparRepartos(dets);
+            Pruebas.igual(agr.length, 2, 'El formulario ve las dos líneas');
+            Pruebas.ok(agr.every(l => l.municipios && l.municipios.length === 1 && l.municipios[0].monto === l.valor),
+              'Cada una con su único municipio y su valor entero');
+
+            /* Y un reparto de verdad sigue diciendo «parte». */
+            const rep = await CajaRepo.detalles(ctx.cajaReparto.id);
+            Pruebas.ok(rep.filter(d => d.repartoId).every(d => Finanzas.esParte(d, rep)),
+              'Las tres partes de la recolección siguen siendo partes');
+            Pruebas.ok(/\(parte\)/.test(await Documento.construir(ctx.cajaReparto)),
+              'Y así lo dice su impreso');
+          } },
+
+        { nombre: 'La ventana de municipios acepta uno solo y completa la última cifra', fn: async () => {
+            const sj = await MunicipioRepo.obtenerOCrear('San Jerónimo');
+            const lp = await MunicipioRepo.obtenerOCrear('La Pintada');
+            const pausa = ms => new Promise(r => setTimeout(r, ms));
+            const estadoAntes = VistaCajaForm.estado;
+            const pDet = VistaCajaForm.pintarDetalles, pTot = VistaCajaForm.pintarTotales;
+            const ventana = () => [...document.querySelectorAll('#modals .modal-bd')].pop();
+            const marcar = async (v, id) => {
+              const c = v.querySelector('[data-mun="' + id + '"]');
+              c.checked = true; c.dispatchEvent(new Event('change')); await pausa(20);
+            };
+            try {
+              VistaCajaForm.pintarDetalles = () => {}; VistaCajaForm.pintarTotales = () => {};
+              VistaCajaForm.estado = { detalles: [{ categoriaNombre: 'Envío', valor: 19500000 }] };
+              const d = VistaCajaForm.estado.detalles[0];
+
+              VistaCajaForm.abrirReparto(0); await pausa(60);
+              let v = ventana();
+              Pruebas.ok(v.querySelector('#repOk').disabled, 'Sin marcar nada no se puede aplicar');
+              Pruebas.ok(/uno o varios/i.test(v.querySelector('#repPie').textContent), 'Y lo dice');
+
+              await marcar(v, sj.id);
+              Pruebas.ok(!v.querySelector('#repOk').disabled, 'Con UN municipio ya se puede aplicar');
+              Pruebas.ok(/Todo el gasto queda en San Jerónimo/.test(v.querySelector('#repPie').textContent),
+                'Y se dice que todo el gasto queda ahí');
+              Pruebas.ok(!v.querySelector('[data-mon]'), 'Sin cifra que escribir: es el gasto entero');
+              v.querySelector('#repOk').click(); await pausa(30);
+              Pruebas.igual(JSON.stringify(d.municipios), JSON.stringify([{ municipioId: sj.id, monto: 19500000 }]),
+                'La línea queda entera en San Jerónimo');
+
+              /* Dos sedes con cifras distintas: con escribir una basta. */
+              VistaCajaForm.abrirReparto(0); await pausa(60);
+              v = ventana();
+              await marcar(v, lp.id);
+              const casilla = id => v.querySelector('[data-mon="' + id + '"]');
+              const escribir = (inp, texto) => { inp.value = texto; inp.dispatchEvent(new Event('input')); };
+              escribir(casilla(sj.id), '120000');
+              Pruebas.igual(Money.parse(casilla(lp.id).value), 7500000, 'La otra se completa sola con lo que falta');
+              Pruebas.ok(!v.querySelector('#repOk').disabled, 'Y ya cuadra: se puede aplicar');
+              escribir(casilla(lp.id), '80000');
+              Pruebas.igual(Money.parse(casilla(sj.id).value), 12000000,
+                'Lo que se escribió a mano no se cambia por su cuenta');
+              Pruebas.ok(v.querySelector('#repOk').disabled, 'Si las dos a mano no cuadran, no deja aplicar');
+              escribir(casilla(lp.id), '75000');
+              v.querySelector('#repOk').click(); await pausa(30);
+              Pruebas.igual(d.municipios.map(m => m.monto).join(','), '12000000,7500000',
+                'Queda con las dos cifras sabidas');
+            } finally {
+              for (let i = 0; i < 4 && document.querySelector('#modals .modal-bd'); i++) Modal.cerrarTop();
+              VistaCajaForm.pintarDetalles = pDet; VistaCajaForm.pintarTotales = pTot;
+              VistaCajaForm.estado = estadoAntes;
+            }
           } },
 
         { nombre: 'CRÍTICO · el reparto no pierde ni inventa dinero', fn: () => {
